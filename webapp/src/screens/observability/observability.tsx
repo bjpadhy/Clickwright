@@ -1,5 +1,6 @@
 import { toast } from "sonner"
 
+import { observe } from "@/api/observability"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent } from "@/components/ui/tabs"
 import { SegmentedTab, SegmentedTabsList } from "@/components/ui-kit/controls"
@@ -48,7 +49,16 @@ export function Observability() {
     >
       <ScreenHeader title="Observability" subtitle={SUBTITLE[obsTab]}>
         {/* Database health links out to ClickStack from inside its own cards */}
-        {obsTab !== "stack" ? (
+        {obsTab === "log" ? (
+          // A real download from the backend, not a toast — the changelog is a
+          // submission artifact.
+          <Button asChild className={solidButtonSm}>
+            <a href={observe.changelogExportUrl} download>
+              <Icon name={cta.icon} size={14} />
+              {cta.label}
+            </a>
+          </Button>
+        ) : obsTab !== "stack" ? (
           <Button onClick={() => toast.success(cta.notice)} className={solidButtonSm}>
             <Icon name={cta.icon} size={14} />
             {cta.label}

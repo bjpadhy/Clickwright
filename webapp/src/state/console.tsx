@@ -18,7 +18,8 @@ export type NavId = "chat" | "instr" | "obs" | "dash"
 export type InstrTab = "run" | "hist"
 export type ObsTab = "traces" | "stack" | "log"
 export type TraceFilter = "all" | AgentKind
-export type QueryFilter = "all" | "analytics" | "instrumentation"
+/** Mirrors the agents that can appear in system.query_log's log_comment. */
+export type QueryFilter = "all" | "analytics" | "instrumentation" | "context"
 export type LogFilter = "all" | "table" | "ctx"
 export type ActivityMetric = "traces" | "cost" | "tokens"
 export type ChartView = "bars" | "line"

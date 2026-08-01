@@ -1,88 +1,113 @@
 # Clickwright — Agent Guide
 
-Agentic analytics pipeline on ClickHouse. A feature spec goes in; live optimized tables,
-updated business context, and PM-ready insights come out — every decision traced in Langfuse.
-
-Built for Click-a-thon India 2026 (Atlys problem statement).
+Agentic analytics pipeline for the Atlys problem (Click-a-thon 2026). A feature spec goes in;
+live optimized ClickHouse tables, updated business context, and a PM-ready insight report come
+out — every decision traced in Langfuse.
 
 ## The two non-negotiables
 
-1. **Numbers only ever come from ClickHouse.** The LLM writes SQL and narrates results.
-   It never computes, estimates, or recalls a figure. Every number in an insight must be
-   present in an attached query result.
-2. **If a step isn't traced, it didn't happen.** Judges score traceability directly:
-   hand-written schemas or insights without a matching Langfuse trace score zero.
-   Wrap every agent step in a span before writing its logic, not after.
+1. **Numbers only ever come from ClickHouse.** The LLM writes SQL and narrates results. It never
+   computes, estimates, or recalls a figure. Every number in an insight must exist in an attached
+   query result. Numbers travel only along: `ndjson → tables → SQL results → report`.
+2. **If a step isn't traced, it didn't happen.** Judges score traceability directly: outputs
+   without a matching Langfuse trace score zero. Wrap the step in a span BEFORE writing its
+   logic. Failed attempts stay in the trace — they are evidence the pipeline is real.
 
-## Architecture
-
-```
-SETUP (once, deterministic — no LLM)
-  load.sh            → 8 base event tables in ClickHouse
-  npm run seed       → base_context.md parsed into context_store (v1)
-
-PER SPEC (agentic, strictly sequential)
-  getContext()  →  Instrumentation  →  updateContext()  →  Analytics
-```
-
-| Agent | Input | Output | Verified by |
-|---|---|---|---|
-| **Instrumentation** | `spec.md`, `events.ndjson`, context | executed DDL, materialized views, loaded rows | ClickHouse executes the DDL; row-count reconciliation after load |
-| **Context** | spec + new-tables summary | versioned rows in `context_store` | append-only writes; reads are plain queries, never LLM recall |
-| **Analytics** | PM questions + fresh context + live tables | insight report citing real numbers | sanity gates (sample size, impossible rates) + citation check |
-
-The Context Agent has two distinct jobs: **write** (`updateContext`, once per spec, between
-Instrumentation and Analytics) and **serve** (`getContext`, callable anytime, especially by
-the Analytics narrator when it finds an anomaly worth explaining).
-
-## Layout
+## Pipeline (strictly sequential per spec)
 
 ```
-src/
-  core/        db.ts · tracing.ts · llm.ts      — shared; import these, don't reimplement
-  agents/      instrumentation.ts · context.ts · analytics.ts
-  pipeline.ts  the orchestrator — opens the trace, runs the three stages in order
-scripts/       seed-context.ts · run-spec.ts · check-env.ts
-prompts/       ddl.txt · plan.txt · narrate.txt  — prompts live as text files, not in code
-out/           generated insight reports (gitignored)
+SETUP (once, pure code):   load.sh → 8 base tables · npm run seed → context_store v1
+PER SPEC:                  getContext() → ① Instrumentation → ② updateContext() → ③ Analytics
 ```
 
-## Conventions
+Order matters: ① creates tables, ② documents them, ③ reads the documentation. Running ③ on
+stale context is a scored failure.
 
-- **Prompts are files, not string literals.** Tuning a prompt should never mean editing a `.ts` file.
-- **Every LLM call goes through `src/core/llm.ts`** so tracing, retries, and model config stay in one place.
-- **Self-healing loops.** DDL and SQL both follow: generate → execute → on error, feed the real
-  ClickHouse error back to the LLM → retry (max 3). Failed attempts stay in the trace; they're
-  evidence of a working pipeline, not something to hide.
-- **Validate agent boundaries with zod.** Malformed data must fail loudly at the handoff, not
-  silently three stages later.
-- **Commit to `main` every 30–45 minutes.** No feature branches — conflicts are cheaper when small.
+## Module contracts
 
-## Data traps (deliberately planted in the dataset)
+Shared core — import these, never reimplement:
 
-Handle these or the numbers will be wrong:
+```ts
+// src/core/db.ts
+query<T>(sql): Promise<T[]>          command(sql): Promise<void>
+insert(table, rows): Promise<void>   rowCount(table): Promise<number>
 
-- Conversion is defined **per session**, not per user — see `base_context.md`.
-- Duplicate and backfilled rows carry flags; filter them in every analytics query.
-- Android rows are often missing `os` (empty string, not null) — bucket as `unknown`.
-- `destination_card_clicked` has an empty `application_id` — join on `user_id` at top of funnel,
-  `application_id` only after `application_started`.
-- Revenue is `value` in `currency` — never sum across currencies without grouping.
-- Known issues K1–K7 are documented in the context layer. Insights should cross-reference them
-  (e.g. an iOS OTP failure spike is consistent with K1) rather than reporting the anomaly bare.
+// src/core/tracing.ts
+startRun(name, input): trace                     // one per pipeline run
+step(parent, name, input, fn): Promise<T>        // wrap EVERY unit of agent work
+recordQuery(parent, name, sql, rows): void       // attach SQL + result rows to the trace
+flushTraces(): Promise<void>                     // REQUIRED before process exit
+
+// src/core/llm.ts
+complete(parent, name, prompt, opts): Promise<string>   // the ONLY way to call the LLM
+loadPrompt(name, vars): Promise<string>                  // prompts live in prompts/*.txt
+stripFences(text) · splitStatements(sql)
+```
+
+Agent boundaries (validate handoffs with zod; fail loudly at the boundary):
+
+```ts
+// ① src/agents/instrumentation.ts
+run(specPath, ndjsonPath, ctx, trace) → { tables: [{name, columns, purpose}], mvs: string[] }
+
+// ② src/agents/context.ts
+seed()                                   // base_context.md → context_store v1 (pure code, no LLM)
+updateContext(spec, tablesSummary, trace) → ContextEntry[]     // LLM, once per spec
+getContext(topic) → ContextBundle        // pure query: latest version per entity — never LLM recall
+
+// ③ src/agents/analytics.ts
+run(spec, ctx, trace) → InsightReport    // plan → SQL per task → sanity gate → narrate → quality gate
+```
+
+`context_store` schema: `(entry_id, entity, definition_md, version UInt32, updated_at, source_spec)`
+— append-only; reads always `ORDER BY version DESC LIMIT 1 BY entity`.
+
+## Generation rules
+
+**DDL (①):** the profiler's measured stats are ground truth, not the LLM's guess.
+`LowCardinality(String)` for <1k distinct values · `ORDER BY` starts with the join key
+(`user_id` top-of-funnel, `application_id` after) then timestamp · `PARTITION BY toYYYYMM(ts)` ·
+`DateTime64(3)` for timestamps · prefer defaults over `Nullable` · flatten nested JSON fields.
+
+**SQL (③):** always filter duplicate/backfilled flag columns · bucket empty/missing `os` as
+`'unknown'` · conversion is per SESSION (base_context.md) — never per user · never aggregate
+`value` across currencies without grouping · include sample sizes in results.
+
+**Self-healing loop (both):** generate → execute → on error, feed the verbatim ClickHouse error
+back to the LLM → regenerate. Max 3 attempts, every attempt traced. Never silently swallow an
+error; never "fix" generated SQL by hand.
+
+**Narration (③):** the prompt must forbid uncited numbers. After narration, verify: extract
+numbers from prose, check membership in attached results. When an anomaly is found, call
+`getContext()` for related known issues (K1–K7) and cite matches — "iOS drop consistent with K1"
+is the exact success example in the brief.
+
+## Trace shape
+
+One trace per run, named `pipeline:<spec_name>`. Spans nest:
+`instrumentation` → `profile`, `ddl_generation`, `ddl_execution` (one child per attempt),
+`data_load` · `context_update` (include v_n → v_n+1 diff) · `analytics` → `plan`,
+`task_<n>_sql` (use `recordQuery`), `sanity_gate` (what was dropped and why), `narrate`,
+`quality_gate`. LLM calls appear as generations automatically via `complete()`.
+
+## Data traps (deliberately planted — recheck before trusting any result)
+
+- `destination_card_clicked` has empty `application_id` (no application exists yet)
+- Android rows often have empty-string `os` (not null)
+- Duplicate + backfilled rows carry flags; unfiltered they corrupt every metric
+- Supporting events (`search_typed`, `landing_page_scrolled`, `auth_completed`,
+  `pay_now_clicked`) are engagement noise unless a question needs them
+- Revenue = `value` in `currency`
 
 ## The unseen spec
 
-A sixth specification is released to all teams simultaneously in the final hours. It must run
-through the pipeline untouched — no hand-editing outputs, no manual SQL. Build for generality:
-prompts should reason from principles, and unknown fields should be absorbed gracefully rather
-than crashing the run.
+A 6th spec drops in the final hours; it must run through the pipeline untouched — no hand-edited
+DDL, SQL, or prose (trace must match output). Prefer general rules over spec-specific handling:
+unknown envelope fields get added and noted in context, never crash the run.
 
-## Commands
+## Working rules
 
-```bash
-npm run check-env                          # verify ClickHouse + Langfuse + LLM connectivity
-npm run seed                               # base_context.md → context_store (v1)
-npm run run-spec specs/01_express_checkout # full pipeline on one spec
-npm run typecheck
-```
+- Prompts are files in `prompts/` — tuning one never means editing `.ts`
+- Commit to `main` every 30–45 min; no feature branches
+- Node 20 (`nvm use`) · `npm run check-env` before blaming code for a connection issue
+- `npm run seed` · `npm run run-spec specs/01_express_checkout` · `npm run typecheck`

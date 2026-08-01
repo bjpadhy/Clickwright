@@ -87,7 +87,13 @@ function selectItemFor(alias: string, sql: string): string | null {
       depth--;
     } else if (ch === "," && depth === 0) break;
   }
-  const item = sql.slice(i + 1, last).trim();
+  // The FIRST item of a SELECT list has no comma or paren before it, so the scan
+  // runs into the keyword itself — strip it, or a rate divided by the first
+  // column of the query can never be resolved.
+  const item = sql
+    .slice(i + 1, last)
+    .trim()
+    .replace(/^select\s+(distinct\s+)?/i, "");
   return item.length > 0 ? item : null;
 }
 
@@ -107,8 +113,12 @@ function divisorOf(expression: string): string | null {
 }
 
 /**
- * The denominator read from the SQL that defined the rate. This is not an
- * inference: `a / b AS rate` states what it divided by, so we resolve `b`.
+ * The columns that could denominate `rateColumn`, read from the SQL that defined
+ * it. This is not an inference: `a / b AS rate` states what it divided by, so we
+ * resolve `b` — first as a bare column of the result, then as an expression that
+ * appears again in the same SELECT under its own alias. Ordered candidates, so a
+ * caller can apply its own validity check (a positive value in a row; a summable
+ * column in the digest) and fall through.
  *
  * It exists because the naming convention alone cannot express a funnel. A rate
  * between two different stages — `currency_selected_n / offer_shown_n AS
@@ -116,41 +126,48 @@ function divisorOf(expression: string): string | null {
  * `offer_to_currency_n` asks for a column no sensible query would write, and
  * every such rate came back "not computable".
  *
- * Two resolvable forms: the divisor is a column of the result, or it is an
- * expression that appears again in the same SELECT under its own alias.
+ * Exported for the full-result-set digest, which needs the denominator COLUMN
+ * before any row exists to build `sum(rate * n) / sum(n)`. Sharing the resolver
+ * is the point: the digest and per-row precision must never disagree about what
+ * a rate divides by.
  */
+export function denominatorColumnsFromSql(
+  rateColumn: string,
+  sql: string,
+  columns: readonly string[],
+): string[] {
+  const item = selectItemFor(rateColumn, sql);
+  if (!item) return [];
+  const divisor = divisorOf(item);
+  if (!divisor) return [];
+
+  const out: string[] = [];
+  const present = new Set(columns);
+
+  // the divisor is itself one of the returned columns
+  const bare = divisor.replace(/`/g, "").trim();
+  const column = /^[a-z_][a-z0-9_]*$/i.test(bare) ? bare : bare.split(".").pop() ?? "";
+  if (column && column !== rateColumn && present.has(column)) out.push(column);
+
+  // the divisor is an expression that some other column also selects
+  const target = normalize(divisor);
+  for (const candidate of columns) {
+    if (candidate === rateColumn || out.includes(candidate)) continue;
+    const candidateItem = selectItemFor(candidate, sql);
+    if (candidateItem && normalize(candidateItem) === target) out.push(candidate);
+  }
+  return out;
+}
+
+/** The denominator VALUE for a rate in one fetched row, resolved from the SQL. */
 function denominatorFromSql(
   rateColumn: string,
   row: Record<string, unknown>,
   sql: string,
 ): number | null {
-  const item = selectItemFor(rateColumn, sql);
-  if (!item) return null;
-  const divisor = divisorOf(item);
-  if (!divisor) return null;
-
-  const positive = (v: unknown): number | null => {
-    const n = Number(v);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  };
-
-  // the divisor is itself one of the returned columns
-  const bare = divisor.replace(/`/g, "").trim();
-  const column = /^[a-z_][a-z0-9_]*$/i.test(bare) ? bare : bare.split(".").pop() ?? "";
-  if (column && column in row) {
-    const value = positive(row[column]);
-    if (value !== null) return value;
-  }
-
-  // the divisor is an expression that some other column also selects
-  const target = normalize(divisor);
-  for (const [candidate, value] of Object.entries(row)) {
-    if (candidate === rateColumn) continue;
-    const candidateItem = selectItemFor(candidate, sql);
-    if (candidateItem && normalize(candidateItem) === target) {
-      const resolved = positive(value);
-      if (resolved !== null) return resolved;
-    }
+  for (const column of denominatorColumnsFromSql(rateColumn, sql, Object.keys(row))) {
+    const n = Number(row[column]);
+    if (Number.isFinite(n) && n > 0) return n;
   }
   return null;
 }

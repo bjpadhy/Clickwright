@@ -25,7 +25,12 @@
  */
 import { queryReadonly } from "./db.js";
 import { recordQuery, step, type Ctx } from "./tracing.js";
-import { COUNT_RE, RATE_RE, denominatorColumnFor } from "./precision.js";
+import {
+  COUNT_RE,
+  RATE_RE,
+  denominatorColumnFor,
+  denominatorColumnsFromSql,
+} from "./precision.js";
 
 /** Rows returned by each extremes query — the best and worst of the full set. */
 export const EXTREME_ROWS = 5;
@@ -241,6 +246,10 @@ export function buildDigestSql(scope: string, columns: ResultColumn[]): DigestPl
   const pick = (kind: ColumnKind, cap: number) =>
     columns.filter((c) => c.kind === kind).slice(0, cap);
 
+  const denominatorCandidates = columns
+    .filter((x) => x.kind === "count" || x.kind === "numeric")
+    .map((x) => x.name);
+
   for (const c of pick("rate", MAX_RATE_COLS)) {
     const q = quote(c.name);
     emit(`min(${q})`, `${c.name}_min`, { column: c.name, stat: "min" });
@@ -250,10 +259,14 @@ export function buildDigestSql(scope: string, columns: ResultColumn[]): DigestPl
     // than "a rate above 100% exists somewhere in here".
     emit(`countIf(${q} > 1.05)`, `${c.name}_gt1_n`, { column: c.name, stat: "gt1_n" });
 
-    const den = denominatorColumnFor(
-      c.name,
-      columns.filter((x) => x.kind === "count" || x.kind === "numeric").map((x) => x.name),
-    );
+    // What the query divided by, before what the column is called — the same
+    // order precision.ts resolves a fetched row with. A funnel rate written per
+    // the SQL prompt (`purchased_n / offer_shown_n AS attach_rate`) matches no
+    // naming convention, and losing its population figure here would silently
+    // drop the digest's headline deliverable for exactly the encouraged shape.
+    const den =
+      denominatorColumnsFromSql(c.name, scope, denominatorCandidates)[0] ??
+      denominatorColumnFor(c.name, denominatorCandidates);
     if (!den) continue;
     // `full_<base>_rate` + `full_<base>_n` are read by classifyMetric and
     // findDenominator exactly as a query's own rate and denominator would be, so

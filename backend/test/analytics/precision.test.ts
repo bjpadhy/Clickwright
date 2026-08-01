@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   denominatorColumnFor,
+  denominatorColumnsFromSql,
   findDenominator,
   precisionForRow,
 } from "../../src/core/precision.js";
@@ -56,4 +57,49 @@ test("denominatorColumnFor resolves a name without needing a row", () => {
   assert.equal(denominatorColumnFor("conversion_rate", ["conversion_rate", "city"]), null);
   // must never nominate the rate column as its own denominator
   assert.equal(denominatorColumnFor("n_rate", ["n_rate"]), null);
+});
+
+const FUNNEL_SQL = `SELECT city,
+  uniqExact(user_id) AS offer_shown_n,
+  uniqExactIf(user_id, purchased = 1) AS purchased_n,
+  purchased_n / offer_shown_n AS attach_rate
+FROM events GROUP BY city`;
+
+test("denominatorColumnsFromSql reads the divisor straight from the division", () => {
+  // A funnel rate spans two stages: no naming convention connects attach_rate to
+  // offer_shown_n, but the SQL states the division outright.
+  assert.deepEqual(
+    denominatorColumnsFromSql("attach_rate", FUNNEL_SQL, ["offer_shown_n", "purchased_n"]),
+    ["offer_shown_n"],
+  );
+});
+
+test("denominatorColumnsFromSql resolves a divisor expression to the column that selects it", () => {
+  const sql = `SELECT
+    uniqExact(user_id) AS offer_shown_n,
+    uniqExactIf(user_id, purchased = 1) / uniqExact(user_id) AS attach_rate
+  FROM events GROUP BY city`;
+  assert.deepEqual(
+    denominatorColumnsFromSql("attach_rate", sql, ["offer_shown_n"]),
+    ["offer_shown_n"],
+  );
+});
+
+test("denominatorColumnsFromSql returns nothing rather than guessing", () => {
+  // not a division at all
+  assert.deepEqual(denominatorColumnsFromSql("rate", "SELECT avg(ok) AS rate FROM t", ["n"]), []);
+  // the divisor exists in the SQL but is not a column of the result
+  assert.deepEqual(denominatorColumnsFromSql("rate", "SELECT a / b AS rate FROM t", ["n"]), []);
+  // must never nominate the rate column as its own denominator
+  assert.deepEqual(denominatorColumnsFromSql("rate", "SELECT x / rate AS rate FROM t", ["rate"]), []);
+});
+
+test("a funnel rate is bounded by the count it divides by, not a name-matched column", () => {
+  const [p] = precisionForRow(
+    { offer_shown_n: 500, purchased_n: 100, attach_rate: 0.2 },
+    FUNNEL_SQL,
+  );
+  assert.equal(p?.column, "attach_rate");
+  assert.equal(p?.n, 500);
+  assert.ok(p?.interval, "the division names its denominator, so the rate must be bounded");
 });

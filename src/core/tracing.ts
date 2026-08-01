@@ -1,4 +1,5 @@
 import { Langfuse, type LangfuseTraceClient, type LangfuseSpanClient } from "langfuse";
+import { execSync } from "node:child_process";
 import { env } from "./env.js";
 
 /**
@@ -9,11 +10,23 @@ import { env } from "./env.js";
 
 let lf: Langfuse | null = null;
 
+/** Git sha stamped on every trace as `release`, so prompt tuning is comparable across runs. */
+function gitRelease(): string {
+  try {
+    return execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim();
+  } catch {
+    return "unknown";
+  }
+}
+
 export function langfuse(): Langfuse {
   lf ??= new Langfuse({
     publicKey: env.langfuse.publicKey,
     secretKey: env.langfuse.secretKey,
     baseUrl: env.langfuse.baseUrl,
+    release: gitRelease(),
   });
   return lf;
 }
@@ -23,8 +36,39 @@ export type Ctx = LangfuseTraceClient | LangfuseSpanClient;
 export function startRun(
   name: string,
   input: Record<string, unknown>,
+  opts: { sessionId?: string } = {},
 ): LangfuseTraceClient {
-  return langfuse().trace({ name, input, tags: ["clickwright"] });
+  return langfuse().trace({
+    name,
+    input,
+    tags: ["clickwright"],
+    ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
+  });
+}
+
+/** Write the run's final result onto the trace — what judges see in the trace list. */
+export function endRun(
+  trace: LangfuseTraceClient,
+  output: Record<string, unknown>,
+  metadata: Record<string, unknown> = {},
+): void {
+  trace.update({ output, metadata });
+}
+
+/** Attach a numeric score to the trace (gate outcomes, retry counts) — shows as a
+ * column in Langfuse, quantifying quality machinery across all runs at a glance. */
+export function scoreRun(
+  ctx: Ctx,
+  name: string,
+  value: number,
+  comment?: string,
+): void {
+  ctx.score({ name, value, ...(comment ? { comment } : {}) });
+}
+
+/** Deep link to a trace — stored in runs_log so every UI element can cite its evidence. */
+export function traceUrl(trace: LangfuseTraceClient): string {
+  return `${env.langfuse.baseUrl}/trace/${trace.id}`;
 }
 
 /**

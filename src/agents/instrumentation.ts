@@ -14,7 +14,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { command, insert, rowCount } from "../core/db.js";
-import { step, type Ctx } from "../core/tracing.js";
+import { step, scoreRun, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import { profileRecords, profileSummary } from "../core/profiler.js";
 import { getContext, reconcileWithLive } from "./context.js";
@@ -279,6 +279,10 @@ export async function runInstrumentation(
           },
         );
 
+        scoreRun(span, "self_heal_attempts", attempt,
+          attempt === 1 ? "clean first attempt" : `${attempt - 1} failed attempt(s) healed`);
+        scoreRun(span, "rows_verified", 1,
+          `${loaded.reduce((s, t) => s + t.rowsLoaded, 0)} rows, counts match file`);
         return {
           reasoning: proposal.reasoning,
           tables: loaded,

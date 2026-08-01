@@ -15,7 +15,7 @@ import { query, insert } from "../core/db.js";
 import { env } from "../core/env.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import type { Ctx } from "../core/tracing.js";
-import { step } from "../core/tracing.js";
+import { step, scoreRun } from "../core/tracing.js";
 
 export interface ContextEntry {
   entity: string;
@@ -279,6 +279,9 @@ export async function updateContext(
       await insert("context_store", rows);
       invalidateContextCache();
 
+      scoreRun(span, "context_entries_written", rows.length);
+      scoreRun(span, "context_update_attempts", attempt,
+        attempt === 1 ? "clean first attempt" : `${attempt - 1} failed attempt(s) healed`);
       return rows.map((r) => ({
         entity: r.entity,
         definition_md: r.definition_md,

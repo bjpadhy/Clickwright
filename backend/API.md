@@ -197,7 +197,9 @@ seven event types (they are named events, so plain `onmessage` will NOT fire).
 | `step_error` | step name | `{ error: string, elapsedMs }` — verbatim failure, feeds the retry |
 | `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ durationMs, tables: LoadedTable[], contextEntries: {entity, version}[], contextWarnings: string[], traceUrl }`; `failed` → `{ durationMs, error, resetHint }` |
 | `approval_request` | `"ddl"` \| `"context"` | `{ proposal: DdlProposal \| ContextProposal }` — ContextProposal may carry `warnings: string[]` (the "contradiction surfaced" chips) |
-| `log` | see below | per-step detail; attributed to the current `phase` |
+| `log` | `"ddl_statement"` \| `"data_load"` | `{ statement?, table?, rows?, ok, ms }` — per-statement execution progress. **These two only** belong in an execution log |
+| `log` | `"design_rejected"` \| `"design_fallback"` | `{ event, attempt?, reason?, ddl?, note? }` — a per-table design that failed validation and was fed back to the model inside `design_<event>`; `design_fallback` means every try failed and the deterministic baseline shipped. Render against that step, not as execution output |
+| `log` | `"llm_start"` \| `"llm_progress"` \| `"llm_done"` | `{ call, elapsedMs?, promptChars?, outputChars? }` — progress ticks every 3s for **every** LLM call in the run, `call` = the step/generation name. Ticks, not log lines: one per 3s per in-flight call |
 | `approval_result` | gate | `{ approved: boolean, feedback: string, identity: string }` |
 
 `LoadedTable = { name, event, purpose, rowsInFile, rowsLoaded }`.
@@ -230,9 +232,11 @@ instrumentation                      (wrapper — spans the whole ① phase)
   context_load                       output.summary: entities count, byCategory, updatedEntries
   schema_reconciliation              output: liveTables, documentedNotLive, liveNotDocumented
   ddl_generation_attempt_N           N = 1.. (step_error ⇒ another attempt follows)
-    ddl_table_<event>                ONE PER EVENT TYPE, RUN CONCURRENTLY — each designs
-                                     one table, dry-runs it, and self-heals alone.
+    ddl_synthesis                    deterministic baseline schemas from the profile
+    design_<event>                   ONE PER EVENT TYPE, RUN CONCURRENTLY — each designs
+                                     one table, validates it, and self-heals alone.
                                      Events from different tables interleave; group by name.
+    dry_run                          EXPLAIN AST on every statement
   approval_attempt_N                 (the gate; approval_request/result events bracket it)
   ddl_execution_attempt_N            output: LoadedTable[]; emits per-statement log events
 context_update                       (wrapper — spans the whole ② phase)

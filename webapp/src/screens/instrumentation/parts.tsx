@@ -98,6 +98,12 @@ function StepRow({ step, nested = false }: { step: StepGroup; nested?: boolean }
   // Open while it matters: in flight, failed, or healed after a retry.
   const startsOpen = step.status !== "done" || retried
   const last = step.attempts.at(-1)
+  const inFlight = step.attempts.find((a) => a.status === "running")
+  // A generation runs for minutes with nothing to report. Counting up is the
+  // only honest progress there is — the alternative is a spinner that could
+  // equally mean "hung".
+  const live = useElapsed(inFlight?.startedAt ?? null, Boolean(inFlight))
+  const parallel = step.children.filter((child) => child.parallel).length
 
   return (
     <details
@@ -131,17 +137,22 @@ function StepRow({ step, nested = false }: { step: StepGroup; nested?: boolean }
               {step.attempts.length} attempts
             </StatusPill>
           ) : null}
-          {step.children.length > 0 ? (
+          {step.fallback ? (
+            <StatusPill className="border-amber-200 bg-amber-50 text-amber-800">
+              baseline schema shipped
+            </StatusPill>
+          ) : null}
+          {parallel > 1 ? (
             <span className="font-mono text-[10.5px] text-zinc-400">
-              {step.children.length} in parallel
+              {parallel} in parallel
             </span>
           ) : null}
           <div className="flex-1" />
-          {step.status !== "running" ? (
-            <span className="font-mono text-[10.5px] text-zinc-400">
-              {formatMs(step.attempts.reduce((sum, a) => sum + (a.ms ?? 0), 0))}
-            </span>
-          ) : null}
+          <span className="font-mono text-[10.5px] text-zinc-400">
+            {step.status === "running"
+              ? live
+              : formatMs(step.attempts.reduce((sum, a) => sum + (a.ms ?? 0), 0))}
+          </span>
           <Icon
             name="ti-chevron-down"
             size={13}

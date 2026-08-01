@@ -51,8 +51,10 @@ export function InstrumentationRun() {
   const elapsed = useElapsed(model.startedAt, busy)
 
   const scrollRef = React.useRef<HTMLDivElement>(null)
-  // Each new card should land in view as the pipeline advances.
-  const lastSeq = model.steps.length + model.execLog.length
+  // Each new card should land in view as the pipeline advances. Nested steps
+  // count too — a fan-out generation is most of what arrives during design.
+  const lastSeq =
+    model.steps.reduce((n, step) => n + 1 + step.children.length, 0) + model.execLog.length
   React.useEffect(() => {
     const timer = window.setTimeout(() => {
       const el = scrollRef.current

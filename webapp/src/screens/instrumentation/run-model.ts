@@ -53,6 +53,7 @@ const STEP_LABEL: Record<string, string> = {
   context_load: "Load business context",
   schema_reconciliation: "Reconcile context against live schema",
   ddl_generation: "Design tables (LLM)",
+  ddl_synthesis: "Synthesise baseline schemas from the profile",
   dry_run: "Dry-run every statement on ClickHouse",
   approval: "Human approval — DDL",
   ddl_execution: "Execute DDL + load rows",
@@ -64,13 +65,35 @@ const STEP_LABEL: Record<string, string> = {
 const WRAPPERS = new Set(["instrumentation", "context_update"])
 
 /**
- * `ddl_table_<event>` steps are the per-event generations that fan out inside
- * one `ddl_generation` attempt — one LLM call per table, all in flight at once.
- * They nest under their parent instead of sitting beside it, or a five-event
- * spec renders six identical spinners stacked in the timeline.
+ * The event stream is flat — a `step_start` carries a name and nothing else — so
+ * the tree the agent actually runs is rebuilt here from those names.
+ *
+ * `design_<event>` steps are the per-event generations that fan out inside one
+ * `ddl_generation` attempt — one LLM call per table, all in flight at once. They
+ * nest under their parent instead of sitting beside it, or a six-event spec
+ * renders seven identical spinners stacked in the timeline.
  */
-const FANOUT_PREFIX = "ddl_table_"
+const FANOUT_PREFIX = "design_"
 const FANOUT_PARENT = "ddl_generation"
+
+/** The other steps that run inside the `ddl_generation` span, in agent order. */
+const CHILD_OF: Record<string, string> = {
+  ddl_synthesis: FANOUT_PARENT,
+  dry_run: FANOUT_PARENT,
+}
+
+function parentKey(key: string): string | null {
+  if (key.startsWith(FANOUT_PREFIX)) return FANOUT_PARENT
+  return CHILD_OF[key] ?? null
+}
+
+/**
+ * `log` names that are execution progress. Everything else on the `log` channel
+ * is either an `llm_*` tick (every 3s, for every call in the run) or a per-table
+ * design note — neither is a statement running on ClickHouse, and routing them
+ * here is what opened the execution panel during schema design.
+ */
+const EXEC_LOG = new Set(["ddl_statement", "data_load"])
 
 const GATE_PHASE: Record<Gate, PhaseId> = { ddl: "approval", context: "context" }
 
@@ -94,8 +117,12 @@ export interface StepGroup {
   phase: PhaseId
   attempts: Attempt[]
   status: "running" | "done" | "error"
-  /** parallel sub-steps (the per-event DDL generations) */
+  /** sub-steps that ran inside this one's span */
   children: StepGroup[]
+  /** ran concurrently with its siblings (the per-event DDL generations) */
+  parallel: boolean
+  /** every design attempt was rejected — the deterministic baseline shipped */
+  fallback: boolean
 }
 
 export interface ExecLine {
@@ -171,9 +198,10 @@ function count(value: unknown): number | null {
 function summarize(key: string, output: unknown): string | null {
   const out = record(output)
 
+  // The row is already labelled with the event name — say what the table is for.
   if (key.startsWith(FANOUT_PREFIX)) {
-    const name = out?.["name"]
-    return typeof name === "string" ? `→ ${name}` : null
+    const purpose = out?.["purpose"]
+    return typeof purpose === "string" ? purpose : null
   }
 
   switch (key) {
@@ -251,15 +279,17 @@ export function buildRunModel(events: RunEvent[]): RunModel {
     switch (event.type) {
       case "step_start": {
         if (WRAPPERS.has(event.name)) break
+        const parent = parentKey(key)
         const group = groups.get(key) ?? {
           key,
           label: stepLabel(key),
-          phase: key.startsWith(FANOUT_PREFIX)
-            ? ("design" as PhaseId)
-            : (STEP_PHASE[key] ?? "parse"),
+          // A nested step belongs to whatever phase its parent belongs to.
+          phase: STEP_PHASE[key] ?? (parent ? STEP_PHASE[parent] : null) ?? "parse",
           attempts: [],
           status: "running" as const,
           children: [],
+          parallel: key.startsWith(FANOUT_PREFIX),
+          fallback: false,
         }
         group.attempts.push({
           attempt,
@@ -328,12 +358,54 @@ export function buildRunModel(events: RunEvent[]): RunModel {
 
       case "log": {
         const p = event.payload
-        const ms = typeof p["ms"] === "number" ? p["ms"] : null
-        const text =
-          event.name === "data_load"
-            ? `${String(p["table"] ?? "")} ← ${Number(p["rows"] ?? 0).toLocaleString()} rows`
-            : String(p["statement"] ?? event.name)
-        execLog.push({ ts: event.ts, kind: event.name, text, ok: p["ok"] !== false, ms })
+
+        if (EXEC_LOG.has(event.name)) {
+          const text =
+            event.name === "data_load"
+              ? `${String(p["table"] ?? "")} ← ${Number(p["rows"] ?? 0).toLocaleString()} rows`
+              : String(p["statement"] ?? event.name)
+          execLog.push({
+            ts: event.ts,
+            kind: event.name,
+            text,
+            ok: p["ok"] !== false,
+            ms: typeof p["ms"] === "number" ? p["ms"] : null,
+          })
+          break
+        }
+
+        // A design the agent rejected is retried inside the same step — there is
+        // no second step_start to mark it — so the rejection is recorded as an
+        // attempt of that step. The reason went to the model verbatim, and the
+        // timeline already knows how to render that as the self-healing loop.
+        if (event.name === "design_rejected" || event.name === "design_fallback") {
+          const group = groups.get(`${FANOUT_PREFIX}${String(p["event"] ?? "")}`)
+          if (!group) break
+          if (event.name === "design_fallback") {
+            group.fallback = true
+            break
+          }
+          const current = group.attempts.find((a) => a.status === "running")
+          if (!current) break
+          const tryN = typeof p["attempt"] === "number" ? p["attempt"] : null
+          current.attempt = tryN
+          current.status = "error"
+          current.endedAt = event.ts
+          current.ms = Date.parse(event.ts) - Date.parse(current.startedAt)
+          current.error = String(p["reason"] ?? "design rejected")
+          group.attempts.push({
+            attempt: tryN === null ? null : tryN + 1,
+            status: "running",
+            startedAt: event.ts,
+            endedAt: null,
+            ms: null,
+            summary: null,
+            error: null,
+          })
+        }
+        // `llm_start` / `llm_progress` / `llm_done` are progress ticks for a call
+        // already represented by a spinning step — the step's own live elapsed
+        // says the same thing without a line per tick.
         break
       }
 
@@ -376,13 +448,18 @@ export function buildRunModel(events: RunEvent[]): RunModel {
     }
   }
 
-  // Fan-out generations belong inside the attempt that spawned them.
-  const all = [...groups.values()]
-  const steps = all.filter((step) => !step.key.startsWith(FANOUT_PREFIX))
-  const fanout = all.filter((step) => step.key.startsWith(FANOUT_PREFIX))
-  const parent = steps.find((step) => step.key === FANOUT_PARENT)
-  if (parent) parent.children = fanout
-  else steps.push(...fanout) // parent missing (partial replay) — don't hide them
+  // Nested steps belong inside the step that spawned them. Insertion order is
+  // arrival order, so children stay in the order the agent ran them.
+  const steps: StepGroup[] = []
+  const nested: StepGroup[] = []
+  for (const group of groups.values()) {
+    ;(parentKey(group.key) ? nested : steps).push(group)
+  }
+  for (const child of nested) {
+    const parent = steps.find((step) => step.key === parentKey(child.key))
+    if (parent) parent.children.push(child)
+    else steps.push(child) // parent missing (partial replay) — don't hide it
+  }
 
   return {
     status,

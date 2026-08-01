@@ -368,8 +368,9 @@ export async function streamAnswer(
       }
       // Carry the SQL context forward so the planner can reuse the same tables,
       // columns and approach rather than re-planning from scratch and drifting.
-      const sqlContext = (insight?.sql ?? [])
-        .filter((s) => !s.task.endsWith("_profile") && !s.task.endsWith("_top") && !s.task.endsWith("_bottom"))
+      const mainQueries = (insight?.sql ?? [])
+        .filter((s) => !s.task.endsWith("_profile") && !s.task.endsWith("_top") && !s.task.endsWith("_bottom"));
+      const sqlContext = mainQueries
         .map((s) => {
           const tables = [...s.query.matchAll(/\bfrom\s+([a-z_][a-z0-9_]*)/gi)]
             .map((m) => m[1]!).filter((t) => !/^select$/.test(t));
@@ -381,6 +382,13 @@ export async function streamAnswer(
         text: insight?.headline ?? "",
         figures: insight ? establishedFigures(insight) : "",
         sqlContext,
+        // Pass actual SQL from the most recent agent turn so the SQL writer
+        // can reference or adapt them for follow-ups.
+        priorSql: mainQueries.map((s) => ({
+          task: s.task,
+          title: s.title,
+          query: s.query,
+        })),
       };
     });
 

@@ -14,7 +14,7 @@ listed here does not exist.
 <task>
 {{task}}
 </task>
-{{feedback}}
+{{prior_sql}}{{feedback}}
 <rules>
 1. ONE statement, starting with SELECT or WITH. No semicolon, no trailing comment.
 2. Aggregate in the database: GROUP BY plus count/uniq/avg/quantile. Return a

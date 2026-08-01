@@ -88,9 +88,9 @@ export function establishedFigures(insight: Insight): string {
   return `${figures.join("; ")}${tables.length ? ` — computed from ${tables.slice(0, 6).join(", ")}` : ""}`;
 }
 
-const cacheKey = (question: string, contextKey: string) =>
+const cacheKey = (question: string, contextKey: string, historyDigest = "") =>
   createHash("sha256")
-    .update(`${question.trim().toLowerCase().replace(/\s+/g, " ")}::${contextKey}`)
+    .update(`${question.trim().toLowerCase().replace(/\s+/g, " ")}::${contextKey}::${historyDigest}`)
     .digest("hex")
     .slice(0, 32);
 
@@ -664,7 +664,15 @@ export interface AnalyticsInput {
   /** Force a fresh run, bypassing the answer cache. */
   noCache?: boolean;
   /** Recent conversation turns for follow-up questions (oldest first). */
-  history?: Array<{ role: "user" | "agent"; text: string; figures?: string; sqlContext?: string }>;
+  history?: Array<{
+    role: "user" | "agent";
+    text: string;
+    figures?: string;
+    sqlContext?: string;
+    /** The actual SQL queries from the most recent agent turn — lets the SQL
+     *  writer extend or refine them instead of writing from scratch. */
+    priorSql?: Array<{ task: string; title: string; query: string }>;
+  }>;
 }
 
 export interface RunAnalyticsOptions {
@@ -723,10 +731,17 @@ export async function runAnalytics(
       },
     );
 
-    // Cache hit → milliseconds. Skipped for follow-ups, whose meaning depends
-    // on conversation state rather than the question text alone.
-    const key = cacheKey(input.question, contextKey);
-    if (!input.history?.length && !input.noCache) {
+    // Cache hit → milliseconds. Follow-ups now cacheable too: the history
+    // digest makes the key conversation-aware, so "break it down by OS" after
+    // different conversations produces different cache entries.
+    const historyDigest = input.history?.length
+      ? createHash("sha1")
+          .update(input.history.map((h) => `${h.role}:${h.text}`).join("|"))
+          .digest("hex")
+          .slice(0, 10)
+      : "";
+    const key = cacheKey(input.question, contextKey, historyDigest);
+    if (!input.noCache) {
       const cached = await step(span, "cache_lookup", { key }, () => readCache(key));
       if (cached) {
         scoreRun(span, "cache_hit", 1, "served from insight_cache");
@@ -751,10 +766,19 @@ export async function runAnalytics(
     const plan: Plan = await step(span, "plan", {}, async (planSpan) => {
       const prompt = await loadPrompt("analytics_plan_tasks", {
         knowledge: bundle.markdown,
-        // planning needs column NAMES to choose tables/dimensions; exact types
-        // only matter when writing SQL, so strip them here (~half the tokens)
+        // Planning needs to distinguish dimensions from metrics and spot time
+        // columns. Replace verbose types with short tags: DateTime→[time],
+        // LowCardinality(String)→[dim], numeric types→[num], keep the rest as-is
+        // for anything unusual. Saves ~40% of schema tokens while preserving the
+        // information the planner actually uses to choose tables and dimensions.
         schemas: [...schemas.values()]
-          .map((line) => line.replace(/ (String|UInt\d+|Int\d+|Float\d+|DateTime64?\(\d\)|LowCardinality\(String\)|Nullable\([^)]+\)|UUID)(,|$)/g, "$2"))
+          .map((line) => line
+            .replace(/ DateTime64?\(\d\)/g, " [time]")
+            .replace(/ LowCardinality\(String\)/g, " [dim]")
+            .replace(/ (UInt\d+|Int\d+|Float\d+)/g, " [num]")
+            .replace(/ Nullable\(([^)]+)\)/g, (_, inner) => ` [${/Int|UInt|Float/.test(inner) ? "num?" : "str?"}]`)
+            .replace(/ String(,|$)/g, " [str]$1")
+            .replace(/ UUID(,|$)/g, " [id]$1"))
           .join("\n"),
         history: historyText,
         question: input.question,
@@ -780,6 +804,17 @@ export async function runAnalytics(
     // ── SQL per task, guarded + self-healing ──
     // Tasks are independent → generate + execute them CONCURRENTLY. Wall clock
     // becomes the slowest single task instead of their sum.
+
+    // Prior SQL from the last agent turn — the SQL writer can reference or adapt
+    // these instead of writing from scratch, which keeps filters, denominators
+    // and table choices consistent across follow-ups.
+    const lastAgentTurn = input.history?.filter((h) => h.role === "agent").at(-1);
+    const priorSqlText = lastAgentTurn?.priorSql?.length
+      ? lastAgentTurn.priorSql
+          .map((s) => `-- ${s.task}: ${s.title}\n${s.query}`)
+          .join("\n\n")
+      : "";
+
     let sqlAttemptsTotal = 0;
     const results: TaskResult[] = await Promise.all(
       plan.tasks.map((task) =>
@@ -798,6 +833,9 @@ export async function runAnalytics(
                     context: sqlRules.markdown,
                     schemas: schemaSubset(schemas, task.tables),
                     task: JSON.stringify(task),
+                    prior_sql: priorSqlText
+                      ? `\n<prior_sql>\nQueries from the previous answer in this conversation. Reuse their tables,\nfilters and denominator logic where the task overlaps — consistency across\nturns matters more than a novel approach.\n${priorSqlText}\n</prior_sql>\n`
+                      : "",
                     feedback: feedback
                       ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
                       : "",
@@ -1202,17 +1240,15 @@ export async function runAnalytics(
           : []),
       ]),
     };
-    if (!input.history?.length) {
-      await insert("insight_cache", [
-        {
-          cache_key: key,
-          question: input.question,
-          context_key: contextKey,
-          insight_json: JSON.stringify(insight),
-          created_at: new Date().toISOString().replace("T", " ").replace("Z", ""),
-        },
-      ]).catch(() => {});
-    }
+    await insert("insight_cache", [
+      {
+        cache_key: key,
+        question: input.question,
+        context_key: contextKey,
+        insight_json: JSON.stringify(insight),
+        created_at: new Date().toISOString().replace("T", " ").replace("Z", ""),
+      },
+    ]).catch(() => {});
 
     scoreRun(span, "analytics_tasks", plan.tasks.length);
     scoreRun(span, "sql_attempts_total", sqlAttemptsTotal);

@@ -1,19 +1,17 @@
 /**
- * Seed data for the screens still served by the mock — Chat, Dashboards and
- * Observability. Instrumentation was cut over to the real backend, so nothing
- * here describes a run any more; `history` and `specStatuses` survive only as
- * the static shape Observability's charts are drawn from.
+ * Seed data for the screens still served by the mock — Dashboards and
+ * Observability. Instrumentation and Chat were cut over to the real backend, so
+ * nothing here describes a run or an answer any more; `history`, `specStatuses`
+ * and `ANSWERS` survive only as the static shape those two screens draw from.
  *
- * Every string here stands in for what a real Analytics / Context Agent would
- * return. When those land, this file goes away — nothing outside `src/mock`
- * imports it.
+ * When they land on the real backend too, this file goes away — nothing outside
+ * `src/mock` imports it.
  */
 
 import type {
   Answer,
   AnswerKey,
   ChangelogEntry,
-  Conversation,
   Dashboard,
   HistoryEntry,
   Series,
@@ -26,49 +24,9 @@ export const ANSWERS: Record<AnswerKey, Answer> = {
   express: {
     key: "express",
     short: "Express Checkout impact",
-    traceId: "tr_an_4be1",
     queryMs: "94ms",
-    steps: [
-      {
-        label: "Context retrieved",
-        detail: "v{ctx} · picked express_checkout_conversion + known-issue: iOS OTP autofill",
-      },
-      {
-        label: "SQL planned",
-        detail: "3 queries · uniqMerge over mv_express_checkout_daily — no raw rows to the LLM",
-      },
-      { label: "Executed on ClickHouse", detail: "94ms total · 2,046 aggregate rows returned" },
-      { label: "Anomaly scan", detail: "platform × region MAD outlier: ios·AE at −3.1σ" },
-      { label: "Insight composed", detail: "grounded in 2 context entries · confidence scored" },
-    ],
     headline:
       "Express Checkout lifts overall conversion +11.8pp — but iOS · UAE is bleeding at the OTP step (−23%).",
-    findings: [
-      {
-        tag: "WHAT",
-        bg: "#e6f4f1",
-        fg: "#1a6e64",
-        text: "Express completion is 64.1% vs 52.3% for standard checkout — +11.8pp across 96k users in 14 days.",
-      },
-      {
-        tag: "WHY",
-        bg: "#fdeae4",
-        fg: "#a03c22",
-        text: "iOS · UAE collapses at otp_filled: 78% of its drop-offs fire is_fallback = 1, and median OTP fill takes 11.2s vs 2.1s globally.",
-      },
-      {
-        tag: "CONTEXT",
-        bg: "#e9eef2",
-        fg: "#274754",
-        text: 'Matches known issue "iOS WebKit OTP autofill" (base_context §known-issues, since v1.1): Safari suppresses autofill in cross-origin iframes.',
-      },
-      {
-        tag: "ACT",
-        bg: "#faf3dc",
-        fg: "#8a6d1a",
-        text: "Ship a native OTP sheet for iOS · UAE first — projected +2.1pp overall, ≈ ₹3.2Cr/yr GMV at current run-rate.",
-      },
-    ],
     chartTitle: "Express completion rate · last 14 days",
     columns: [
       { label: "Web", value: "68.2%", height: 116 },
@@ -76,63 +34,14 @@ export const ANSWERS: Record<AnswerKey, Answer> = {
       { label: "iOS · rest", value: "63.1%", height: 107 },
       { label: "iOS · UAE", value: "41.3%", height: 70, hot: true },
     ],
-    confidence: 0.87,
-    confidenceNote: "3 queries · 2,046 rows to LLM · compute stayed in ClickHouse",
-    sql: `SELECT platform, region,
-       round(uniqMerge(completed_users) / uniqMerge(shown_users), 3) AS conv,
-       round(avgMerge(otp_ms)) AS otp_fill_ms
-FROM atlys.mv_express_checkout_daily
-WHERE day >= today() - 14
-GROUP BY platform, region
-ORDER BY conv ASC
-LIMIT 20`,
   },
 
   funnel: {
     key: "funnel",
     short: "Funnel drop-off review",
-    traceId: "tr_an_22d8",
     queryMs: "380ms",
-    steps: [
-      {
-        label: "Context retrieved",
-        detail: "v{ctx} · funnel definition: 4 ordered steps on user_id, 30-day window",
-      },
-      { label: "SQL planned", detail: "windowFunnel over the 4 base event tables · 1 query" },
-      {
-        label: "Executed on ClickHouse",
-        detail: "380ms · 2.5M events scanned server-side, 4 aggregate rows returned",
-      },
-      { label: "Insight composed", detail: "joined against known-issues log · confidence scored" },
-    ],
     headline:
       "Document upload is the funnel’s biggest leak — 44% of applicants who start never finish uploading.",
-    findings: [
-      {
-        tag: "WHAT",
-        bg: "#e6f4f1",
-        fg: "#1a6e64",
-        text: "Of 511,900 started applications, only 288,700 complete document upload — a 223k-user loss, the largest absolute drop in the funnel.",
-      },
-      {
-        tag: "WHY",
-        bg: "#fdeae4",
-        fg: "#a03c22",
-        text: "Schengen destinations demand 2.3× more documents per application; mobile uploaders fail 31% more often than desktop.",
-      },
-      {
-        tag: "CONTEXT",
-        bg: "#e9eef2",
-        fg: "#274754",
-        text: "Known issue (base_context v1.0): HEIC → JPEG conversion times out on files over 8MB — 61% of mobile failures match its signature.",
-      },
-      {
-        tag: "ACT",
-        bg: "#faf3dc",
-        fg: "#8a6d1a",
-        text: "Async document checklist + client-side compression. Recovering half the mobile failures ≈ +18k purchases/yr.",
-      },
-    ],
     chartTitle: "Pre-purchase funnel · distinct users, in order, 90 days",
     funnel: [
       { label: "destination_card_clicked", value: "1,000,000", width: "100%" },
@@ -140,58 +49,13 @@ LIMIT 20`,
       { label: "document_uploaded", value: "288,700 · 56.4% step", width: "29%" },
       { label: "purchase_completed", value: "186,600 · 64.6% step", width: "19%" },
     ],
-    confidence: 0.91,
-    confidenceNote: "windowFunnel over 2.5M events · 4 rows to LLM",
-    sql: `SELECT countIf(step >= 1) AS clicked,  countIf(step >= 2) AS started,
-       countIf(step >= 3) AS uploaded, countIf(step >= 4) AS purchased
-FROM (
-    SELECT user_id,
-           windowFunnel(2592000)(timestamp,
-               event = 'destination_card_clicked', event = 'application_started',
-               event = 'document_uploaded',       event = 'purchase_completed') AS step
-    FROM atlys.funnel_events           -- UNION view over the 4 base tables
-    GROUP BY user_id
-)`,
   },
 
   uploads: {
     key: "uploads",
     short: "Mobile upload failures",
-    traceId: "tr_an_09c3",
     queryMs: "121ms",
-    steps: [
-      { label: "Context retrieved", detail: "v{ctx} · entity: document · known-issue log scanned" },
-      { label: "SQL planned", detail: "2 queries · failure rate by platform × file format" },
-      { label: "Executed on ClickHouse", detail: "121ms · 41k aggregate rows reduced to 8" },
-      { label: "Insight composed", detail: "low web sample flagged → confidence capped" },
-    ],
     headline: "Mobile upload failures are a file-format problem, not a network one.",
-    findings: [
-      {
-        tag: "WHAT",
-        bg: "#e6f4f1",
-        fg: "#1a6e64",
-        text: "HEIC uploads from iOS fail at 34% — 3.8× the JPEG failure rate on the same devices, same sessions.",
-      },
-      {
-        tag: "WHY",
-        bg: "#fdeae4",
-        fg: "#a03c22",
-        text: "Failures cluster on files > 8MB and retries double p95 upload latency, compounding the drop-off.",
-      },
-      {
-        tag: "CONTEXT",
-        bg: "#e9eef2",
-        fg: "#274754",
-        text: 'Base_context v1.0 already logs "HEIC → JPEG conversion times out > 8MB" — this quantifies it and ties it to funnel loss.',
-      },
-      {
-        tag: "ACT",
-        bg: "#faf3dc",
-        fg: "#8a6d1a",
-        text: "Convert + compress client-side before upload; kills the timeout class entirely for ~₹0 infra cost.",
-      },
-    ],
     chartTitle: "Upload failure rate · by platform and format",
     columns: [
       { label: "iOS · HEIC", value: "34%", height: 118, hot: true },
@@ -199,54 +63,8 @@ FROM (
       { label: "Android", value: "11%", height: 39 },
       { label: "Web", value: "6%", height: 22 },
     ],
-    confidence: 0.78,
-    confidenceNote: "web sample thin (n = 4.1k) — flagged, confidence capped",
-    sql: `SELECT platform, attrs['format'] AS fmt,
-       countIf(event_type = 'failed') / count() AS fail_rate,
-       quantile(0.95)(attrs['size_mb']::Float32) AS p95_mb
-FROM atlys.document_uploaded
-WHERE timestamp >= now() - INTERVAL 30 DAY
-GROUP BY platform, fmt
-HAVING count() > 1000
-ORDER BY fail_rate DESC`,
   },
 
-  generic: {
-    key: "generic",
-    short: "New conversation",
-    traceId: null,
-    queryMs: "12ms",
-    steps: [
-      { label: "Context retrieved", detail: "v{ctx} · entities, metric formulas, known issues" },
-      {
-        label: "Schema listed",
-        detail: "system.tables — base funnel + every agent-instrumented table",
-      },
-    ],
-    headline: "Here is what I can query right now.",
-    findings: [
-      {
-        tag: "TABLES",
-        bg: "#e6f4f1",
-        fg: "#1a6e64",
-        text: "8 base funnel & engagement tables plus every table the Instrumentation Agent has shipped — all joined on user_id / application_id.",
-      },
-      {
-        tag: "CONTEXT",
-        bg: "#e9eef2",
-        fg: "#274754",
-        text: "Working from context v{ctx}: metric definitions, entity relationships and the known-issues log — refreshed automatically on every schema change.",
-      },
-      {
-        tag: "TRY",
-        bg: "#faf3dc",
-        fg: "#8a6d1a",
-        text: "Express Checkout performance since launch · where the funnel leaks · why mobile uploads fail.",
-      },
-    ],
-    confidence: null,
-    sql: null,
-  },
 }
 
 export const STATIC_TRACES: Trace[] = [
@@ -459,34 +277,6 @@ export const INITIAL_STATUSES: Record<SpecId, SpecStatus> = {
 export const INITIAL_HISTORY: HistoryEntry[] = [
   { specId: "wa", time: "today 13:21", version: "v1.2 → v1.3", approvedBy: "R. Mehta" },
   { specId: "tp", time: "today 12:58", version: "v1.1 → v1.2", approvedBy: "R. Mehta" },
-]
-
-export const INITIAL_CONVERSATIONS: Conversation[] = [
-  {
-    id: 1,
-    title: "Funnel drop-off review",
-    time: "13:41",
-    starred: true,
-    messages: [
-      {
-        id: 1,
-        role: "user",
-        text: "Where do users drop off in the funnel?",
-        stepsDone: 0,
-        revealed: false,
-        contextVersion: "1.3",
-      },
-      {
-        id: 2,
-        role: "agent",
-        answerKey: "funnel",
-        stepsDone: 99,
-        revealed: true,
-        contextVersion: "1.3",
-      },
-    ],
-  },
-  { id: 2, title: "New conversation", time: "now", starred: false, messages: [] },
 ]
 
 export const INITIAL_DASHBOARDS: Dashboard[] = [

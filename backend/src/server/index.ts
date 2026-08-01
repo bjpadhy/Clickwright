@@ -15,6 +15,7 @@
  *   GET  /api/conversations/:id           full message history (insights included)
  *   POST /api/conversations/:id/messages  ask a question → SSE: steps then insight
  *   POST /api/conversations/:id/star      star/unstar
+ *   DELETE /api/conversations/:id         delete a conversation and its turns
  *   GET  /api/suggestions                 suggested-question chips from spec context
  *   POST/GET/DELETE /api/dashboards       saved charts; GET :id/run re-executes the SQL
  *   GET  /api/context                     latest version of every entity
@@ -30,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { RunManager, type StoredEvent } from "./runs.js";
 import {
   initChatTables, createConversation, listConversations, getConversation,
-  setStarred, suggestions, streamAnswer,
+  setStarred, deleteConversation, suggestions, streamAnswer,
 } from "./chat.js";
 import {
   initDashboardTables, saveDashboard, listDashboards, runDashboard, deleteDashboard,
@@ -212,12 +213,26 @@ app.get("/api/conversations", async (_req, res) => {
 });
 
 app.get("/api/conversations/:id", async (req, res) => {
-  res.json(await getConversation(req.params.id));
+  try {
+    res.json(await getConversation(req.params.id));
+  } catch (error) {
+    res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 app.post("/api/conversations/:id/star", async (req, res) => {
   try {
     await setStarred(req.params.id, Boolean(req.body?.starred));
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+/** Delete a conversation and its turns. Irreversible. */
+app.delete("/api/conversations/:id", async (req, res) => {
+  try {
+    await deleteConversation(req.params.id);
     res.json({ ok: true });
   } catch (error) {
     res.status(404).json({ error: error instanceof Error ? error.message : String(error) });

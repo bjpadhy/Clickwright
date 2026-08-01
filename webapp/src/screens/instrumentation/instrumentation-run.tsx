@@ -13,6 +13,7 @@ import {
   solidButtonMd,
   solidButtonSm,
 } from "@/components/ui-kit/styles"
+import { useChat } from "@/state/chat"
 import { useConsole } from "@/state/console"
 import { useInstrumentation } from "@/state/instrumentation"
 import { InstrumentationTabs } from "./instrumentation-tabs"
@@ -32,7 +33,8 @@ import { PipelineSteps } from "./pipeline-steps"
 import { SpecInput } from "./spec-input"
 
 export function InstrumentationRun() {
-  const { setInstrTab, askAboutFeature } = useConsole()
+  const { setInstrTab } = useConsole()
+  const { askAbout } = useChat()
   const {
     runId,
     run,
@@ -62,6 +64,16 @@ export function InstrumentationRun() {
   const viewReport = () => {
     if (runId) selectRunId(runId)
     setInstrTab("hist")
+  }
+
+  /** Hand the Analytics Agent the feature this run just made queryable. */
+  const askAboutFeature = () => {
+    const feature = (run?.spec ?? "").replace(/^\d+[_-]/, "").replace(/_/g, " ").trim()
+    askAbout(
+      feature
+        ? `How is ${feature} performing since launch?`
+        : "What can I learn from the tables that were just created?"
+    )
   }
 
   const ddlDecided = model.approvals.some((approval) => approval.gate === "ddl")

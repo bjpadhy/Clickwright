@@ -7,7 +7,7 @@ Langfuse trace.
 React 19 + Vite + Tailwind v4, built exclusively on the
 [shadcn/ui](https://ui.shadcn.com) component library (`radix-nova` style, zinc base).
 
-**Instrumentation runs against the real backend.** Chat, Dashboards and
+**Instrumentation and Chat run against the real backend.** Dashboards and
 Observability are still served by the in-memory mock.
 
 ```bash
@@ -16,7 +16,7 @@ npm run dev      # http://localhost:5173
 npm run build
 ```
 
-The Instrumentation screen needs the backend up:
+The Instrumentation and Chat screens need the backend up:
 
 ```bash
 cd ../backend && npm run serve      # http://localhost:8787
@@ -29,29 +29,32 @@ the screen shows a "backend unreachable" panel instead of failing silently.
 
 | Screen              | Route state                | Data source | What it does                                                       |
 | ------------------- | -------------------------- | ----------- | ------------------------------------------------------------------ |
-| **Chat**            | `nav: "chat"`              | mock        | Ask the Analytics Agent; plan steps stream, then an insight reveals |
+| **Chat**            | `nav: "chat"`              | **backend** | Ask the Analytics Agent; agent steps stream, then a traced insight  |
 | **Instrumentation** | `nav: "instr"`, tab `run`  | **backend** | Spec in → live pipeline → proposed DDL → two approval gates → execute |
 |                     | `nav: "instr"`, tab `hist` | **backend** | The full decision record of every run, replayed from `runs_log`     |
 | **Observability**   | `nav: "obs"`               | mock        | Agent traces, database health, and the schema/context changelog     |
-| **Dashboards**      | `nav: "dash"`              | mock        | Insights pinned from Chat, re-run on every load                     |
+| **Dashboards**      | `nav: "dash"`              | mock        | Saved visualizations, re-run on every load                          |
 
 ### Demo knob
 
-- `?speed=instant|fast|realistic` — pacing of the *mocked* chat answers (default `fast`)
+- `?speed=instant|fast|realistic` — pacing of the *mocked* dashboard refresh (default `fast`)
 
 ## Architecture
 
 ```
 src/
 ├── api/
-│   ├── instrumentation.ts   # the real backend: types from backend/API.md + fetch/SSE
+│   ├── http.ts              # shared transport: fetch wrapper + SSE-over-POST reader
+│   ├── instrumentation.ts   # real backend: runs, gates, context store (backend/API.md)
+│   ├── chat.ts              # real backend: conversations, answer stream, Insight
 │   ├── types.ts             # contract for the still-mocked screens
 │   └── client.ts            # resolves the mock
 ├── mock/
-│   ├── fixtures.ts          # seed data (answers, traces, changelog, conversations)
+│   ├── fixtures.ts          # seed data (dashboard tiles, traces, changelog)
 │   └── server.ts            # MockSpecLoopServer: in-memory state + streamed progress
 ├── state/
 │   ├── console.tsx          # client-only state (active screen, filters) + mock store
+│   ├── chat.tsx             # conversations, the streaming turn, saved answers
 │   └── instrumentation.tsx  # run stream, gates, spec catalogue, history
 ├── components/
 │   ├── ui/                  # stock shadcn components — safe to `shadcn diff`
@@ -79,14 +82,43 @@ Two behaviours worth knowing before changing this code:
   `step_error` on attempt 1 is the self-healing loop, so the error text is rendered
   verbatim under the step instead of being collapsed away.
 
+### How the Chat screen works
+
+`POST /api/conversations/:id/messages` answers one question as an SSE stream, so —
+unlike a run — it cannot use `EventSource` (that can only GET). `src/api/http.ts`
+reads the frames straight off the response body instead. `screens/chat/chat-model.ts`
+turns those events into the "how I got this" panel, with the same two rules as a run:
+`*_attempt_N` steps collapse into one node, and a failure that triggered a retry is
+shown rather than swallowed.
+
+What persists and what does not is deliberate. Conversations, titles, stars and the
+finished `Insight` of every turn live in ClickHouse, so reopening a conversation
+re-renders its cards with no recompute. The per-step events are **not** stored — the
+step panel therefore only exists for answers watched in the current session, and a
+reload shows the card alone.
+
+A new conversation is a draft (`activeId === null`) until its first question, so
+opening the screen never writes an empty row. `Save to dashboard` posts the SQL
+behind the chart — the board re-executes it read-only on every load.
+
+Deleting is irreversible, so the trash icon arms an inline confirm in the row
+rather than acting on the first click, and the row is removed optimistically —
+a failed `DELETE` re-reads the list back into truth. Deleting the open
+conversation falls through to the next one down, then the one above it, then the
+draft empty state. A conversation whose answer is still streaming refuses to be
+deleted.
+
 ### Swapping in the rest of the backend
 
-`SpecLoopApi` in `src/api/types.ts` still fronts Chat, Dashboards and
-Observability, with the mock implementing it. The contracts for those endpoints are
-frozen in `backend/API.md` under **[PLANNED]**; each one can be cut over the way
-Instrumentation was — add a client next to `src/api/instrumentation.ts`, then move
-that screen's state out of `ServerState`. `src/mock/fixtures.ts` is imported only
-by `src/mock/server.ts`, so the fixtures die with the last mocked screen.
+`SpecLoopApi` in `src/api/types.ts` still fronts Dashboards and Observability, with
+the mock implementing it. Each can be cut over the way Instrumentation and Chat were
+— add a client next to `src/api/chat.ts`, then move that screen's state out of
+`ServerState`. `src/mock/fixtures.ts` is imported only by `src/mock/server.ts`, so
+the fixtures die with the last mocked screen.
+
+One gap is open: Chat's **Save to dashboard** writes to the real `/api/dashboards`,
+but the Dashboards screen still reads the mock, so a saved chart will not appear
+there until that screen is migrated too.
 
 ## Design notes
 

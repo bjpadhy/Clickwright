@@ -3,16 +3,17 @@
  * is typed into a form. Everything that would survive a page reload on a real
  * deployment lives on the server, not here.
  *
- * Chat, Dashboards and Observability are still served by the in-memory mock in
- * `src/mock`. Instrumentation is not — it runs against the real backend and owns
- * its state in `src/state/instrumentation.tsx`.
+ * Dashboards and Observability are still served by the in-memory mock in
+ * `src/mock`. Instrumentation and Chat are not — they run against the real
+ * backend and own their state in `src/state/instrumentation.tsx` and
+ * `src/state/chat.tsx`.
  */
 
 import * as React from "react"
 import { toast } from "sonner"
 
 import { api } from "@/api/client"
-import type { AgentKind, AnswerKey, ServerState } from "@/api/types"
+import type { AgentKind, ServerState } from "@/api/types"
 
 export type NavId = "chat" | "instr" | "obs" | "dash"
 export type InstrTab = "run" | "hist"
@@ -41,8 +42,6 @@ interface ConsoleContextValue {
   /* instrumentation — which of its two screens is showing */
   instrTab: InstrTab
   setInstrTab: (tab: InstrTab) => void
-  /** jump to Chat and ask the (still mocked) Analytics Agent about a feature */
-  askAboutFeature: () => void
 
   /* observability */
   obsTab: ObsTab
@@ -69,20 +68,6 @@ interface ConsoleContextValue {
   refreshDashboards: () => void
   createDashboard: () => void
   removeFromDashboard: (dashboardId: number, index: number) => void
-
-  /* chat */
-  activeConversation: number
-  setActiveConversation: (id: number) => void
-  chatInput: string
-  setChatInput: (value: string) => void
-  send: (question?: string) => void
-  newConversation: () => void
-  toggleStar: (id: number) => void
-  pinToDashboard: (key: AnswerKey) => void
-  sqlOpen: Record<number, boolean>
-  toggleSql: (messageId: number) => void
-  chartMode: Record<number, "chart" | "table">
-  setChartMode: (messageId: number, mode: "chart" | "table") => void
 }
 
 const ConsoleContext = React.createContext<ConsoleContextValue | null>(null)
@@ -103,10 +88,6 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
   const [logFilter, setLogFilter] = React.useState<LogFilter>("all")
 
   const [activeDashboard, setActiveDashboard] = React.useState(1)
-  const [activeConversation, setActiveConversation] = React.useState(2)
-  const [chatInput, setChatInput] = React.useState("")
-  const [sqlOpen, setSqlOpen] = React.useState<Record<number, boolean>>({})
-  const [chartMode, setChartMode] = React.useState<Record<number, "chart" | "table">>({})
 
   /* server-pushed toasts */
   React.useEffect(() => api.onNotice(({ message }) => toast.success(message)), [])
@@ -116,34 +97,13 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
     void api.refreshDashboards()
   }, [])
 
-  const openChat = React.useCallback(() => {
-    void api.openConversation().then((id) => {
-      setNav("chat")
-      setActiveConversation(id)
-    })
-  }, [])
-
   const goto = React.useCallback(
     (next: NavId) => {
-      if (next === "chat") return openChat()
       if (next === "dash") return refreshDashboards()
       setNav(next)
     },
-    [openChat, refreshDashboards]
+    [refreshDashboards]
   )
-
-  /* ── instrumentation → chat handoff ────────────────────────────────── */
-
-  const askAboutFeature = React.useCallback(() => {
-    void api.createConversation().then((id) => {
-      setNav("chat")
-      setActiveConversation(id)
-      window.setTimeout(
-        () => void api.ask(id, "How is Express Checkout performing since launch?"),
-        350
-      )
-    })
-  }, [])
 
   /* ── observability ─────────────────────────────────────────────────── */
 
@@ -179,51 +139,12 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
     []
   )
 
-  const pinToDashboard = React.useCallback(
-    (key: AnswerKey) => {
-      void api.pinToDashboard(activeDashboard, key).then(setActiveDashboard)
-    },
-    [activeDashboard]
-  )
-
-  /* ── chat ──────────────────────────────────────────────────────────── */
-
-  const send = React.useCallback(
-    (question?: string) => {
-      const text = (question ?? chatInput).trim()
-      if (!text) return
-      setChatInput("")
-      void api.ask(activeConversation, text)
-    },
-    [activeConversation, chatInput]
-  )
-
-  const newConversation = React.useCallback(() => {
-    void api.createConversation().then(setActiveConversation)
-  }, [])
-
-  const toggleStar = React.useCallback((id: number) => {
-    void api.toggleStar(id)
-  }, [])
-
-  const toggleSql = React.useCallback((messageId: number) => {
-    setSqlOpen((current) => ({ ...current, [messageId]: !current[messageId] }))
-  }, [])
-
-  const setChartModeFor = React.useCallback(
-    (messageId: number, mode: "chart" | "table") => {
-      setChartMode((current) => ({ ...current, [messageId]: mode }))
-    },
-    []
-  )
-
   const value: ConsoleContextValue = {
     server,
     nav,
     goto,
     instrTab,
     setInstrTab,
-    askAboutFeature,
     obsTab,
     setObsTab,
     traceFilter,
@@ -246,18 +167,6 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
     refreshDashboards,
     createDashboard,
     removeFromDashboard,
-    activeConversation,
-    setActiveConversation,
-    chatInput,
-    setChatInput,
-    send,
-    newConversation,
-    toggleStar,
-    pinToDashboard,
-    sqlOpen,
-    toggleSql,
-    chartMode,
-    setChartMode: setChartModeFor,
   }
 
   return <ConsoleContext value={value}>{children}</ConsoleContext>

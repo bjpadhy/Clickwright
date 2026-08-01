@@ -37,7 +37,8 @@ export interface RunDetail extends RunSummary {
 
 export type RunEventType =
   | "step_start" | "step_end" | "step_error"
-  | "status" | "approval_request" | "approval_result";
+  | "status" | "approval_request" | "approval_result"
+  | "log";                  // per-statement execution progress (ddl_statement, data_load)
 
 export interface RunEvent {
   seq: number;              // 0-based, dense, ordering key
@@ -64,6 +65,7 @@ export interface ContextProposal {
     definition_md: string;  // full replacement text (markdown)
     change_note: string;    // why this entry/version exists
   }>;
+  warnings?: string[];      // contradictions with existing context — the "contradiction surfaced" chips
 }
 
 // ── context store ────────────────────────────────────────────────
@@ -133,11 +135,12 @@ several times). `failed` only occurs on exhausted retries or hard errors.
 
 ---
 
-## [LIVE] GET /api/runs — run list
+## [LIVE] GET /api/runs — run list (current server session)
 
-`200 RunSummary[]`, newest first. In-memory: restarts clear it (history
-survives in the `runs_log` ClickHouse table; a history endpoint over it is
-[PLANNED], see below).
+`200 RunSummary[]`, newest first. This is the in-memory hot list (live +
+recently finished runs). Every event is ALSO persisted to the `runs_log`
+ClickHouse table as it happens — for history across restarts use the [LIVE]
+`GET /api/history` endpoints below.
 
 ## [LIVE] GET /api/runs/:id — run detail
 
@@ -160,9 +163,8 @@ data: <RunEvent as JSON>       // one line
 
 Keepalive comments (`: keepalive`) every 15s — EventSource ignores them.
 Reconnect = full replay (dedupe by `seq`; `Last-Event-ID` resume is not
-implemented). With `EventSource`, either register `addEventListener` for each
-of the six event types, or just use one generic handler via `onmessage`-style
-listeners per type.
+implemented). With `EventSource`, register `addEventListener` for each of the
+seven event types (they are named events, so plain `onmessage` will NOT fire).
 
 ### Event payload shapes by type
 
@@ -309,9 +311,11 @@ GET /api/observe/clickhouse           → { latencyP95ByHour, storageByTable, sl
 4. **Timings**: a run takes 3–6 minutes; generation steps are 1–3 min each with
    no intermediate events — show an elapsed timer/spinner on the running step,
    don't treat silence as a stall (keepalives confirm liveness).
-5. **runs list is in-memory** — after a backend restart, live runs are gone but
-   `runs_log` (ClickHouse) still has all events; the History screen should not
-   assume `/api/runs` is complete history once the [PLANNED] endpoint lands.
+5. **`/api/runs` is the session's hot list, `/api/history` is the truth** —
+   after a backend restart the hot list is empty but every event is already in
+   `runs_log` (verified: inserts happen per-event, not on completion). History
+   screen = `/api/history`; live screen = `/api/runs` + SSE.
 6. Statuses `queued → running` can flip fast for an idle queue — don't animate
    on `queued` unless it persists.
-```
+7. **A `dry_run_attempt_N` `step_error` is not a run failure** — it feeds the
+   retry loop like any other error; a new generation attempt follows.

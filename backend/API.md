@@ -290,6 +290,13 @@ straight to POST /api/runs. `alreadyInstrumented` disables the Use button.
 first. `durationMs` is the end-to-end wall clock reconstructed from the persisted
 events.
 
+**Capped at the 200 most recent runs.** This used to return every run ever recorded,
+which grew the response without limit. If a history screen ever needs more than 200,
+it needs pagination rather than a bigger cap. `runs_log` also carries a 90-day TTL and
+`insight_cache` a 30-day one, so neither the scan behind this endpoint nor the storage
+grows without bound; expiring a cache entry costs a recompute and never changes an
+answer.
+
 ## [LIVE] GET /api/history/:runId — full decision record of a past run
 
 `200 StoredEvent[]` — same shapes as the SSE stream; renders the report view

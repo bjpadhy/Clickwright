@@ -146,9 +146,16 @@ export class RunManager {
         name    String,
         payload String
       ) ENGINE = MergeTree ORDER BY (run_id, seq)
+      TTL toDateTime(ts) + INTERVAL 90 DAY
       COMMENT 'Clickwright run events — powers the UI live stepper, replay, and history'
     `);
     await command(`ALTER TABLE runs_log ADD COLUMN IF NOT EXISTS spec String AFTER run_id`);
+    // Roughly 113 events (~73KB) per run, appended forever. /api/history
+    // aggregates this whole table, so without a retention bound both the scan
+    // and the storage grow without limit. 90 days keeps every run anyone would
+    // reasonably look back at. Applied to already-created tables too, since the
+    // CREATE above is a no-op once the table exists.
+    await command(`ALTER TABLE runs_log MODIFY TTL toDateTime(ts) + INTERVAL 90 DAY`);
   }
 
   list(): Array<Omit<RunRecord, "events" | "subscribers" | "resolveApproval">> {

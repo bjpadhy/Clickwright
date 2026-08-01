@@ -40,8 +40,124 @@ function inferType(
   return "string";
 }
 
+/**
+ * Per-field running state. Everything a FieldProfile reports is a count, an
+ * extreme, or a capped set, so none of it needs the values kept around — which
+ * is what lets a profile of any number of rows fit in memory.
+ */
+interface FieldAccumulator {
+  nullish: number;   // null | undefined | "" — a MISSING key is not counted
+  nonNull: number;
+  booleans: number;
+  numbers: number;
+  timestamps: number;
+  objects: number;
+  distinct: Set<string>;
+  distinctCapped: boolean;
+  samples: Set<string>;
+  maxLength: number;
+  numericCount: number;
+  min: number;
+  max: number;
+}
+
+const newAccumulator = (): FieldAccumulator => ({
+  nullish: 0, nonNull: 0, booleans: 0, numbers: 0, timestamps: 0, objects: 0,
+  distinct: new Set(), distinctCapped: false, samples: new Set(),
+  maxLength: 0, numericCount: 0, min: Infinity, max: -Infinity,
+});
+
+/**
+ * Accumulates a profile one row at a time, holding O(fields) state instead of
+ * O(rows). Feed rows with `add`, then call `finish`.
+ *
+ * Field order in the output follows first appearance, matching what a
+ * collect-then-reduce pass produced.
+ */
+export class ProfileAccumulator {
+  private readonly fields = new Map<string, FieldAccumulator>();
+  private totalRows = 0;
+
+  add(row: Record<string, unknown>): void {
+    this.totalRows++;
+    for (const [key, val] of Object.entries(row)) {
+      let acc = this.fields.get(key);
+      if (!acc) {
+        acc = newAccumulator();
+        this.fields.set(key, acc);
+      }
+
+      const isNullish = val === null || val === undefined || val === "";
+      if (isNullish) acc.nullish++;
+      else {
+        acc.nonNull++;
+        if (typeof val === "boolean") acc.booleans++;
+        else if (typeof val === "number") acc.numbers++;
+        else if (typeof val === "object") acc.objects++;
+        else if (typeof val === "string" && TIMESTAMP_RE.test(val)) acc.timestamps++;
+
+        const asString = typeof val === "object" ? JSON.stringify(val) : String(val);
+        if (asString.length > acc.maxLength) acc.maxLength = asString.length;
+        if (acc.samples.size < SAMPLE_SIZE) acc.samples.add(asString);
+      }
+
+      // numericRange was taken over every present value of numeric type, which
+      // is the same set as the non-null numbers: null is an object and "" a string
+      if (typeof val === "number") {
+        acc.numericCount++;
+        if (val < acc.min) acc.min = val;
+        if (val > acc.max) acc.max = val;
+      }
+
+      if (!acc.distinctCapped) {
+        const repr =
+          val === null || val === undefined
+            ? "__null__"
+            : typeof val === "object"
+              ? JSON.stringify(val)
+              : String(val);
+        acc.distinct.add(repr);
+        if (acc.distinct.size >= MAX_DISTINCT_TRACK) acc.distinctCapped = true;
+      }
+    }
+  }
+
+  finish(label: string): NdjsonProfile {
+    const fields: FieldProfile[] = [];
+    for (const [field, acc] of this.fields) {
+      const type = inferTypeFromCounts(acc);
+      const profile: FieldProfile = {
+        field,
+        inferredType: type,
+        nullRate: Math.round((this.totalRows > 0 ? acc.nullish / this.totalRows : 0) * 1000) / 1000,
+        distinctCount: acc.distinctCapped ? MAX_DISTINCT_TRACK + 1 : acc.distinct.size,
+        totalCount: this.totalRows,
+        sampleValues: [...acc.samples],
+        isNested: type === "json",
+      };
+      if (type === "string" || type === "timestamp") profile.maxLength = acc.maxLength;
+      if (type === "number" && acc.numericCount > 0) {
+        profile.numericRange = { min: acc.min, max: acc.max };
+      }
+      fields.push(profile);
+    }
+    return { filePath: label, totalRows: this.totalRows, fields };
+  }
+}
+
+/** Same decision tree as inferType, driven by counts rather than the values. */
+function inferTypeFromCounts(acc: FieldAccumulator): FieldProfile["inferredType"] {
+  if (acc.nonNull === 0) return "string";
+  if (acc.booleans === acc.nonNull) return "boolean";
+  if (acc.numbers === acc.nonNull) return "number";
+  if (acc.timestamps === acc.nonNull) return "timestamp";
+  if (acc.objects === acc.nonNull) return "json";
+  return "string";
+}
+
+/** Profile a file without ever holding it in memory. */
 export async function profileNdjson(filePath: string): Promise<NdjsonProfile> {
-  const records: Record<string, unknown>[] = [];
+  const acc = new ProfileAccumulator();
   const rl = createInterface({
     input: createReadStream(filePath, { encoding: "utf-8" }),
     crlfDelay: Infinity,
@@ -50,12 +166,12 @@ export async function profileNdjson(filePath: string): Promise<NdjsonProfile> {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      records.push(JSON.parse(trimmed) as Record<string, unknown>);
+      acc.add(JSON.parse(trimmed) as Record<string, unknown>);
     } catch {
       continue;
     }
   }
-  return profileRecords(records, filePath);
+  return acc.finish(filePath);
 }
 
 /** Profile already-parsed records — used for per-event-type profiling. */
@@ -63,99 +179,9 @@ export function profileRecords(
   records: Record<string, unknown>[],
   label: string,
 ): NdjsonProfile {
-  const fieldValues: Map<string, unknown[]> = new Map();
-  const fieldDistinct: Map<string, Set<string>> = new Map();
-  const fieldDistinctCapped: Map<string, boolean> = new Map();
-  let totalRows = 0;
-
-  for (const row of records) {
-    totalRows++;
-
-    for (const [key, val] of Object.entries(row)) {
-      if (!fieldValues.has(key)) {
-        fieldValues.set(key, []);
-        fieldDistinct.set(key, new Set());
-        fieldDistinctCapped.set(key, false);
-      }
-      fieldValues.get(key)!.push(val);
-
-      const ds = fieldDistinct.get(key)!;
-      if (!fieldDistinctCapped.get(key)) {
-        const repr =
-          val === null || val === undefined
-            ? "__null__"
-            : typeof val === "object"
-            ? JSON.stringify(val)
-            : String(val);
-        ds.add(repr);
-        if (ds.size >= MAX_DISTINCT_TRACK) {
-          fieldDistinctCapped.set(key, true);
-        }
-      }
-    }
-  }
-
-  const fields: FieldProfile[] = [];
-
-  for (const [field, values] of fieldValues.entries()) {
-    const nullCount = values.filter(
-      (v) => v === null || v === undefined || v === ""
-    ).length;
-    const nullRate = totalRows > 0 ? nullCount / totalRows : 0;
-
-    const type = inferType(values);
-    const isNested = type === "json";
-
-    const distinct = fieldDistinct.get(field)!;
-    const capped = fieldDistinctCapped.get(field)!;
-    const distinctCount = capped ? MAX_DISTINCT_TRACK + 1 : distinct.size;
-
-    const nonNullStr = values
-      .filter((v) => v !== null && v !== undefined && v !== "")
-      .map((v) =>
-        typeof v === "object" ? JSON.stringify(v) : String(v)
-      );
-
-    const sampleSet = new Set<string>();
-    for (const v of nonNullStr) {
-      if (sampleSet.size >= SAMPLE_SIZE) break;
-      sampleSet.add(v);
-    }
-    const sampleValues = [...sampleSet];
-
-    const profile: FieldProfile = {
-      field,
-      inferredType: type,
-      nullRate: Math.round(nullRate * 1000) / 1000,
-      distinctCount,
-      totalCount: totalRows,
-      sampleValues,
-      isNested,
-    };
-
-    if (type === "string" || type === "timestamp") {
-      profile.maxLength = Math.max(
-        0,
-        ...nonNullStr.map((s) => s.length)
-      );
-    }
-
-    if (type === "number") {
-      const nums = values.filter(
-        (v) => typeof v === "number"
-      ) as number[];
-      if (nums.length > 0) {
-        profile.numericRange = {
-          min: Math.min(...nums),
-          max: Math.max(...nums),
-        };
-      }
-    }
-
-    fields.push(profile);
-  }
-
-  return { filePath: label, totalRows, fields };
+  const acc = new ProfileAccumulator();
+  for (const row of records) acc.add(row);
+  return acc.finish(label);
 }
 
 export function profileSummary(profile: NdjsonProfile): string {

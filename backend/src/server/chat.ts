@@ -130,24 +130,46 @@ async function loadConversation(
 
 export async function listConversations(): Promise<unknown[]> {
   // Correlated subqueries are rejected by ClickHouse ("Cannot check Sorting plan
-  // step for correlated expressions") — aggregate once and join. FINAL collapses
-  // the ReplacingMergeTree versions from title/star updates.
+  // step for correlated expressions") — aggregate once and join.
+  //
+  // Two deliberate choices here, both about how this behaves as the tables grow:
+  // argMax collapses the ReplacingMergeTree versions instead of FINAL (which
+  // merges at query time on every sidebar load), and the message stats are
+  // restricted to the 100 conversations actually being returned. Aggregating all
+  // of `messages` first and only then taking the top 100 meant every sidebar load
+  // scanned the entire chat history. The `conv_id IN (...)` predicate hits the
+  // messages sort key, so it prunes instead of scanning.
+  //
+  // `max(updated_at) AS last_at`, not `AS updated_at`: an alias matching the
+  // column makes ClickHouse resolve the argMax argument to the alias and reject
+  // the query as a nested aggregate.
   return query(`
-    WITH stats AS (
+    WITH recent AS (
+      SELECT conv_id,
+             argMax(title, updated_at)   AS title,
+             argMax(starred, updated_at) AS starred,
+             argMax(deleted, updated_at) AS deleted,
+             max(updated_at)             AS last_at
+      FROM conversations
+      GROUP BY conv_id
+      HAVING deleted = 0
+      ORDER BY last_at DESC
+      LIMIT 100
+    )
+    SELECT r.conv_id AS id, r.title, toUInt8(r.starred) AS starred,
+           toString(r.last_at) AS updatedAt,
+           coalesce(s.preview, '') AS preview,
+           coalesce(s.messages, toUInt32(0)) AS messages
+    FROM recent AS r
+    LEFT JOIN (
       SELECT conv_id,
              toUInt32(count()) AS messages,
              argMaxIf(question, seq, role = 'user') AS preview
-      FROM messages GROUP BY conv_id
-    )
-    SELECT c.conv_id AS id, c.title, toUInt8(c.starred) AS starred,
-           toString(c.updated_at) AS updatedAt,
-           coalesce(s.preview, '') AS preview,
-           coalesce(s.messages, toUInt32(0)) AS messages
-    FROM conversations AS c FINAL
-    LEFT JOIN stats AS s ON s.conv_id = c.conv_id
-    WHERE c.deleted = 0
-    ORDER BY c.updated_at DESC
-    LIMIT 100
+      FROM messages
+      WHERE conv_id IN (SELECT conv_id FROM recent)
+      GROUP BY conv_id
+    ) AS s ON s.conv_id = r.conv_id
+    ORDER BY r.last_at DESC
   `);
 }
 

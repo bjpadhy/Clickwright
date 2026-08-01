@@ -11,6 +11,8 @@
  * The database is touched only to execute DDL and load rows.
  */
 import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import path from "node:path";
 import { z } from "zod";
 import { command, insert, query, rowCount } from "../core/db.js";
@@ -255,11 +257,20 @@ export async function runInstrumentation(
     const specName = path.basename(opts.specDir.replace(/\/+$/, ""));
     const tablePlans = new Map<string, TablePlan>();
     const spec = await readFile(path.join(opts.specDir, "spec.md"), "utf-8");
-    const raw = await readFile(path.join(opts.specDir, "events.ndjson"), "utf-8");
-    const rows = raw
-      .split("\n")
-      .filter((l) => l.trim())
-      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    // Streamed rather than read whole: readFile + split + map holds the file
+    // text, the array of lines and the parsed rows in memory at the same time,
+    // and V8 refuses a single string much past 1GB — a large capture used to
+    // fail before parsing even started. A malformed line still throws, as
+    // before; silently skipping rows would quietly change the data we load.
+    const rows: Record<string, unknown>[] = [];
+    const lines = createInterface({
+      input: createReadStream(path.join(opts.specDir, "events.ndjson"), { encoding: "utf-8" }),
+      crlfDelay: Infinity,
+    });
+    for await (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed) rows.push(JSON.parse(trimmed) as Record<string, unknown>);
+    }
 
     // ── profile (pure code) ──
     const groups = groupByEvent(rows);

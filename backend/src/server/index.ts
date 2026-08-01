@@ -171,6 +171,10 @@ app.get("/api/history", async (_req, res) => {
            -- end-to-end wall clock of the run, gates included
            toString(dateDiff('millisecond', min(ts), max(ts))) AS durationMs
     FROM runs_log GROUP BY run_id ORDER BY started DESC
+    -- The screen shows recent runs; without a bound this returned every run ever
+    -- and grew the payload forever. runs_log also carries a TTL (see runs.ts) so
+    -- the scan behind this GROUP BY stays bounded too.
+    LIMIT 200
   `);
   res.json(
     rows.map((r) => ({

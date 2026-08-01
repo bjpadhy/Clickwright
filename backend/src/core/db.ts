@@ -23,6 +23,15 @@ export function db(): ClickHouseClient {
     password: env.clickhouse.password,
     database: env.clickhouse.database,
     request_timeout: 120_000,
+    // A query that returns nothing for 120s looks dead to Cloud's load balancer,
+    // which closes the socket — the answer is lost to "socket hang up" even
+    // though ClickHouse is still working. Progress headers keep the connection
+    // visibly alive. This only matters once scans get slow, which is exactly
+    // what more data does.
+    clickhouse_settings: {
+      send_progress_in_http_headers: 1,
+      http_headers_progress_interval_ms: "30000",
+    },
   });
   return client;
 }

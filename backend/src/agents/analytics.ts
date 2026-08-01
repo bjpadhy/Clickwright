@@ -40,8 +40,13 @@ export async function initInsightCache(): Promise<void> {
       insight_json  String,
       created_at    DateTime64(3)
     ) ENGINE = ReplacingMergeTree(created_at) ORDER BY cache_key
+    TTL toDateTime(created_at) + INTERVAL 30 DAY
     COMMENT 'Analytics answers keyed by question + context version — repeat asks are instant'
   `);
+  // The key includes the context version, so an entry is dead the moment any
+  // definition it depended on changes — but nothing removed it. Expiry costs a
+  // recompute on the next ask and never changes an answer.
+  await command(`ALTER TABLE insight_cache MODIFY TTL toDateTime(created_at) + INTERVAL 30 DAY`);
 }
 
 const cacheKey = (question: string, contextKey: string) =>

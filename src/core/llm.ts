@@ -19,7 +19,12 @@ function client(): Anthropic {
 async function completeViaAgentSdk(
   prompt: string,
   options: CompleteOptions,
-): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+): Promise<{
+  text: string;
+  inputTokens: number;
+  outputTokens: number;
+  estimated: boolean;
+}> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
   const stream = query({
     prompt,
@@ -38,10 +43,28 @@ async function completeViaAgentSdk(
       if (message.subtype !== "success") {
         throw new Error(`Agent SDK call failed: ${message.subtype}`);
       }
+      // Subscription (OAuth) auth doesn't meter tokens — usage comes back as
+      // zeros or per-turn fragments. Prefer reported numbers when sane
+      // (includes cache reads/writes); otherwise estimate at ~4 chars/token so
+      // Langfuse dashboards stay meaningful. Estimates are labeled as such.
+      const u = message.usage as {
+        input_tokens: number;
+        output_tokens: number;
+        cache_creation_input_tokens?: number | null;
+        cache_read_input_tokens?: number | null;
+      };
+      const reportedIn =
+        u.input_tokens +
+        (u.cache_creation_input_tokens ?? 0) +
+        (u.cache_read_input_tokens ?? 0);
+      const estIn = Math.ceil(prompt.length / 4);
+      const estOut = Math.ceil(message.result.length / 4);
+      const estimated = reportedIn < estIn * 0.2 || u.output_tokens < estOut * 0.2;
       return {
         text: message.result,
-        inputTokens: message.usage.input_tokens,
-        outputTokens: message.usage.output_tokens,
+        inputTokens: estimated ? estIn : reportedIn,
+        outputTokens: estimated ? estOut : u.output_tokens,
+        estimated,
       };
     }
   }
@@ -94,6 +117,7 @@ export async function complete(
   try {
     let text: string;
     let usage: { input: number; output: number };
+    let usageEstimated = false;
 
     if (env.llm.apiKey) {
       const response = await client().messages.create({
@@ -115,9 +139,16 @@ export async function complete(
       const result = await completeViaAgentSdk(prompt, options);
       text = result.text;
       usage = { input: result.inputTokens, output: result.outputTokens };
+      usageEstimated = result.estimated;
     }
 
-    generation.end({ output: text, usage });
+    generation.end({
+      output: text,
+      usage,
+      ...(usageEstimated
+        ? { metadata: { usage_source: "estimated ~4 chars/token (subscription auth reports no usage)" } }
+        : {}),
+    });
     return text;
   } catch (error) {
     generation.end({

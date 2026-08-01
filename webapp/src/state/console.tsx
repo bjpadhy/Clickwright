@@ -19,7 +19,8 @@ export type NavId = "chat" | "instr" | "obs" | "dash"
 export type InstrTab = "run" | "hist"
 export type ObsTab = "traces" | "stack" | "log"
 export type TraceFilter = "all" | AgentKind
-export type QueryFilter = "all" | "analytics" | "instrumentation"
+/** Mirrors the agents that can appear in system.query_log's log_comment. */
+export type QueryFilter = "all" | "analytics" | "instrumentation" | "context"
 export type LogFilter = "all" | "table" | "ctx"
 export type ActivityMetric = "traces" | "cost" | "tokens"
 export type ChartView = "bars" | "line"
@@ -78,7 +79,9 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
   const [nav, setNav] = React.useState<NavId>("chat")
   const [instrTab, setInstrTab] = React.useState<InstrTab>("run")
 
-  const [obsTab, setObsTab] = React.useState<ObsTab>("traces")
+  // Database health is the real one; Agent activity is still mock, so it is a
+  // poor thing to land on.
+  const [obsTab, setObsTab] = React.useState<ObsTab>("stack")
   const [traceFilter, setTraceFilter] = React.useState<TraceFilter>("all")
   const [openTrace, setOpenTrace] = React.useState<string | null>(null)
   const [activityMetric, setActivityMetric] = React.useState<ActivityMetric>("traces")

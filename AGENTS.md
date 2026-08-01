@@ -4,6 +4,13 @@ Agentic analytics pipeline for the Atlys problem (Click-a-thon 2026). A feature 
 live optimized ClickHouse tables, updated business context, and a PM-ready insight report come
 out — every decision traced in Langfuse.
 
+## Repo layout
+
+`backend/` — the pipeline: `src/` (core + agents), `prompts/`, `scripts/`, its own
+package.json and `.env`. All npm commands run from here. `webapp/` — the frontend
+(Run view, Chat, History, Context browser). Repo root — shared data only:
+`specs/`, `base_context.md`, `docs/`.
+
 ## The two non-negotiables
 
 1. **Numbers only ever come from ClickHouse.** The LLM writes SQL and narrates results. It never
@@ -107,7 +114,8 @@ unknown envelope fields get added and noted in context, never crash the run.
 
 ## Working rules
 
-- Prompts are files in `prompts/` — tuning one never means editing `.ts`
+- Prompts are files in `backend/prompts/` — tuning one never means editing `.ts`
 - Commit to `main` every 30–45 min; no feature branches
-- Node 20 (`nvm use`) · `npm run check-env` before blaming code for a connection issue
-- `npm run seed` · `npm run run-spec specs/01_express_checkout` · `npm run typecheck`
+- Node 20 (`nvm use`) · from `backend/`: `npm run check-env` before blaming code for a connection issue
+- From `backend/`: `npm run seed` · `npx tsx scripts/run-instrumentation.ts ../specs/01_express_checkout [--yes]` ·
+  `npx tsx scripts/reset-spec.ts <spec>` · `npm run typecheck`

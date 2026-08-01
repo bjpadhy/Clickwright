@@ -1,4 +1,9 @@
-import "dotenv/config";
+import { config } from "dotenv";
+import { fileURLToPath } from "node:url";
+
+// Resolve backend/.env relative to this module, not the cwd — scripts can be
+// launched from the repo root or backend/ interchangeably.
+config({ path: fileURLToPath(new URL("../../.env", import.meta.url)) });
 
 function required(name: string): string {
   const value = process.env[name];

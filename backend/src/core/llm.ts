@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { env } from "./env.js";
 import type { Ctx } from "./tracing.js";
 
@@ -71,7 +72,7 @@ async function completeViaAgentSdk(
   throw new Error("Agent SDK stream ended without a result message");
 }
 
-const PROMPT_DIR = path.resolve(process.cwd(), "prompts");
+const PROMPT_DIR = fileURLToPath(new URL("../../prompts", import.meta.url));
 const promptCache = new Map<string, string>();
 
 /** Prompts live in prompts/*.txt so tuning never means editing TypeScript. */

@@ -122,7 +122,10 @@ async function parseBaseContext(path: string): Promise<SeedEntry[]> {
 
 const force = process.argv.includes("--force");
 
-const entries = await parseBaseContext("base_context.md");
+// base_context.md lives at the repo root (shared data), one level above backend/
+const entries = await parseBaseContext(
+  new URL("../../base_context.md", import.meta.url).pathname,
+);
 
 if (force && (await tableExists("context_store"))) {
   console.log("• --force: dropping context_store");

@@ -21,6 +21,24 @@ import { getContext, reconcileWithLive } from "./context.js";
 
 // ── types ────────────────────────────────────────────────────────
 
+const RationaleSchema = z.object({
+  ordering_key: z.string(),
+  partitioning: z.string(),
+  types_codecs: z.string(),
+  deviations: z.string().default(""),
+});
+
+/** One concurrent call designs one table. */
+const TableProposalSchema = z.object({
+  table: z.object({
+    name: z.string().regex(/^[a-z][a-z0-9_]*$/),
+    event: z.string().min(1),
+    purpose: z.string().min(1),
+    ddl: z.string().min(1),
+  }),
+  rationale: RationaleSchema,
+});
+
 const ProposalSchema = z.object({
   reasoning: z.string().min(1),
   tables: z
@@ -30,6 +48,8 @@ const ProposalSchema = z.object({
         event: z.string().min(1),
         purpose: z.string().min(1),
         ddl: z.string().min(1),
+        // structured per-table rationale — the FE renders this as its own panel
+        rationale: RationaleSchema.optional(),
       }),
     )
     .min(1),
@@ -122,6 +142,7 @@ function groupByEvent(
 
 // ── main ─────────────────────────────────────────────────────────
 
+const MAX_TABLE_TRIES = 3; // per-table self-heal budget (parallel generation)
 const MAX_EXEC_ATTEMPTS = 3; // self-healing budget (ClickHouse/load errors)
 const MAX_TOTAL_ATTEMPTS = 6; // hard cap including parse failures + rejections
 
@@ -152,6 +173,8 @@ export async function runInstrumentation(
 
     // ── profile (pure code) ──
     const groups = groupByEvent(rows);
+    const eventProfiles = new Map<string, string>();
+    const eventNewFields = new Map<string, string[]>();
     const { profileText, newFields } = await step(
       span,
       "profile",
@@ -162,10 +185,12 @@ export async function runInstrumentation(
         for (const [event, records] of groups) {
           const flat = records.map(flattenRow);
           const p = profileRecords(flat, event);
-          sections.push(`### event: ${event} (${records.length} rows)\n${profileSummary(p)}`);
-          for (const f of p.fields) {
-            if (!ENVELOPE_FIELDS.has(f.field)) fresh.add(f.field);
-          }
+          const section = `### event: ${event} (${records.length} rows)\n${profileSummary(p)}`;
+          sections.push(section);
+          eventProfiles.set(event, section);
+          const perEvent = p.fields.filter((f) => !ENVELOPE_FIELDS.has(f.field)).map((f) => f.field);
+          eventNewFields.set(event, perEvent);
+          for (const f of perEvent) fresh.add(f);
         }
         return { profileText: sections.join("\n\n"), newFields: [...fresh] };
       },
@@ -207,65 +232,73 @@ export async function runInstrumentation(
     const liveNames = new Set(recon.liveTables);
 
     for (let attempt = 1; attempt <= MAX_TOTAL_ATTEMPTS; attempt++) {
-      // 1. generate
+      // 1. generate — ONE CALL PER EVENT, CONCURRENTLY. Output tokens dominate
+      //    latency, so N smaller parallel generations beat one big sequential
+      //    one (~5x on a 5-event spec). Each table dry-runs and self-heals on
+      //    its own; siblings are unaffected.
       let proposal: InstrumentationProposal;
       try {
         proposal = await step(
           span,
           `ddl_generation_attempt_${attempt}`,
-          { feedback },
+          { feedback, events: [...groups.keys()], mode: "parallel_per_event" },
           async (genSpan) => {
-            const prompt = await loadPrompt("ddl", {
-              context: bundle.markdown,
-              live_tables: recon.liveTables.join(", "),
-              reconciliation_notes: reconNotes,
-              spec,
-              profile: profileText,
-              new_fields: newFields.join(", ") || "(none)",
-              feedback: feedback
-                ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
-                : "",
+            const events = [...groups.keys()];
+            const tables = await Promise.all(
+              events.map((event) =>
+                step(
+                  genSpan,
+                  `ddl_table_${event}`,
+                  { event },
+                  async (tSpan) => {
+                    let tableFeedback = feedback;
+                    let lastError = "";
+                    for (let tryN = 1; tryN <= MAX_TABLE_TRIES; tryN++) {
+                      try {
+                        const prompt = await loadPrompt("ddl_table", {
+                          context: bundle.markdown,
+                          live_tables: recon.liveTables.join(", "),
+                          reconciliation_notes: reconNotes,
+                          spec,
+                          event,
+                          sibling_events: events.filter((e) => e !== event).join(", ") || "(none)",
+                          profile: eventProfiles.get(event) ?? "",
+                          new_fields: (eventNewFields.get(event) ?? []).join(", ") || "(none)",
+                          feedback: tableFeedback
+                            ? `\n# Feedback on your previous attempt — fix this\n${tableFeedback}\n`
+                            : "",
+                        });
+                        const text = await llm(tSpan, `ddl_${event}`, prompt);
+                        const parsed = TableProposalSchema.parse(JSON.parse(stripFences(text)));
+                        const t = parsed.table;
+                        if (t.event !== event)
+                          throw new Error(`table.event must be "${event}", got "${t.event}"`);
+                        if (liveNames.has(t.name))
+                          throw new Error(`table ${t.name} already exists — pick another name`);
+                        if (!/^\s*create\s+table\s/i.test(t.ddl))
+                          throw new Error("ddl must be a single CREATE TABLE statement");
+                        // dry-run this table alone: ClickHouse parses it before a human sees it
+                        await command(`EXPLAIN AST ${t.ddl}`);
+                        return { ...t, rationale: parsed.rationale };
+                      } catch (error) {
+                        lastError = error instanceof Error ? error.message : String(error);
+                        tableFeedback = `Your previous output for ${event} was rejected: ${lastError}`;
+                      }
+                    }
+                    throw new Error(`table ${event} failed ${MAX_TABLE_TRIES} tries: ${lastError}`);
+                  },
+                ),
+              ),
+            );
+            return ProposalSchema.parse({
+              reasoning: tables
+                .map(
+                  (t) =>
+                    `## ${t.name}\n- **Ordering key** — ${t.rationale.ordering_key}\n- **Partitioning** — ${t.rationale.partitioning}\n- **Types & codecs** — ${t.rationale.types_codecs}${t.rationale.deviations ? `\n- **Deviations & flags** — ${t.rationale.deviations}` : ""}`,
+                )
+                .join("\n\n"),
+              tables,
             });
-            const text = await llm(genSpan, "ddl", prompt);
-            const parsed = ProposalSchema.parse(JSON.parse(stripFences(text)));
-
-            const missing = [...groups.keys()].filter(
-              (e) => !parsed.tables.some((t) => t.event === e),
-            );
-            if (missing.length)
-              throw new Error(`Proposal is missing tables for events: ${missing.join(", ")}`);
-            const phantom = parsed.tables.filter((t) => !groups.has(t.event));
-            if (phantom.length)
-              throw new Error(
-                `Proposed tables reference events that do not exist in the data: ${phantom.map((t) => `${t.name} (event: ${t.event})`).join(", ")}`,
-              );
-            const collisions = parsed.tables.filter((t) => liveNames.has(t.name));
-            if (collisions.length)
-              throw new Error(
-                `Table names already exist in the database: ${collisions.map((t) => t.name).join(", ")} — choose different names`,
-              );
-            const unsafe = parsed.tables.filter(
-              (t) => !/^\s*create\s+table\s/i.test(t.ddl),
-            );
-            if (unsafe.length)
-              throw new Error(
-                `Only single CREATE TABLE statements are allowed; offending: ${unsafe.map((t) => t.name).join(", ")}`,
-              );
-            return parsed;
-          },
-        );
-
-        // dry-run: ClickHouse parses every statement BEFORE a human reads it.
-        // command() (not query()) — EXPLAIN returns plain text, not JSON rows.
-        await step(
-          span,
-          `dry_run_attempt_${attempt}`,
-          { tables: proposal.tables.map((t) => t.name) },
-          async () => {
-            for (const table of proposal.tables) {
-              await command(`EXPLAIN AST ${table.ddl}`);
-            }
-            return { passed: proposal.tables.length };
           },
         );
       } catch (error) {

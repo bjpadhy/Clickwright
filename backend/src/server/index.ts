@@ -10,6 +10,12 @@
  *   GET  /api/runs/:id                    run detail incl. buffered events
  *   GET  /api/runs/:id/events             SSE: replay + live run events
  *   POST /api/runs/:id/approve            {approved, feedback?, identity?} resolves the pending gate
+ *   POST /api/conversations               new chat conversation
+ *   GET  /api/conversations               conversation list (sidebar)
+ *   GET  /api/conversations/:id           full message history (insights included)
+ *   POST /api/conversations/:id/messages  ask a question → SSE: steps then insight
+ *   POST /api/conversations/:id/star      star/unstar
+ *   GET  /api/suggestions                 suggested-question chips from spec context
  *   GET  /api/context                     latest version of every entity
  *   GET  /api/context/:entity/history     full version history for one entity
  */
@@ -18,6 +24,10 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { RunManager, type StoredEvent } from "./runs.js";
+import {
+  initChatTables, createConversation, listConversations, getConversation,
+  setStarred, suggestions, streamAnswer,
+} from "./chat.js";
 import { query } from "../core/db.js";
 import { env } from "../core/env.js";
 
@@ -163,6 +173,42 @@ app.get("/api/history/:runId", async (req, res) => {
   );
 });
 
+// ── chat (Analytics Agent) ──────────────────────────────────────
+
+app.post("/api/conversations", async (req, res) => {
+  const id = await createConversation(req.body?.title);
+  res.status(201).json({ id });
+});
+
+app.get("/api/conversations", async (_req, res) => {
+  res.json(await listConversations());
+});
+
+app.get("/api/conversations/:id", async (req, res) => {
+  res.json(await getConversation(req.params.id));
+});
+
+app.post("/api/conversations/:id/star", async (req, res) => {
+  try {
+    await setStarred(req.params.id, Boolean(req.body?.starred));
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+/** Ask a question — SSE stream of agent steps, ending with the Insight. */
+app.post("/api/conversations/:id/messages", async (req, res) => {
+  const question = String(req.body?.question ?? "").trim();
+  if (!question) return res.status(400).json({ error: "question required" });
+  await streamAnswer(req.params.id, question, res);
+});
+
+/** Suggested-question chips, from the PM questions instrumentation stored. */
+app.get("/api/suggestions", async (_req, res) => {
+  res.json(await suggestions());
+});
+
 app.get("/api/context", async (_req, res) => {
   const rows = await query(`
     SELECT entity, definition_md, toUInt32(version) AS version, source_spec, change_note, toString(updated_at) AS updated_at
@@ -182,6 +228,7 @@ app.get("/api/context/:entity/history", async (req, res) => {
 
 const PORT = Number(process.env["PORT"] ?? 8787);
 await manager.init();
+await initChatTables();
 app.listen(PORT, () => {
   console.log(`Clickwright backend listening on http://localhost:${PORT}`);
 });

@@ -6,6 +6,9 @@ You are the Analytics Agent of Clickwright, the agentic analytics pipeline for A
 # Tables that exist right now
 {{live_tables}}
 
+# EXACT column names and types — use these verbatim, never guess a column
+{{schemas}}
+
 # Conversation so far (may be empty; the question may be a follow-up)
 {{history}}
 

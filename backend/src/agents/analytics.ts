@@ -858,12 +858,20 @@ export async function runAnalytics(
     const failedTasks = results.filter((r) => r.dropped);
     const sanityNotes = [...notes, ...failedTasks.map((r) => `task ${r.id}: ${r.dropped}`)];
 
-    // ── independent verification ──
+    // ── independent verification (started here, awaited after narration) ──
     // One task only: the cost is a full LLM call plus a query, and the figure a
     // reader acts on is the headline one. Skipped when nothing usable survived.
+    //
+    // Deliberately NOT awaited yet. Nothing between here and the narration reads the
+    // verdict — it feeds deriveConfidence and the payload, both after the narration —
+    // so awaiting it here just parked the lookup, precision and narration behind an
+    // LLM call and a query they do not depend on. Every check still runs, on the same
+    // inputs, in the same order relative to what it actually gates; only the waiting
+    // overlaps. (Per-step elapsed times now overlap, which is why API.md says never to
+    // sum them for a total.)
     const toVerify = kept.find((r) => r.rows.length > 0);
-    const verification: VerificationResult | null = toVerify
-      ? await verifyTask(
+    const verificationPromise: Promise<VerificationResult | null> = toVerify
+      ? verifyTask(
           span,
           {
             question: input.question,
@@ -883,7 +891,7 @@ export async function runAnalytics(
           guardSql,
           llm,
         ).catch(() => null)
-      : null;
+      : Promise.resolve(null);
 
     // ── knowledge lookup for the "why" ──
     const lookupDigest = kept
@@ -1065,6 +1073,9 @@ export async function runAnalytics(
       }
     }
     if (!narration) throw new Error("unreachable: narration missing");
+
+    // the verification started before the lookup has had the whole narration to finish in
+    const verification = await verificationPromise;
 
     const confidence = deriveConfidence({
       precisions: headlinePrecision,

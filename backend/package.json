@@ -1,16 +1,16 @@
 {
   "name": "clickwright",
   "version": "1.0.0",
-  "description": "Agentic analytics pipeline on ClickHouse — feature spec in, live tables and PM-ready insights out.",
+  "description": "Agentic analytics pipeline on ClickHouse \u2014 feature spec in, live tables and PM-ready insights out.",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "seed": "tsx scripts/seed-context.ts",
-    "run-spec": "tsx scripts/run-spec.ts",
     "check-env": "tsx scripts/check-env.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "serve": "tsx src/server/index.ts"
   },
   "repository": {
     "type": "git",
@@ -24,10 +24,12 @@
     "@anthropic-ai/sdk": "^0.115.0",
     "@clickhouse/client": "^1.23.1",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "langfuse": "^3.38.20",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^26.1.2",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"

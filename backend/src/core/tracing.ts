@@ -33,6 +33,35 @@ export function langfuse(): Langfuse {
 
 export type Ctx = LangfuseTraceClient | LangfuseSpanClient;
 
+// ── run event bus ────────────────────────────────────────────────
+// The server sets a bus for the active run; step() broadcasts every step's
+// lifecycle so the UI stepper mirrors the Langfuse trace with no extra
+// instrumentation. Safe as a singleton because runs are queued (one at a time).
+
+export interface RunEvent {
+  type: "step_start" | "step_end" | "step_error" | "status" | "approval_request" | "approval_result" | "log";
+  name: string;
+  payload: Record<string, unknown>;
+}
+
+type RunEventSink = (event: RunEvent) => void;
+let runSink: RunEventSink | null = null;
+
+export function setRunSink(sink: RunEventSink | null): void {
+  runSink = sink;
+}
+
+const clip = (v: unknown): unknown => {
+  const s = JSON.stringify(v);
+  return s && s.length > 6000 ? JSON.parse(JSON.stringify(v, (_k, val) =>
+    typeof val === "string" && val.length > 2000 ? val.slice(0, 2000) + "…[clipped]" : val,
+  )) : v;
+};
+
+export function emitRunEvent(event: RunEvent): void {
+  runSink?.(event);
+}
+
 export function startRun(
   name: string,
   input: Record<string, unknown>,
@@ -82,15 +111,16 @@ export async function step<T>(
   fn: (span: LangfuseSpanClient) => Promise<T>,
 ): Promise<T> {
   const span = parent.span({ name, input });
+  emitRunEvent({ type: "step_start", name, payload: { input: clip(input) } });
   try {
     const output = await fn(span);
     span.end({ output: output as object });
+    emitRunEvent({ type: "step_end", name, payload: { output: clip(output) } });
     return output;
   } catch (error) {
-    span.end({
-      level: "ERROR",
-      statusMessage: error instanceof Error ? error.message : String(error),
-    });
+    const message = error instanceof Error ? error.message : String(error);
+    span.end({ level: "ERROR", statusMessage: message });
+    emitRunEvent({ type: "step_error", name, payload: { error: message } });
     throw error;
   }
 }

@@ -39,6 +39,8 @@ export type InstrumentationProposal = z.infer<typeof ProposalSchema>;
 export interface Approval {
   approved: boolean;
   feedback?: string;
+  /** Who decided — written into the trace via the approval span's output. */
+  identity?: string;
 }
 /** The human gate: approve executes the DDL byte-for-byte; reject sends the
  * feedback to the LLM as a traced regeneration. The human never edits SQL. */

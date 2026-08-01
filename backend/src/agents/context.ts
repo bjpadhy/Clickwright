@@ -149,6 +149,8 @@ export type ContextUpdateProposal = z.infer<typeof UpdateProposalSchema>;
 export interface ContextApproval {
   approved: boolean;
   feedback?: string;
+  /** Who decided — written into the trace via the approval span's output. */
+  identity?: string;
 }
 export type ContextApprovalCallback = (
   proposal: ContextUpdateProposal,

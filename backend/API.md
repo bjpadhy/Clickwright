@@ -53,12 +53,19 @@ export interface RunEvent {
 
 // ── gate proposals (payload.proposal of approval_request) ────────
 export interface DdlProposal {
-  reasoning: string;        // markdown with ## sections: Ordering keys / Partitioning / Types & codecs / Deviations & flags
+  reasoning: string;        // combined markdown (one "## <table>" section per table)
   tables: Array<{
     name: string;           // table to create
     event: string;          // source event type
     purpose: string;        // one-line description
     ddl: string;            // full CREATE TABLE statement (with COMMENTs)
+    // structured rationale — render as the DESIGN RATIONALE panel per table
+    rationale?: {
+      ordering_key: string;
+      partitioning: string;
+      types_codecs: string;
+      deviations: string;   // "" when nothing contradicts convention
+    };
   }>;
 }
 
@@ -199,11 +206,14 @@ instrumentation                      (wrapper — spans the whole ① phase)
   context_load                       output.summary: entities count, byCategory, updatedEntries
   schema_reconciliation              output: liveTables, documentedNotLive, liveNotDocumented
   ddl_generation_attempt_N           N = 1.. (step_error ⇒ another attempt follows)
-  dry_run_attempt_N                  ClickHouse EXPLAIN-parses every statement pre-gate
+    ddl_table_<event>                ONE PER EVENT TYPE, RUN CONCURRENTLY — each designs
+                                     one table, dry-runs it, and self-heals alone.
+                                     Events from different tables interleave; group by name.
   approval_attempt_N                 (the gate; approval_request/result events bracket it)
   ddl_execution_attempt_N            output: LoadedTable[]; emits per-statement log events
 context_update                       (wrapper — spans the whole ② phase)
-  update_generation_attempt_N
+  update_generation_attempt_N        two concurrent LLM calls inside (table docs
+                                     + feature/metric/convention knowledge)
   update_approval_attempt_N
 ```
 
@@ -265,40 +275,77 @@ text diffs with `change_note` + `source_spec` as annotation.
 
 ---
 
-## [PLANNED] Chat (Analytics Agent) — contract frozen, not yet served
+## [LIVE] Chat — the Analytics Agent as a conversation
 
 ```
-POST /api/conversations                    { title? } → 201 { id }
-GET  /api/conversations                    → [{ id, title, starred, updatedAt, preview }]
-POST /api/conversations/:id/messages       { question: string } → SSE stream (below)
-GET  /api/conversations/:id                → { messages: ChatMessage[] }
+POST /api/conversations                 { title? }              → 201 { id }
+GET  /api/conversations                 → [{ id, title, starred, updatedAt, preview, messages }]
+GET  /api/conversations/:id             → { id, messages: ChatMessage[] }
+POST /api/conversations/:id/star        { starred: boolean }    → { ok: true }
+POST /api/conversations/:id/messages    { question: string }    → SSE (below)
+GET  /api/suggestions                   → [{ spec, question }]  // chips, from stored PM questions
 ```
 
-SSE events while the agent works: `plan` → `sql_start`/`sql_result` (per task,
-includes SQL + row sample) → `insight` (final) → `done`; `step_error` for retries.
+Conversations and every answer persist in ClickHouse (`conversations`, `messages`),
+so `GET /api/conversations/:id` re-renders past insight cards with no recompute.
+The conversation is auto-titled from its first question.
+
+### SSE stream of `POST /api/conversations/:id/messages`
+
+Named events (use `addEventListener`, not `onmessage`). A question takes ~1-3 min:
+
+| event | data | meaning |
+|---|---|---|
+| `start` | `{ traceUrl, convId }` | trace link available immediately |
+| `step_start` / `step_end` / `step_error` | `{ name, payload }` | agent steps — same shapes as run events; drive the "how I got this" panel |
+| `insight` | `{ insight: Insight, traceUrl }` | the finished card |
+| `failed` | `{ error, traceUrl }` | answer could not be produced |
+| `done` | `{}` | stream closed |
+
+Step names: `analytics` (wrapper) → `context_load`, `plan`, `task_<id>` →
+`sql_attempt_N` (per task, run CONCURRENTLY — events from different tasks
+interleave; group by the `task_<id>` parent), `sanity_gate`, `context_lookup`,
+`narrate_attempt_N`, `quality_gate`, optional `narrate_revision`.
 
 ```ts
 export interface Insight {
-  headline: string;                     // one-sentence answer
-  findings: Array<{ tag: string; text: string }>;   // tag: "driver" | "segment" | "caveat" | "known_issue"
-  chart: null | { title: string; kind: "bar" | "line"; series: Array<{ label: string; value: number }> };
-  segmentTable: null | { columns: string[]; rows: Array<Array<string | number>> };
-  confidence: { value: "high" | "medium" | "low"; note: string };
-  contextVersion: string;               // e.g. "v1.3-equivalent: max version set seen"
-  traceId: string; traceUrl: string;
-  sql: Array<{ task: string; query: string; rowCount: number }>;  // for collapsible "how I got this"
+  headline: string;                                  // one-sentence answer with the key number
+  findings: Array<{ tag: "driver" | "segment" | "caveat" | "known_issue"; text: string }>;
+  chart: null | { title: string; kind: "bar" | "line";
+                  series: Array<{ label: string; value: number }>; sourceTask: string };
+  segmentTable: null | { columns: string[]; rows: Array<Array<string | number>>; sourceTask: string };
+  confidence: { value: "high" | "medium" | "low"; note: string };  // capped by code when gates flag
+  contextVersion: string;                            // e.g. "44 entities · max v2" — the badge
+  sql: Array<{ task: string; title: string; query: string; rowCount: number }>;
 }
-export interface ChatMessage { role: "user" | "agent"; text?: string; insight?: Insight; ts: string }
+export interface ChatMessage {
+  role: "user" | "agent";
+  ts: string;
+  text?: string;                 // role=user
+  insight?: Insight | null;      // role=agent
+  traceUrl?: string;             // role=agent
+}
 ```
 
-## [PLANNED] Dashboards
+**Number guarantees** (worth surfacing in the UI): every number in an Insight
+either appears in one of the attached `sql` results or is a code-verified
+difference/ratio of two such numbers. SQL runs read-only (`readonly=1`), so chat
+can never mutate data, and the agent cannot write context.
+
+## [LIVE] Dashboards (Boards)
 
 ```
-POST /api/dashboards            { title, sql, chartKind, meta? } → 201 { id }   // "Save to dashboard" on an insight chart
-GET  /api/dashboards            → [{ id, title, chartKind, createdAt }]
-GET  /api/dashboards/:id/run    → { headline?, series, ms, ranAt }              // re-executes the saved SQL — fresh data every load
-DELETE /api/dashboards/:id
+POST   /api/dashboards          { title, sql, chartKind?, meta? } → 201 { id }
+GET    /api/dashboards          → [{ id, title, chartKind, meta, createdAt }]
+GET    /api/dashboards/:id/run  → { id, title, chartKind, meta, series, rows, rowCount, sql, ms, ranAt }
+DELETE /api/dashboards/:id      → { ok: true }
 ```
+
+"Save to dashboard" on an insight chart posts the chart's title plus the SQL
+from `insight.sql[i].query`. **The stored artifact is the SQL** — `:id/run`
+re-executes it read-only on every load, so a board always shows fresh data
+(`ms` + `ranAt` give you the "re-ran <time> · fresh data" stamp). Non-SELECT SQL
+is rejected at save time and again at run time.
 
 ## [LIVE] GET /api/observe/clickhouse — the Database health tab
 

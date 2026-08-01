@@ -220,32 +220,33 @@ export async function runInstrumentation(
     );
 
     // ── context via the Context Agent only ──
-    const bundle = await step(span, "context_load", {}, async () => {
-      // DDL needs the RULES and the list of existing table names — not metric
-      // definitions, known issues, or full column docs. Each parallel per-table
-      // call pays for this bundle, so keeping it small matters 5x over.
-      const b = await getContext({
-        core: ["convention", "join_map"],
-        include: ["table"],
-        brief: ["table"],
-        require: ["convention:envelope", "convention:data_hygiene", "join_map:core"],
-      });
-      const byCat = new Map<string, number>();
-      for (const e of b.entries) {
-        const cat = e.entity.split(":")[0] ?? "";
-        byCat.set(cat, (byCat.get(cat) ?? 0) + 1);
-      }
-      return Object.assign(b, {
-        summary: {
-          entities: b.entries.length,
-          byCategory: Object.fromEntries(byCat),
-          updatedEntries: b.entries.filter((e) => e.version > 1).map((e) => `${e.entity} v${e.version}`),
-        },
-      });
-    });
-    const recon = await step(span, "schema_reconciliation", {}, () =>
-      reconcileWithLive(),
-    );
+    // independent reads — the store and the live schema do not depend on each other
+    const [bundle, recon] = await Promise.all([
+      step(span, "context_load", {}, async () => {
+        const b = await getContext({
+          core: ["convention", "join_map"],
+          include: ["table"],
+          brief: ["table"],
+          require: ["convention:envelope", "convention:data_hygiene", "join_map:core"],
+        });
+        const byCat = new Map<string, number>();
+        for (const e of b.entries) {
+          const cat = e.entity.split(":")[0] ?? "";
+          byCat.set(cat, (byCat.get(cat) ?? 0) + 1);
+        }
+        return Object.assign(b, {
+          summary: {
+            entities: b.entries.length,
+            byCategory: Object.fromEntries(byCat),
+            updatedEntries: b.entries
+              .filter((e) => e.version > 1)
+              .map((e) => `${e.entity} v${e.version}`),
+          },
+        });
+      }),
+      step(span, "schema_reconciliation", {}, () => reconcileWithLive()),
+    ]);
+
     const reconNotes = [
       recon.documentedNotLive.length
         ? `WARNING — documented but missing from the database: ${recon.documentedNotLive.join(", ")}`

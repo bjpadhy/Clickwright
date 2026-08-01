@@ -215,27 +215,28 @@ export async function streamAnswer(
 
   // count(), not max(seq): ClickHouse returns 0 for max() over an empty set, which
   // made nextSeq 1 for a brand-new conversation and stopped it ever being titled.
-  const priorRows = await query<{ n: string }>(
-    `SELECT toString(count()) AS n FROM messages WHERE conv_id = {conv:String}`,
-    { conv: convId },
-  );
-  const nextSeq = Number(priorRows[0]?.n ?? 0);
-
-  const history = (
-    await query<{ role: string; question: string; insight_json: string }>(
+  // independent reads — run them together rather than back to back
+  const [priorRows, historyRows] = await Promise.all([
+    query<{ n: string }>(
+      // count(), not max(seq): ClickHouse returns 0 for max() over an empty set, which
+      // made nextSeq 1 for a brand-new conversation and stopped it ever being titled.
+      `SELECT toString(count()) AS n FROM messages WHERE conv_id = {conv:String}`,
+      { conv: convId },
+    ),
+    query<{ role: string; question: string; insight_json: string }>(
       `SELECT role, question, insight_json FROM messages
        WHERE conv_id = {conv:String} ORDER BY seq DESC LIMIT 6`,
       { conv: convId },
-    )
-  )
-    .reverse()
-    .map((m) => ({
-      role: m.role as "user" | "agent",
-      text:
-        m.role === "user"
-          ? m.question
-          : ((JSON.parse(m.insight_json || "{}") as Insight).headline ?? ""),
-    }));
+    ),
+  ]);
+  const nextSeq = Number(priorRows[0]?.n ?? 0);
+  const history = historyRows.reverse().map((m) => ({
+    role: m.role as "user" | "agent",
+    text:
+      m.role === "user"
+        ? m.question
+        : ((JSON.parse(m.insight_json || "{}") as Insight).headline ?? ""),
+  }));
 
   const trace = startRun(
     `chat:${question.slice(0, 60)}`,

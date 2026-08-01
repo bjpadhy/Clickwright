@@ -30,7 +30,10 @@ are authoritative — a denominator you invent is a wrong answer.
    one task must compute that comparison as a column — a delta the SQL does not produce
    can never be reported.
 7. If the question cannot be answered from these tables, return zero tasks and explain
-   why in `approach`. That is a valid, useful answer.
+   why in `approach` — naming what data would be needed. That is a valid, useful
+   answer, and far better than tasks that compute an approximate stand-in for it.
+   If the question is ambiguous in a way that changes the answer, say so in `approach`
+   and plan for the most defensible reading rather than silently picking one.
 </rules>
 
 <avoid>

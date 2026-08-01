@@ -91,6 +91,11 @@ so granules prune cheaply and compress well), and the high-cardinality id plus
 timestamp follow. Enum8 for the closed 3-value set, LowCardinality for the open one.
 </example>
 
+If the profile is internally inconsistent or a field's type cannot be determined
+safely, choose the WIDER, safer type and record why in `deviations` — never guess a
+narrow type to look precise. A schema that loses data is unrecoverable; a slightly
+wide column is not.
+
 <self_check>
 Verify all of these against your own DDL before you answer:
 1. Every field in the measured profile appears exactly once, spelled identically.

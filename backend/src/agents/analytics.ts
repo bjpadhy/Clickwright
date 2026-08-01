@@ -333,6 +333,17 @@ function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[
       notes.push(`task ${r.id} (${r.title}): dropped — empty result set`);
       continue;
     }
+    // The SQL writer declares an impossible task instead of approximating it
+    // (see analytics_write_sql). Honour that: drop the task and carry the reason
+    // forward, rather than letting the sentinel row be read as data.
+    const first = r.rows[0] as Record<string, unknown>;
+    if (first && "blocked" in first) {
+      const reason = String(first["reason"] ?? "not computable from the available columns");
+      r.dropped = `not computable: ${reason}`;
+      r.rows = [];
+      notes.push(`task ${r.id} (${r.title}): the query could not be written — ${reason}`);
+      continue;
+    }
     for (const row of r.rows) {
       for (const [col, v] of Object.entries(row)) {
         const n = Number(v);

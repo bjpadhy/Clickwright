@@ -131,6 +131,44 @@ test("a rate column named exactly `rate` still resolves its denominator", () => 
   assert.equal(findDenominator("full_rate", { full_n: 12 }), 12);
 });
 
+test("a funnel rate written as a division of named counts keeps its population figure", () => {
+  // The SQL prompt asks for rates as divisions of counts named for what they
+  // count — attach_rate shares no name stem with offer_shown_n, so the naming
+  // convention alone dropped the whole-set figure for exactly the encouraged shape.
+  const core = `SELECT city,
+    uniqExact(user_id) AS offer_shown_n,
+    uniqExactIf(user_id, purchased = 1) AS purchased_n,
+    purchased_n / offer_shown_n AS attach_rate
+  FROM events GROUP BY city`;
+  const plan = buildDigestSql(core, [
+    { name: "city", kind: "categorical" },
+    { name: "offer_shown_n", kind: "count" },
+    { name: "purchased_n", kind: "count" },
+    { name: "attach_rate", kind: "rate" },
+  ]);
+  assert.match(
+    plan.sql,
+    /sum\(`attach_rate` \* `offer_shown_n`\) \/ sum\(`offer_shown_n`\) AS full_attach_rate/,
+  );
+  assert.match(plan.sql, /sum\(`offer_shown_n`\) AS full_attach_n/);
+});
+
+test("the division in the scope wins over a name-matched column", () => {
+  // Both resolutions are available here and they disagree; what the query actually
+  // divided by is a fact, and the name is only a convention.
+  const core = `SELECT city,
+    uniqExact(user_id) AS conversion_n,
+    count() AS shown_n,
+    purchases / shown_n AS conversion_rate
+  FROM events GROUP BY city`;
+  const plan = buildDigestSql(core, [
+    { name: "conversion_n", kind: "count" },
+    { name: "shown_n", kind: "count" },
+    { name: "conversion_rate", kind: "rate" },
+  ]);
+  assert.match(plan.sql, /sum\(`shown_n`\) AS full_conversion_n/);
+});
+
 test("a rate without a denominator gets spread figures but no population rate", () => {
   // Inventing a denominator would produce a plausible, wrong, precision-bounded number.
   const plan = buildDigestSql("SELECT 1", [

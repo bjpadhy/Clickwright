@@ -26,8 +26,11 @@ export interface Precision {
   note: string;
 }
 
-const RATE_RE = /(^|_)(rate|ratio|pct|percent|share)$/i;
-const COUNT_RE = /(^|_)(n|count|users|sessions|rows|events|applications|payers|uploads|opens|clicks)$/i;
+/** Exported because the full-result-set digest must classify columns by exactly
+ * the same conventions this module reads them by — a digest that named its
+ * whole-population rate differently would compute no interval for it. */
+export const RATE_RE = /(^|_)(rate|ratio|pct|percent|share)$/i;
+export const COUNT_RE = /(^|_)(n|count|users|sessions|rows|events|applications|payers|uploads|opens|clicks)$/i;
 
 /**
  * Classify from the SQL that produced the column, not the column name alone —
@@ -68,18 +71,43 @@ export function findDenominator(
   rateColumn: string,
   row: Record<string, unknown>,
 ): number | null {
-  const base = rateColumn.replace(RATE_RE, "").replace(/_$/, "");
-  const candidates = [
-    `${base}_n`,
-    `${base}_denominator`,
-    `${base}_total`,
-    `${base}_base`,
-    "n",
-    "denominator",
-  ];
-  for (const c of candidates) {
+  // A bare `n` is unambiguous only when the row carries ONE rate. Beside two — a
+  // per-segment rate and a whole-population one, say — it is the denominator of at
+  // most one of them, and lending it to the other produces exactly the plausible,
+  // verifiable-looking, wrong interval this function exists to refuse: a global
+  // 35.2% was bounded at ±44pp off a row-local n=1 when its real bound was ±1.1pp.
+  const ambiguous = Object.keys(row).filter((k) => RATE_RE.test(k)).length > 1;
+  for (const c of denominatorCandidates(rateColumn)) {
+    if (ambiguous && GENERIC_DENOMINATORS.has(c)) continue;
     const v = Number(row[c]);
     if (Number.isFinite(v) && v > 0) return v;
+  }
+  return null;
+}
+
+/** Denominator names that do not say which rate they belong to. */
+const GENERIC_DENOMINATORS = new Set(["n", "denominator"]);
+
+/** The naming convention itself, in one place: `x_rate` is denominated by `x_n`,
+ * `x_denominator`, `x_total`, `x_base`, or a bare `n`. */
+function denominatorCandidates(rateColumn: string): string[] {
+  const base = rateColumn.replace(RATE_RE, "").replace(/_$/, "");
+  return [`${base}_n`, `${base}_denominator`, `${base}_total`, `${base}_base`, "n", "denominator"];
+}
+
+/**
+ * The denominator COLUMN NAME for a rate, by the same convention `findDenominator`
+ * reads values with. Building SQL over a result set needs the name before any row
+ * exists; returns null rather than guessing, so a rate without a declared
+ * denominator simply gets no whole-population figure.
+ */
+export function denominatorColumnFor(
+  rateColumn: string,
+  columns: readonly string[],
+): string | null {
+  const present = new Set(columns);
+  for (const c of denominatorCandidates(rateColumn)) {
+    if (c !== rateColumn && present.has(c)) return c;
   }
   return null;
 }

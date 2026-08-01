@@ -201,7 +201,12 @@ export function InsightCard({ insight, traceUrl }: { insight: Insight; traceUrl?
           {queries.map((entry) => (
             <div key={entry.task}>
               <div className="mb-1 font-mono text-[10px] tracking-[.04em] text-zinc-500 uppercase">
-                {entry.title} · {entry.rowCount} row{entry.rowCount === 1 ? "" : "s"}
+                {entry.title} ·{" "}
+                {entry.totalRows !== undefined && entry.totalRows > entry.rowCount
+                  ? // The fetched rows are a sample; saying "1000 rows" would understate
+                    // an answer computed over every one of them.
+                    `${entry.rowCount.toLocaleString()} of ${entry.totalRows.toLocaleString()} rows analysed`
+                  : `${entry.rowCount} row${entry.rowCount === 1 ? "" : "s"}`}
               </div>
               <div className="font-mono text-[11px] leading-[1.7] whitespace-pre text-zinc-300">
                 {entry.query}

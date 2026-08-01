@@ -56,7 +56,11 @@ export interface InsightSql {
   task: string
   title: string
   query: string
+  /** rows this query returned */
   rowCount: number
+  /** rows the analysis covered — larger than `rowCount` when the result was too
+   * big to fetch and was profiled in ClickHouse instead. Absent for small results. */
+  totalRows?: number
 }
 
 export interface Insight {

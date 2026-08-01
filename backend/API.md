@@ -382,6 +382,9 @@ analytics                  (wrapper)
   plan                     → ≤4 tasks
   task_<id>                ONE PER TASK, RUN CONCURRENTLY — events interleave, so
     sql_attempt_N          group children by their task_<id> parent
+    digest_<id>            only when the result exceeds the 24 rows the narrator
+                           reads: profiles EVERY row of it in ClickHouse. Its
+                           absence means the narrator saw the result in full.
   sanity_gate              what was dropped/flagged and why
   context_lookup           known issues that might explain an anomaly
   narrate_attempt_N        N>1 means the citation check rejected a number
@@ -424,7 +427,13 @@ export interface Insight {
     answersQuestion: boolean;
   };
   contextVersion: string;                            // e.g. "44 entities · max v2" — the badge
-  sql: Array<{ task: string; title: string; query: string; rowCount: number }>;
+  sql: Array<{
+    task: string;                        // "t1"; also "t1_profile" / "t1_top" / "t1_bottom"
+    title: string;
+    query: string;
+    rowCount: number;                    // rows this query returned
+    totalRows?: number;                  // rows the ANALYSIS covered; absent for small results
+  }>;
   cached?: boolean;                                  // true ⇒ served from insight_cache, no LLM ran
 }
 export interface ChatMessage {
@@ -464,10 +473,30 @@ LIMIT above 1000; the server runs it with `readonly=1` and a 30s execution cap.
 so the row cap is enforced in the guard rather than as a server setting — verified
 against `system.settings`.)
 
+**Fetched is not analysed.** That 1000-row cap is a *transport* limit, not a limit on
+what the answer is based on. When a task's result is larger than the rows the narrator
+can read (24), the agent wraps the task's own statement as a subquery and has
+ClickHouse compute the statistics of **every** row of it — an exact `count()`, the
+population-weighted rate with its denominator (`full_<base>_rate` / `full_<base>_n`),
+per-column min/max/median, an exact count of impossible values, distinct counts, date
+ranges — plus the highest and lowest rows by the leading metric. Those queries appear
+in `sql[]` as `<task>_profile`, `<task>_top` and `<task>_bottom`; `totalRows` on the
+task's own entry says how many rows the analysis covered.
+
+So for a large result: `rowCount` is the sample that crossed the wire, `totalRows` is
+what the numbers describe. **Render the pair, not `rowCount` alone** — "1,000 of 52,340
+rows analysed" is the honest label; "1,000 rows" understates the answer. A LIMIT the
+model authored is treated as part of the question ("the 10 worst cities") and stays
+inside the profiled scope; the cap the guard appends never bounds the analysis. If a
+profile cannot be computed the task degrades to the fetched rows, labelled as partial,
+and says so in a caveat — it is never silently presented as the whole picture.
+
 **Number guarantees** (worth surfacing in the UI): every number in an Insight
-either appears in one of the attached `sql` results or is a code-verified
-difference/ratio of two such numbers. SQL runs read-only (`readonly=1`), so chat
-can never mutate data, and the agent cannot write context.
+either appears in one of the attached `sql` results — including the whole-set profile
+results — or is a code-verified difference/ratio of two such numbers. Profile figures
+are ordinary ClickHouse output, so the chain from a reported number back to the
+database is unbroken whatever the result's size. SQL runs read-only (`readonly=1`), so
+chat can never mutate data, and the agent cannot write context.
 
 **Value formatting.** Values stay exactly as the SQL produced them (so every number
 remains traceable), and a **code-derived** hint says how to render each one:

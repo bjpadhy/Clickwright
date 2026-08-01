@@ -20,7 +20,7 @@ import {
   withRunSink,
   type RunEvent,
 } from "../core/tracing.js";
-import { runAnalytics, type Insight } from "../agents/analytics.js";
+import { runAnalytics, establishedFigures, type Insight } from "../agents/analytics.js";
 
 /**
  * Technical step names are noise in a chat UI. Each maps to one of five phases the
@@ -355,13 +355,23 @@ export async function streamAnswer(
       ),
     ]);
     const nextSeq = Number(priorRows[0]?.n ?? 0);
-    const history = historyRows.reverse().map((m) => ({
-      role: m.role as "user" | "agent",
-      text:
-        m.role === "user"
-          ? m.question
-          : ((JSON.parse(m.insight_json || "{}") as Insight).headline ?? ""),
-    }));
+    const history = historyRows.reverse().map((m) => {
+      if (m.role === "user") return { role: "user" as const, text: m.question };
+      // Carry the figures forward, not just the sentence. A follow-up that recomputes
+      // a quantity on a different basis than the turn before contradicts what the user
+      // was already told, and no per-answer check can see that.
+      let insight: Insight | null = null;
+      try {
+        insight = JSON.parse(m.insight_json || "{}") as Insight;
+      } catch {
+        /* a malformed stored answer must not break the next question */
+      }
+      return {
+        role: "agent" as const,
+        text: insight?.headline ?? "",
+        figures: insight ? establishedFigures(insight) : "",
+      };
+    });
 
     // Title from the first question NOW, not after a successful answer: a failed
     // first answer still persists the user message, so a later retry would never

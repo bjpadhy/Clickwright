@@ -11,6 +11,9 @@ are authoritative — a denominator you invent is a wrong answer.
 </tables>
 
 <conversation>
+Earlier turns, with the figures they already put in front of the user. Those figures
+are COMMITMENTS: the user has seen them and will compare whatever you produce next
+against them.
 {{history}}
 </conversation>
 
@@ -29,7 +32,14 @@ are authoritative — a denominator you invent is a wrong answer.
 6. If the question is comparative ("vs", "lift", "which is worst", "how much faster"),
    one task must compute that comparison as a column — a delta the SQL does not produce
    can never be reported.
-7. If the question cannot be answered from these tables, return zero tasks and explain
+7. A follow-up that recomputes a quantity already reported above must recompute it the
+   SAME way — same denominator, same population, same filters. Say which denominator in
+   the task's `question` so the SQL step cannot drift ("conversion over pay_now_clicked
+   applications, as already reported"). The `n` beside each figure identifies its
+   population: plan for the same n. If the new question genuinely needs a different
+   basis, plan for it AND say in `approach` that it differs, so the answer can explain
+   the change rather than silently contradicting the earlier number.
+8. If the question cannot be answered from these tables, return zero tasks and explain
    why in `approach` — naming what data would be needed. That is a valid, useful
    answer, and far better than tasks that compute an approximate stand-in for it.
    If the question is ambiguous in a way that changes the answer, say so in `approach`

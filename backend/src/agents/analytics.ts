@@ -49,6 +49,45 @@ export async function initInsightCache(): Promise<void> {
   await command(`ALTER TABLE insight_cache MODIFY TTL toDateTime(created_at) + INTERVAL 30 DAY`);
 }
 
+/**
+ * The figures an earlier answer already put in front of the user, with the sample
+ * each rests on and the tables it came from.
+ *
+ * A follow-up plans from scratch, so nothing stopped it recomputing a quantity on a
+ * different basis than the turn before: one evaluation had consecutive turns report
+ * UAE standard-checkout conversion as 56.6% and then 5.4%, the second having silently
+ * changed the denominator. Both answers passed their own citation and verification
+ * checks, because every check we run is scoped to a single answer. Carrying the
+ * established figures forward gives the planner and the narrator the one thing they
+ * were missing: what the user has already been told.
+ *
+ * `n` is what makes this work — it identifies the population, so a later turn using a
+ * different denominator is visible as a different n rather than just a different number.
+ */
+export function establishedFigures(insight: Insight): string {
+  const tables = [
+    ...new Set(
+      (insight.sql ?? []).flatMap((s) =>
+        [...s.query.matchAll(/\bfrom\s+([a-z_][a-z0-9_]*)/gi)].map((m) => m[1]!.toLowerCase()),
+      ),
+    ),
+  ].filter((t) => !/^\(|^select$/.test(t));
+
+  const figures = (insight.precision ?? [])
+    .filter((p) => p.n !== null)
+    .slice(0, 6)
+    .map((p) => {
+      const shown =
+        p.kind === "proportion" && p.value <= 1.0001
+          ? `${(p.value * 100).toFixed(1)}%`
+          : String(Number(p.value.toFixed(4)));
+      return `${p.column}=${shown} (n=${p.n})`;
+    });
+
+  if (figures.length === 0) return "";
+  return `${figures.join("; ")}${tables.length ? ` — computed from ${tables.slice(0, 6).join(", ")}` : ""}`;
+}
+
 const cacheKey = (question: string, contextKey: string) =>
   createHash("sha256")
     .update(`${question.trim().toLowerCase().replace(/\s+/g, " ")}::${contextKey}`)
@@ -625,7 +664,7 @@ export interface AnalyticsInput {
   /** Force a fresh run, bypassing the answer cache. */
   noCache?: boolean;
   /** Recent conversation turns for follow-up questions (oldest first). */
-  history?: Array<{ role: "user" | "agent"; text: string }>;
+  history?: Array<{ role: "user" | "agent"; text: string; figures?: string }>;
 }
 
 export interface RunAnalyticsOptions {
@@ -701,7 +740,7 @@ export async function runAnalytics(
       input.history && input.history.length > 0
         ? input.history
             .slice(-6)
-            .map((h) => `${h.role}: ${h.text}`)
+            .map((h) => `${h.role}: ${h.text}${h.figures ? `\n    already reported: ${h.figures}` : ""}`)
             .join("\n")
         : "(none)";
 

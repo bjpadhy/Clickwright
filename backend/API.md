@@ -311,7 +311,7 @@ are what keeps the UI honest during the wait.
 | event | data | meaning |
 |---|---|---|
 | `start` | `{ traceUrl, convId }` | trace link available immediately |
-| `step_start` / `step_end` / `step_error` | `{ name, payload }` | agent steps — same shapes as run events; drive the "how I got this" panel |
+| `step_start` / `step_end` / `step_error` | `{ name, phase, payload }` | agent steps. **Render `phase`, not `name`** — it collapses the twelve technical steps into a handful of reader-facing lines ("Querying ClickHouse"), and concurrent tasks share one phase so they appear as a single entry. An **empty `phase` means plumbing: skip it.** `name` stays available for the "how I got this" detail view |
 | `log` | `{ call, elapsedMs?, promptChars?, outputChars? }` | **progress ticks** — `llm_start`, then `llm_progress` every 3s with `elapsedMs`, then `llm_done`. Render as "writing SQL… 14s" per in-flight call |
 | `insight` | `{ insight: Insight, traceUrl }` | the finished card |
 | `failed` | `{ error, traceUrl }` | answer could not be produced |
@@ -331,7 +331,12 @@ the gap stated inside it, never an invented value:
 - a chart or table whose source task was dropped is removed rather than shown.
 Render these as first-class outcomes — they are correct answers, not errors.
 
-Step names, in order:
+Phases, in the order a reader sees them: *Reading the knowledge store · Planning the
+analysis · Querying ClickHouse · Validating the results · Looking for known issues ·
+Writing the insight · Reviewing the answer* (the last two are skipped when the answer
+is cached or the quality gate is not needed).
+
+Underlying step names, for the detail view:
 
 ```
 analytics                  (wrapper)

@@ -83,6 +83,15 @@ site cannot silently drift.
 Table purposes are parsed from each spec's own event descriptions, so no prompt is
 needed for them.
 
+`instrument_design_table.txt` distils the schema rules from ClickHouse's official
+[agent-skills](https://github.com/ClickHouse/agent-skills) best-practices set —
+immutable ordering keys, cardinality-ordered keys, filter prioritisation, native and
+minimum-width types, LowCardinality, avoiding Nullable, and partitioning for lifecycle
+rather than speed — and asks the designer to cite the rule it applied. They are
+inlined rather than installed as a skill: that skill is built for an interactive agent
+that reads rule files across many turns, while our design call is single-shot and runs
+one per table in parallel.
+
 ### Known gaps
 
 - **Materialized-view proposals** are in the product design but not implemented: no

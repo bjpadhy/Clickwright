@@ -22,17 +22,21 @@ The questions this table will be asked determine how it should be ordered and in
 </conventions>
 {{feedback}}
 <design_rules>
-**Ordering key** — the single highest-impact choice. Lead with the columns that appear
-in WHERE clauses for the PM's questions, ordered LOW cardinality first (better
-compression and granule pruning), and put the high-cardinality join key and timestamp
-after. A key of (high_cardinality_id, timestamp) prunes almost nothing for a query
-filtering on platform. Justify from measured distinct counts.
+**Ordering key** — the single highest-impact choice, and **immutable**: it cannot be
+changed later without rebuilding the table, so get it right now
+(`schema-pk-plan-before-creation`). Lead with the columns that appear in WHERE clauses
+for the PM's questions (`schema-pk-prioritize-filters`), ordered LOW cardinality first
+(`schema-pk-cardinality-order`): the sparse index works on granules, so low-cardinality
+leading columns let whole blocks be skipped, while a high-cardinality id first prunes
+almost nothing. Put the join key and timestamp after. Justify from measured distinct
+counts.
 
 **Types** — narrowest correct type from the measured range:
 - `Enum8('a' = 1, ...)` when a string has ≤ 15 measured distinct values that are a
   closed set (status, channel, platform, method). Enum8 is one byte and validates on
-  insert. Use `LowCardinality(String)` when values are low-cardinality but open-ended
-  (city, app_version, destination).
+  insert. Use `LowCardinality(String)` for repeated strings that are open-ended
+  (city, app_version, destination) — dictionary encoding pays off well below the
+  ~10K-distinct ceiling (`schema-types-lowcardinality`).
 - Integers: UInt8 < 256, UInt16 < 65536, UInt32 < 4.29e9, else Int64/UInt64.
 - Money and decimals: Float64. Timestamps: `DateTime64(3, 'UTC')`.
 - Identifiers (user_id, application_id, share_id, uuid-like): plain String, never
@@ -46,8 +50,11 @@ filtering on platform. Justify from measured distinct counts.
 - Identifiers and free text: `CODEC(ZSTD(1))`.
 - Do NOT add a codec to Enum8 or LowCardinality columns — already compact.
 
-**Partitioning** — `PARTITION BY toYYYYMM(timestamp)`. Do not partition more finely;
-tiny parts hurt merges.
+**Partitioning** — partitioning exists for **data lifecycle** (dropping or moving whole
+partitions), not for query speed; the ordering key handles pruning
+(`schema-partition-lifecycle`). Use `PARTITION BY toYYYYMM(timestamp)` and keep total
+partition cardinality in the hundreds (`schema-partition-low-cardinality`) — finer
+granularity causes part explosion and "too many parts" errors.
 
 **Skip index** — add at most one, and only for a high-cardinality column the PM's
 questions filter on that is NOT in the ordering key:
@@ -112,7 +119,7 @@ Output STRICT JSON, no fences:
 {
   "ddl": "CREATE TABLE {{event}} (...) ENGINE = MergeTree PARTITION BY ... ORDER BY (...) COMMENT '...'",
   "rationale": {
-    "ordering_key": "<= 160 chars: the key and the measured cardinalities that justify the order",
+    "ordering_key": "<= 160 chars: the key, the measured cardinalities behind the order, and the rule name you applied (e.g. per schema-pk-cardinality-order)",
     "partitioning": "<= 100 chars",
     "types_codecs": "<= 260 chars: the enum/codec choices and the stats behind them",
     "deviations": "<= 160 chars: anything contradicting the conventions, or \"\""

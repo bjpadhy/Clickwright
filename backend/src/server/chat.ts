@@ -22,6 +22,32 @@ import {
 } from "../core/tracing.js";
 import { runAnalytics, type Insight } from "../agents/analytics.js";
 
+/**
+ * Technical step names are noise in a chat UI. Each maps to one of five phases the
+ * reader actually cares about, so the FE can render "Querying ClickHouse · 12s"
+ * instead of a stack of sql_attempt_1 / task_t2 lines. The raw name still rides
+ * along for the "how I got this" detail view.
+ */
+const PHASES: Array<[RegExp, string]> = [
+  // the wrapper span and the cache probe are plumbing — no phase, so the UI skips
+  // them rather than flashing a line the reader cannot act on
+  [/^analytics$/, ""],
+  [/^cache_lookup$/, ""],
+  [/^context_load$/, "Reading the knowledge store"],
+  [/^plan$/, "Planning the analysis"],
+  [/^(task_|sql_attempt)/, "Querying ClickHouse"],
+  [/^sanity_gate$/, "Validating the results"],
+  [/^context_lookup$/, "Looking for known issues"],
+  [/^narrate/, "Writing the insight"],
+  [/^quality_gate$/, "Reviewing the answer"],
+];
+
+/** "" means: plumbing, do not surface it in the chat timeline. */
+export function phaseOf(stepName: string): string {
+  for (const [re, label] of PHASES) if (re.test(stepName)) return label;
+  return "Working";
+}
+
 export interface ChatMessageRow {
   conv_id: string;
   seq: number;
@@ -267,7 +293,14 @@ export async function streamAnswer(
 
     const activeTrace = trace;
     const insight = await withRunSink(
-      (e: RunEvent) => send(e.type, { name: e.name, payload: e.payload }),
+      (e: RunEvent) =>
+        send(e.type, {
+          name: e.name,
+          // semantic grouping for the chat UI; several steps share a phase, and
+          // concurrent tasks collapse into one "Querying ClickHouse" line
+          phase: e.type.startsWith("step_") ? phaseOf(e.name) : undefined,
+          payload: e.payload,
+        }),
       () => runAnalytics({ question, history }, { trace: activeTrace }),
     );
     await insert("messages", [

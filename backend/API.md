@@ -197,14 +197,14 @@ seven event types (they are named events, so plain `onmessage` will NOT fire).
 | `step_error` | step name | `{ error: string, elapsedMs }` — verbatim failure, feeds the retry |
 | `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ durationMs, tables: LoadedTable[], contextEntries: {entity, version}[], contextWarnings: string[], traceUrl }`; `failed` → `{ durationMs, error, resetHint }` |
 | `approval_request` | `"ddl"` \| `"context"` | `{ proposal: DdlProposal \| ContextProposal }` — ContextProposal may carry `warnings: string[]` (the "contradiction surfaced" chips) |
-| `log` | `"ddl_statement"` \| `"data_load"` | `{ statement?, table?, rows?, ok, ms }` — per-statement execution progress. **These two only** belong in an execution log |
-| `log` | `"design_rejected"` \| `"design_fallback"` | `{ event, attempt?, reason?, ddl?, note? }` — a per-table design that failed validation and was fed back to the model inside `design_<event>`; `design_fallback` means every try failed and the deterministic baseline shipped. Render against that step, not as execution output |
-| `log` | `"llm_start"` \| `"llm_progress"` \| `"llm_done"` | `{ call, elapsedMs?, promptChars?, outputChars? }` — progress ticks every 3s for **every** LLM call in the run, `call` = the step/generation name. Ticks, not log lines: one per 3s per in-flight call |
+| `log` | `"table_created"` \| `"rows_loaded"` \| `"execution_complete"` | `{ table?, rows?, expected?, tables?, verified?, ok, ms }` — **these three only** are execution progress; they are the whole of an "Executing on ClickHouse" panel |
+| `log` | `"llm_start"` \| `"llm_progress"` \| `"llm_done"` | `{ call, elapsedMs?, promptChars?, outputChars? }` — progress ticks, one every 3s for **every** LLM call in the run. Ticks, not log lines: render as elapsed time on the running step, never as rows in a log |
+| `log` | `"schema_designed"` \| `"schema_fallback"` | `{ tables, sharedColumns, joinPath }` / `{ note, reason }` — design outcome; `schema_fallback` means every attempt was rejected and the deterministic baseline shipped, which the run continues on. Belongs against the design step, not the execution log |
 | `approval_result` | gate | `{ approved: boolean, feedback: string, identity: string }` |
 
 `LoadedTable = { name, event, purpose, rowsInFile, rowsLoaded }`.
 
-**Every run event carries a `phase`** — render that, not `name`. An empty phase means
+**Live events carry a `phase`** — render that, not `name`. An empty phase means
 plumbing to skip. LLM progress ticks are attributed to the step that is running, so
 "Designing the schema" shows elapsed time while "Creating tables and loading data"
 shows table results only, never thinking ticks.
@@ -213,10 +213,10 @@ Phases in order: *Profiling the events · Reading the knowledge store · Designi
 schema · Validating the schema · Waiting for your approval · Creating tables and
 loading data · Updating the knowledge store*.
 
-`log` event names: `llm_start` / `llm_progress` / `llm_done` (elapsed time during a
-generation) · `schema_designed` `{ tables, sharedColumns, joinPath }` · `table_created`
-`{ table, ok, ms }` · `rows_loaded` `{ table, rows, expected, ok, ms }` ·
-`execution_complete` `{ tables, rows, verified }` · `schema_fallback` `{ note, reason }`.
+⚠️ **`phase` is not persisted.** `runs_log` stores `type`/`name`/`payload` only, so
+the events replayed by `GET /api/history/:runId` have **no `phase` field** — a report
+screen must derive it from the step name. `GET /api/runs/:id` (in-memory, current
+session) does carry it. Deriving from `name` works for both.
 
 **Timing.** Show `durationMs` from the run (or the terminal `status` event) as the
 elapsed time — it is measured from the start of execution to the terminal state and
@@ -233,12 +233,17 @@ instrumentation                      (wrapper — spans the whole ① phase)
   schema_reconciliation              output: liveTables, documentedNotLive, liveNotDocumented
   ddl_generation_attempt_N           N = 1.. (step_error ⇒ another attempt follows)
     ddl_synthesis                    deterministic baseline schemas from the profile
-    design_<event>                   ONE PER EVENT TYPE, RUN CONCURRENTLY — each designs
-                                     one table, validates it, and self-heals alone.
-                                     Events from different tables interleave; group by name.
+    schema_design_attempt_M          M = 1.. ONE call designs every table. A rejected
+                                     design is its own step_error carrying the reasons,
+                                     and attempt M+1 follows; after the last one the
+                                     baseline ships and `schema_fallback` is logged.
     dry_run                          EXPLAIN AST on every statement
   approval_attempt_N                 (the gate; approval_request/result events bracket it)
-  ddl_execution_attempt_N            output: LoadedTable[]; emits per-statement log events
+  ddl_execution_attempt_N            output: LoadedTable[]; emits the execution log events
+
+Runs recorded before the one-call redesign have `design_<event>` here instead — one
+concurrent step per event type, with `design_rejected`/`design_fallback` log events.
+History replays them, so a report screen has to keep rendering both.
 context_update                       (wrapper — spans the whole ② phase)
   update_generation_attempt_N        two concurrent LLM calls inside (table docs
                                      + feature/metric/convention knowledge)

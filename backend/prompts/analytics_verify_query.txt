@@ -13,8 +13,18 @@ You are auditing another engineer's analysis. Your job is to find out whether th
 </their_sql>
 
 <their_result>
+The first rows of their result. When a profile block follows, these are a SAMPLE —
+the result set is larger, and the figures a reader acts on are in the profile.
 {{result}}
 </their_result>
+
+<their_full_set_profile>
+Statistics computed by ClickHouse over EVERY row of their result set (not a sample).
+Prefer recomputing a figure from here — a population-weighted rate (`full_*_rate`
+with its `full_*_n`) or a total (`total_rows`) is what the reader will act on, and a
+mistaken denominator or a join that fanned rows out shows up here most clearly.
+{{digest}}
+</their_full_set_profile>
 
 <definitions>
 The authoritative metric definitions and conventions. If their SQL used a different

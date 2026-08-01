@@ -17,6 +17,13 @@ import { step, scoreRun, recordQuery, emitRunEvent, type Ctx } from "../core/tra
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import { getContext, lookupContext, reconcileWithLive } from "./context.js";
 import { precisionForRow, deriveConfidence, type Precision } from "../core/precision.js";
+import {
+  digestFlags,
+  populationRow,
+  profileResult,
+  renderDigest,
+  type ResultDigest,
+} from "../core/result-digest.js";
 import { verifyTask, type VerificationResult } from "./verifier.js";
 
 // ── answer cache ────────────────────────────────────────────────
@@ -93,7 +100,16 @@ export interface Insight {
     answersQuestion: boolean;
   } | null;
   contextVersion: string;
-  sql: Array<{ task: string; title: string; query: string; rowCount: number }>;
+  /** Every query that backed this answer, including the whole-set profiles.
+   * `rowCount` is what the query returned; `totalRows` is how many rows the
+   * analysis covered, which is larger whenever the fetch was capped. */
+  sql: Array<{
+    task: string;
+    title: string;
+    query: string;
+    rowCount: number;
+    totalRows?: number;
+  }>;
   /** True when served from insight_cache (no LLM calls, ~ms). */
   cached?: boolean;
 }
@@ -130,7 +146,10 @@ const NarrationSchema = z.object({
       title: z.string(),
       kind: z.enum(["bar", "line"]),
       series: z.array(z.object({ label: z.string(), value: z.number() })).min(1).max(12),
-      sourceTask: z.string(),
+      // Which task a visual came from is bookkeeping. Losing a chart because the
+      // model omitted it beats losing the whole answer, and annotateFormats
+      // recovers the reference when there is only one task it could mean.
+      sourceTask: z.string().default(""),
       valueFormat: z.string().optional(),
     })
     .nullish()
@@ -139,7 +158,7 @@ const NarrationSchema = z.object({
     .object({
       columns: z.array(z.string()).min(2),
       rows: z.array(z.array(z.union([z.string(), z.number()]))).min(1).max(8),
-      sourceTask: z.string(),
+      sourceTask: z.string().default(""),
       columnFormats: z.array(z.string()).optional(),
     })
     .nullish()
@@ -197,26 +216,57 @@ function schemaSubset(all: Map<string, string>, tables: string[]): string {
 const BANNED =
   /\b(insert|alter|drop|create|truncate|delete|rename|grant|revoke|attach|detach|optimize|system|kill|set|settings)\b/i;
 
-/** Aggregates return summaries; anything larger is a row dump we do not want to
- * ship to the model or the browser. The server cannot enforce this for us —
- * ClickHouse Cloud pins this user to readonly=1, which discards row-limit
- * settings — so the cap lives here. */
+/** How many rows cross the wire into Node. This is a TRANSPORT cap, not a limit on
+ * what gets analysed: a larger result is profiled in full inside ClickHouse (see
+ * core/result-digest.ts) and these rows serve as the illustrative sample. The
+ * server cannot enforce it for us — ClickHouse Cloud pins this user to readonly=1,
+ * which discards row-limit settings — so the cap lives here. */
 const MAX_RESULT_ROWS = 1000;
 
-export function guardSql(raw: string): string {
-  let sql = stripFences(raw).trim().replace(/;+\s*$/, "");
+const TRAILING_LIMIT = /\blimit\s+(\d+)\s*$/i;
+
+export interface SqlParts {
+  /** The validated single statement, as the model wrote it. */
+  validated: string;
+  /** The statement with any trailing authored LIMIT removed. */
+  core: string;
+  /** A trailing LIMIT the model wrote. Unlike the transport cap this is part of
+   * what the task MEANS ("the top 10 cities"), so it bounds the analysis too. */
+  authoredLimit: number | null;
+}
+
+/** Validate and decompose, without capping. Prompts are not a security boundary,
+ * so every check here is deterministic. */
+export function guardSqlParts(raw: string): SqlParts {
+  const sql = stripFences(raw).trim().replace(/;+\s*$/, "");
   if (sql.includes(";")) throw new Error("exactly one statement allowed (found ';')");
   if (!/^(select|with)\b/i.test(sql)) throw new Error("statement must start with SELECT or WITH");
   if (BANNED.test(sql)) {
     throw new Error(`banned keyword in SQL: ${BANNED.exec(sql)?.[0]}`);
   }
-  const limit = /\blimit\s+(\d+)\s*$/i.exec(sql);
-  if (!limit) return `${sql}\nLIMIT ${MAX_RESULT_ROWS}`;
+  const limit = TRAILING_LIMIT.exec(sql);
+  const authored = limit?.[1];
+  return {
+    validated: sql,
+    core: limit ? sql.slice(0, limit.index).trimEnd() : sql,
+    authoredLimit: authored === undefined ? null : Number(authored),
+  };
+}
+
+/** Cap what crosses the wire. Byte-identical to what `guardSql` has always
+ * returned — saved dashboards store this text, so a cosmetic reformat here would
+ * silently rewrite every board on its next save. */
+function capForFetch(parts: SqlParts): string {
+  const { validated, authoredLimit } = parts;
+  if (authoredLimit === null) return `${validated}\nLIMIT ${MAX_RESULT_ROWS}`;
   // clamp an oversized explicit LIMIT rather than rejecting an otherwise good query
-  if (Number(limit[1]) > MAX_RESULT_ROWS) {
-    sql = sql.slice(0, limit.index) + `LIMIT ${MAX_RESULT_ROWS}`;
-  }
-  return sql;
+  if (authoredLimit <= MAX_RESULT_ROWS) return validated;
+  const limit = TRAILING_LIMIT.exec(validated);
+  return limit ? validated.slice(0, limit.index) + `LIMIT ${MAX_RESULT_ROWS}` : validated;
+}
+
+export function guardSql(raw: string): string {
+  return capForFetch(guardSqlParts(raw));
 }
 
 // ── citation checker: every number in prose must exist in results ──
@@ -224,30 +274,90 @@ export function guardSql(raw: string): string {
 interface TaskResult {
   id: string;
   title: string;
+  /** The statement that actually executed, including the transport cap. */
   sql: string;
+  /** The statement as the model wrote it — what the query MEANS. Used wherever a
+   * reader or another prompt needs the query, since the transport cap is our
+   * plumbing rather than part of the analysis. */
+  semanticSql: string;
+  /** `semanticSql` without its trailing authored LIMIT, for wrapping as a subquery. */
+  coreSql: string;
+  authoredLimit: number | null;
   rows: Record<string, unknown>[];
+  /** Rows in the whole result set — exceeds `rows.length` when the fetch capped.
+   * Exact when a digest ran; otherwise the fetched count. */
+  totalRows: number;
+  /** Whole-result-set statistics, computed in ClickHouse over every row. */
+  digest: ResultDigest | null;
+  /** Why a result large enough to want a profile does not have one. */
+  digestNote: string;
   dropped?: string;
   flags: string[];
 }
 
-/** Build the pool from exactly the rows the narrator was shown. Using every row
- * let one 1000-row task consume the whole budget and starve later tasks, so a
- * number the narrator could see was reported as uncited and the answer died. */
-function numericPool(results: TaskResult[], rowsShown: number): number[] {
+/** The parts of a result the citation machinery reads. A structural type keeps
+ * these functions testable without building a whole TaskResult. */
+export interface CitableResult {
+  rows: Record<string, unknown>[];
+  totalRows: number;
+  digest: ResultDigest | null;
+}
+
+/** Values the narrator is allowed to cite. Built from exactly what it was shown:
+ * using every fetched row let one 1000-row task consume the whole budget and
+ * starve later tasks, so a number the narrator could see was reported as uncited
+ * and the answer died. */
+export function numericPool(results: CitableResult[], rowsShown: number): number[] {
   const pool: number[] = [];
-  for (const r of results) {
-    pool.push(r.rows.length);
-    for (const row of r.rows.slice(0, rowsShown)) {
-      for (const v of Object.values(row)) {
-        const n = typeof v === "number" ? v : Number(v);
-        if (Number.isFinite(n)) {
-          pool.push(n);
-          if (n >= -1 && n <= 1) pool.push(n * 100); // rates quoted as percentages
-        }
+  const pushRow = (row: Record<string, unknown>): void => {
+    for (const v of Object.values(row)) {
+      const n = typeof v === "number" ? v : Number(v);
+      if (Number.isFinite(n)) {
+        pool.push(n);
+        if (n >= -1 && n <= 1) pool.push(n * 100); // rates quoted as percentages
       }
     }
+  };
+  // Shown rows and row counts for EVERY task first: findUncitedNumbers only pairs
+  // the leading distinct values, and a task's digest pushed ahead of another task's
+  // visible rows would spend that window on figures nobody is comparing.
+  for (const r of results) {
+    // The fetched count, the true count, and the number of rows actually listed —
+    // all three appear in the header the narrator reads, so all three are citable.
+    pool.push(r.rows.length, r.totalRows, Math.min(r.rows.length, rowsShown));
+    for (const row of r.rows.slice(0, rowsShown)) pushRow(row);
+  }
+  for (const r of results) {
+    if (!r.digest) continue;
+    pushRow(r.digest.statsRow);
+    for (const row of r.digest.extremes?.top ?? []) pushRow(row);
+    for (const row of r.digest.extremes?.bottom ?? []) pushRow(row);
   }
   return pool;
+}
+
+/** A Date or DateTime as ClickHouse renders it in JSON. */
+const DATE_LITERAL = /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?/;
+const DATE_IN_TEXT = /\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?/g;
+
+/** Date literals the results actually contained. Dates are strings, so they never
+ * enter the numeric pool — yet "2025-03-15" tokenises to -15, so quoting a date
+ * straight out of its own results failed the citation check. */
+export function collectDateLiterals(results: CitableResult[], rowsShown: number): string[] {
+  const out = new Set<string>();
+  const scan = (row: Record<string, unknown>): void => {
+    for (const v of Object.values(row)) {
+      if (typeof v === "string" && DATE_LITERAL.test(v)) out.add(v);
+    }
+  };
+  for (const r of results) {
+    for (const row of r.rows.slice(0, rowsShown)) scan(row);
+    if (!r.digest) continue;
+    scan(r.digest.statsRow);
+    for (const row of r.digest.extremes?.top ?? []) scan(row);
+    for (const row of r.digest.extremes?.bottom ?? []) scan(row);
+  }
+  return [...out];
 }
 
 /**
@@ -256,7 +366,11 @@ function numericPool(results: TaskResult[], rowsShown: number): number[] {
  * chain back to ClickHouse stays unbroken (PMs need deltas; inventing them is
  * still forbidden).
  */
-export function findUncitedNumbers(texts: string[], pool: number[]): string[] {
+export function findUncitedNumbers(
+  texts: string[],
+  pool: number[],
+  datePool: string[] = [],
+): string[] {
   const near = (a: number, b: number) =>
     Math.abs(a - b) <= Math.max(0.06, Math.abs(b) * 0.015);
   const base = [...new Set(pool)];
@@ -276,12 +390,27 @@ export function findUncitedNumbers(texts: string[], pool: number[]): string[] {
   }
   const uncited: string[] = [];
   for (const text of texts) {
-    for (const m of text.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)) {
+    // A date the results contained is one citation, not three numbers. Remove the
+    // ones we know appeared before tokenising; an invented date survives and is
+    // rejected as the digits it is made of.
+    const scanned =
+      datePool.length === 0
+        ? text
+        : text.replace(DATE_IN_TEXT, (found) =>
+            datePool.some((d) => d.startsWith(found) || found.startsWith(d)) ? " " : found,
+          );
+    for (const m of scanned.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)) {
       const raw = m[0];
-      const n = Number(raw.replaceAll(",", ""));
+      let n = Number(raw.replaceAll(",", ""));
       if (!Number.isFinite(n)) continue;
+      // "34.9%-35.6%" and "Jan-2026" tokenise their second half as a negative
+      // number. A minus sign directly after a digit, letter or bracket is a
+      // separator, not a sign — reading it as one rejected figures the results
+      // plainly contained. A genuine "-5.2pp" is preceded by a space.
+      const before = m.index > 0 ? scanned[m.index - 1] ?? "" : "";
+      if (raw.startsWith("-") && /[\w%)\]]/.test(before)) n = Math.abs(n);
       if (Number.isInteger(n) && Math.abs(n) <= 12) continue; // "3 steps", ordinals
-      if (Number.isInteger(n) && n >= 2020 && n <= 2030) continue; // years
+      if (Number.isInteger(n) && Math.abs(n) >= 2020 && Math.abs(n) <= 2030) continue; // years
       if (base.some((v) => near(n, v))) continue;
       if (derived.some((v) => near(n, v))) continue;
       uncited.push(raw);
@@ -333,6 +462,13 @@ function annotateFormats(insight: Narration, results: TaskResult[]): void {
   };
   const sqlOf = (taskId: string) => results.find((x) => x.id === taskId)?.sql ?? "";
   const known = new Set(results.map((r) => r.id));
+  // With one surviving task there is only one thing a visual can be sourced from, so
+  // repair a missing or wrong reference rather than discarding a usable chart.
+  const onlyTask = results.length === 1 ? results[0]?.id : undefined;
+  if (insight.chart && !known.has(insight.chart.sourceTask) && onlyTask)
+    insight.chart.sourceTask = onlyTask;
+  if (insight.segmentTable && !known.has(insight.segmentTable.sourceTask) && onlyTask)
+    insight.segmentTable.sourceTask = onlyTask;
   // a chart or table pointing at a dropped task cannot be format-inferred, and
   // would cite results the reader cannot open — drop the visual instead
   if (insight.chart && !known.has(insight.chart.sourceTask)) insight.chart = null;
@@ -360,6 +496,36 @@ function annotateFormats(insight: Narration, results: TaskResult[]): void {
         : inferFormat(col, vals, sqlOf(insight.segmentTable!.sourceTask));
     });
   }
+}
+
+/**
+ * Retry feedback the model can act on. A raw ZodError dump ("invalid_type",
+ * "origin", nested paths) reads as noise, and three attempts were observed failing
+ * on the same malformed field because none of them said which field, in words.
+ */
+function shapeFeedback(error: unknown): string {
+  if (error instanceof z.ZodError) {
+    const issues = error.issues
+      .map((i) => `${i.path.length ? i.path.join(".") : "(top level)"} — ${i.message}`)
+      .join("; ");
+    return `Your JSON did not match the required shape: ${issues}. Re-read the "Output" section at the end and return exactly that structure, with every field it shows.`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** One entry per column, keeping the WIDEST interval — that is the figure a reader
+ * should be most careful with, so it is the one worth reporting. */
+function widestPerColumn(entries: Precision[]): Precision[] {
+  const byColumn = new Map<string, Precision>();
+  for (const p of entries) {
+    const prev = byColumn.get(p.column);
+    const wider =
+      !prev ||
+      (p.interval && prev.interval && p.interval.halfWidthPp > prev.interval.halfWidthPp) ||
+      (!prev.interval && !!p.interval);
+    if (wider) byColumn.set(p.column, p);
+  }
+  return [...byColumn.values()];
 }
 
 // ── sanity gate (pure code) ──────────────────────────────────────
@@ -398,9 +564,12 @@ function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[
     const sampleCols = r.rows.flatMap((row) =>
       Object.entries(row).filter(([c]) => /^(n|count|total|users|sessions|payers|uploads)/i.test(c)),
     );
-    if (sampleCols.length > 0 && sampleCols.every(([, v]) => Number(v) < 50)) {
+    // With a digest the same question is answered over every row instead of the
+    // fetched ones, so let the stronger check speak rather than saying both.
+    if (!r.digest && sampleCols.length > 0 && sampleCols.every(([, v]) => Number(v) < 50)) {
       r.flags.push("all sample sizes below 50 — low confidence");
     }
+    if (r.digest) r.flags.push(...digestFlags(r.digest));
     r.flags = [...new Set(r.flags)];
     for (const f of r.flags) notes.push(`task ${r.id} (${r.title}): flagged — ${f}`);
     kept.push(r);
@@ -410,10 +579,41 @@ function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[
 
 // ── main ─────────────────────────────────────────────────────────
 
-/** Rows per task shown to the narrator — and therefore the rows it may cite. */
+/** Rows per task listed for the narrator. Beyond this the result is described by a
+ * whole-set profile instead of more rows, so this bounds context cost without
+ * bounding what the insight is based on. */
 const NARRATION_ROWS = 24;
 const MAX_SQL_ATTEMPTS = 3;
 const MAX_NARRATE_ATTEMPTS = 3;
+
+/**
+ * Profile the entire result set whenever it is larger than the narrator can read.
+ *
+ * Never throws. A task whose query worked and whose profile failed is still a
+ * usable task — it degrades to today's behaviour (the listed rows, honestly
+ * labelled as partial), and the note carries the reason into the narration and the
+ * confidence calculation.
+ */
+async function attachDigest(parent: Ctx, r: TaskResult): Promise<TaskResult> {
+  if (r.rows.length <= NARRATION_ROWS) return r;
+  // The SQL writer's "cannot compute" sentinel is a message, not a result set.
+  if (r.rows[0] && "blocked" in r.rows[0]) return r;
+  try {
+    const digest = await profileResult(parent, {
+      taskId: r.id,
+      core: r.coreSql,
+      authoredLimit: r.authoredLimit,
+      rows: r.rows,
+    });
+    return { ...r, digest, totalRows: digest.totalRows };
+  } catch (error) {
+    const message = error instanceof Error ? error.message.split("\n")[0] ?? error.message : String(error);
+    return {
+      ...r,
+      digestNote: `the full result set could not be profiled (${message}) — only the ${Math.min(r.rows.length, NARRATION_ROWS)} rows listed below are known`,
+    };
+  }
+}
 
 export interface AnalyticsInput {
   question: string;
@@ -542,7 +742,7 @@ export async function runAnalytics(
           for (let attempt = 1; attempt <= MAX_SQL_ATTEMPTS; attempt++) {
             sqlAttemptsTotal++;
             try {
-              return await step(
+              const executed = await step(
                 taskSpan,
                 `sql_attempt_${attempt}`,
                 { task: task.title, feedback },
@@ -555,12 +755,28 @@ export async function runAnalytics(
                       ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
                       : "",
                   });
-                  const sql = guardSql(await llm(sqlSpan, `sql_${task.id}`, prompt));
+                  const parts = guardSqlParts(await llm(sqlSpan, `sql_${task.id}`, prompt));
+                  const sql = capForFetch(parts);
                   const rows = await queryReadonly(sql);
                   recordQuery(sqlSpan, `result_${task.id}`, sql, rows);
-                  return { id: task.id, title: task.title, sql, rows, flags: [] } as TaskResult;
+                  return {
+                    id: task.id,
+                    title: task.title,
+                    sql,
+                    semanticSql: parts.validated,
+                    coreSql: parts.core,
+                    authoredLimit: parts.authoredLimit,
+                    rows,
+                    totalRows: rows.length,
+                    digest: null,
+                    digestNote: "",
+                    flags: [],
+                  } as TaskResult;
                 },
               );
+              // Profiling happens outside the attempt, so a failed profile can never
+              // be mistaken for bad SQL and send a working query back for rewriting.
+              return await attachDigest(taskSpan, executed);
             } catch (error) {
               if (isTransientDbError(error)) {
                 // infrastructure, not the SQL: back off and regenerate without
@@ -577,7 +793,13 @@ export async function runAnalytics(
             id: task.id,
             title: task.title,
             sql: "",
+            semanticSql: "",
+            coreSql: "",
+            authoredLimit: null,
             rows: [],
+            totalRows: 0,
+            digest: null,
+            digestNote: "",
             flags: [],
             dropped: `gave up after ${MAX_SQL_ATTEMPTS} attempts: ${feedback || lastTransient || "unknown error"}`,
           } as TaskResult;
@@ -603,8 +825,14 @@ export async function runAnalytics(
             question: input.question,
             taskTitle: toVerify.title,
             taskQuestion: plan.tasks.find((t) => t.id === toVerify.id)?.question ?? toVerify.title,
-            sql: toVerify.sql,
+            sql: toVerify.semanticSql,
             rows: toVerify.rows as Record<string, unknown>[],
+            // Whole-set figures are the ones a reader acts on, so they are what an
+            // independently written query should have to reproduce.
+            digest: toVerify.digest
+              ? renderDigest(toVerify.digest)
+              : "(none — this result was small enough to be shown in full)",
+            ...(toVerify.digest ? { digestRow: toVerify.digest.statsRow } : {}),
             definitions: bundle.markdown,
             schemas: schemaSubset(schemas, plan.tasks.find((t) => t.id === toVerify.id)?.tables ?? []),
           },
@@ -614,32 +842,44 @@ export async function runAnalytics(
       : null;
 
     // ── knowledge lookup for the "why" ──
-    const digest = kept
+    const lookupDigest = kept
       .map((r) => `${r.title}: ${JSON.stringify(r.rows.slice(0, 3))}`)
       .join("\n")
       .slice(0, 1500);
-    const lookup = await lookupContext(span, `${input.question}\n${digest}`, opts.llm);
+    const lookup = await lookupContext(span, `${input.question}\n${lookupDigest}`, opts.llm);
 
     // ── computed precision, replacing the model's self-assessment ──
-    const precision: Precision[] = await step(span, "precision", {}, async () => {
-      const out: Precision[] = [];
+    const { precision, headlinePrecision } = await step(span, "precision", {}, async () => {
+      // What the answer's main claims rest on: the listed rows and, when the result
+      // was profiled, the whole-population figure.
+      const headline: Precision[] = [];
+      // The extreme rows. Real, and worth reporting — but by construction they
+      // include the smallest segments in the result, so letting them decide overall
+      // confidence would mark every large answer "low" because some tail row has n=2.
+      const tails: Precision[] = [];
       for (const r of kept) {
         for (const row of r.rows.slice(0, NARRATION_ROWS)) {
-          out.push(...precisionForRow(row as Record<string, unknown>, r.sql));
+          headline.push(...precisionForRow(row as Record<string, unknown>, r.semanticSql));
+        }
+        if (!r.digest) continue;
+        // Only the population figures earn an interval: a min, a max or a median
+        // across result rows describes how segments spread, not the uncertainty of
+        // an estimate, and Wilson would put confident bounds on the wrong quantity.
+        headline.push(...precisionForRow(populationRow(r.digest), r.digest.sql));
+        // Extremes carry their own denominators, so the worst segment arrives with
+        // the honestly wide interval its sample size deserves — which is what lets
+        // the narration caveat it instead of quoting it as a finding.
+        for (const row of [
+          ...(r.digest.extremes?.top ?? []),
+          ...(r.digest.extremes?.bottom ?? []),
+        ]) {
+          tails.push(...precisionForRow(row, r.semanticSql));
         }
       }
-      // one entry per column: keep the WIDEST interval, since that is the figure
-      // a reader should be most careful with
-      const byColumn = new Map<string, Precision>();
-      for (const p of out) {
-        const prev = byColumn.get(p.column);
-        const wider =
-          !prev ||
-          (p.interval && prev.interval && p.interval.halfWidthPp > prev.interval.halfWidthPp) ||
-          (!prev.interval && !!p.interval);
-        if (wider) byColumn.set(p.column, p);
-      }
-      return [...byColumn.values()];
+      return {
+        precision: widestPerColumn([...headline, ...tails]),
+        headlinePrecision: widestPerColumn(headline),
+      };
     });
 
     const precisionText =
@@ -655,10 +895,29 @@ export async function runAnalytics(
 
     // ── narrate → citation check → (maybe) quality revision ──
     const resultsText = kept
-      .map(
-        (r) =>
-          `### ${r.id} — ${r.title} (${r.rows.length} rows${r.flags.length ? `; flags: ${r.flags.join("; ")}` : ""})\nSQL: ${r.sql}\nrows: ${JSON.stringify(r.rows.slice(0, NARRATION_ROWS))}${r.rows.length > NARRATION_ROWS ? `\n(+${r.rows.length - NARRATION_ROWS} more rows not shown — do not infer beyond what is listed)` : ""}`,
-      )
+      .map((r) => {
+        const flags = r.flags.length ? `; flags: ${r.flags.join("; ")}` : "";
+        const shown = r.rows.slice(0, NARRATION_ROWS);
+        const scope = r.digest
+          ? `${r.totalRows} rows in total — the profile below was computed over ALL of them`
+          : `${r.rows.length} rows`;
+        const parts = [`### ${r.id} — ${r.title} (${scope}${flags})`, `SQL: ${r.semanticSql}`];
+        if (r.digest) {
+          parts.push(renderDigest(r.digest));
+          parts.push(
+            `sample rows (the first ${shown.length} of ${r.totalRows} in query order — illustrative only, NOT the population): ${JSON.stringify(shown)}`,
+          );
+        } else {
+          parts.push(`rows: ${JSON.stringify(shown)}`);
+          if (r.rows.length > NARRATION_ROWS) {
+            parts.push(
+              `(+${r.rows.length - NARRATION_ROWS} more rows not shown — do not infer beyond what is listed)`,
+            );
+          }
+          if (r.digestNote) parts.push(`(${r.digestNote})`);
+        }
+        return parts.join("\n");
+      })
       .join("\n\n");
     // What the queries ACTUALLY did, read off the executed SQL. The citation
     // checker guards numbers; without this the narrator would assert methodology
@@ -669,7 +928,7 @@ export async function runAnalytics(
         // Only state what can be checked from the SQL itself. Whether the columns
         // exist is a separate fact we are not verifying here, so do not claim it.
         bits.push(
-          /\bduplicate_id\b/i.test(r.sql)
+          /\bduplicate_id\b/i.test(r.semanticSql)
             ? "hygiene filters applied (duplicate_id / is_back_filled)"
             : "no hygiene filters were applied in this query",
         );
@@ -688,7 +947,27 @@ export async function runAnalytics(
         .match(/-?\d[\d,]*(?:\.\d+)?/g)
         ?.map((n) => Number(n.replaceAll(",", "")))
         .filter((n) => Number.isFinite(n)) ?? [],
+      // The precision block is shown to the narrator and the prompt instructs it to
+      // caveat with THESE bounds — so the checker has to accept them, or obeying the
+      // instruction costs a retry and drops confidence. They are computed in code
+      // from the query results, the same standing as the gate notes above.
+      ...precision
+        .flatMap((p) => [
+          p.value,
+          p.n,
+          ...(p.interval
+            ? [
+                p.interval.lo,
+                p.interval.hi,
+                p.interval.halfWidthPp,
+                p.interval.lo * 100,
+                p.interval.hi * 100,
+              ]
+            : []),
+        ])
+        .filter((n): n is number => typeof n === "number" && Number.isFinite(n)),
     ];
+    const datePool = collectDateLiterals(kept, NARRATION_ROWS);
 
     let narration: Narration | null = null;
     let citationFailures = 0;
@@ -723,7 +1002,7 @@ export async function runAnalytics(
               ...(parsed.chart?.series.map((s) => String(s.value)) ?? []),
               ...(parsed.segmentTable?.rows.flat().map(String) ?? []),
             ];
-            const uncited = findUncitedNumbers(texts, pool);
+            const uncited = findUncitedNumbers(texts, pool, datePool);
             if (uncited.length > 0) {
               citationFailures++;
               throw new Error(
@@ -736,7 +1015,7 @@ export async function runAnalytics(
         );
         break;
       } catch (error) {
-        feedback = error instanceof Error ? error.message : String(error);
+        feedback = shapeFeedback(error);
         if (attempt === MAX_NARRATE_ATTEMPTS)
           throw new Error(`narration failed citation/schema checks ${attempt} times: ${feedback}`);
       }
@@ -744,7 +1023,7 @@ export async function runAnalytics(
     if (!narration) throw new Error("unreachable: narration missing");
 
     const confidence = deriveConfidence({
-      precisions: precision,
+      precisions: headlinePrecision,
       sanityFlags: sanityNotes.length,
       citationRetries: citationFailures,
       verificationAgreed: verification?.agreed ?? null,
@@ -795,6 +1074,7 @@ export async function runAnalytics(
         const uncited = findUncitedNumbers(
           [parsed.headline, ...parsed.findings.map((f) => f.text)],
           pool,
+          datePool,
         );
         if (uncited.length > 0) {
           // keep the answer that already passed every check rather than failing
@@ -829,12 +1109,43 @@ export async function runAnalytics(
           }
         : null,
       contextVersion,
-      sql: results.map((r) => ({
-        task: r.id,
-        title: r.title,
-        query: r.sql,
-        rowCount: r.rows.length,
-      })),
+      // Every executed query, so a reader can see both what was sampled and how the
+      // whole result set was measured.
+      sql: results.flatMap((r) => [
+        {
+          task: r.id,
+          title: r.title,
+          query: r.sql,
+          rowCount: r.rows.length,
+          ...(r.digest ? { totalRows: r.digest.totalRows } : {}),
+        },
+        ...(r.digest
+          ? [
+              {
+                task: `${r.id}_profile`,
+                title: `${r.title} — profile of all ${r.digest.totalRows} rows`,
+                query: r.digest.sql,
+                rowCount: 1,
+              },
+            ]
+          : []),
+        ...(r.digest?.extremes && r.digest.extremes.top.length > 0
+          ? [
+              {
+                task: `${r.id}_top`,
+                title: `${r.title} — highest by ${r.digest.extremes.metric}`,
+                query: r.digest.extremes.topSql,
+                rowCount: r.digest.extremes.top.length,
+              },
+              {
+                task: `${r.id}_bottom`,
+                title: `${r.title} — lowest by ${r.digest.extremes.metric}`,
+                query: r.digest.extremes.bottomSql,
+                rowCount: r.digest.extremes.bottom.length,
+              },
+            ]
+          : []),
+      ]),
     };
     if (!input.history?.length) {
       await insert("insight_cache", [
@@ -850,6 +1161,21 @@ export async function runAnalytics(
 
     scoreRun(span, "analytics_tasks", plan.tasks.length);
     scoreRun(span, "sql_attempts_total", sqlAttemptsTotal);
+    // How much data the answer actually rests on, versus how much reached the model.
+    const digested = kept.filter((r) => r.digest);
+    scoreRun(span, "digests_computed", digested.length);
+    scoreRun(
+      span,
+      "digest_failures",
+      kept.filter((r) => r.digestNote).length,
+      kept.map((r) => r.digestNote).filter(Boolean).join("; ") || "none",
+    );
+    scoreRun(
+      span,
+      "rows_analyzed_total",
+      kept.reduce((sum, r) => sum + r.totalRows, 0),
+      `${kept.reduce((sum, r) => sum + Math.min(r.rows.length, NARRATION_ROWS), 0)} rows were listed for the narrator`,
+    );
     scoreRun(span, "sanity_flags", sanityNotes.length);
     scoreRun(span, "citation_failures", citationFailures);
     scoreRun(span, "quality_gate_passed", quality.verdict === "pass" ? 1 : 0);

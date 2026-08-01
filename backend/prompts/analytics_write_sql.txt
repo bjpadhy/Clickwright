@@ -17,13 +17,17 @@ listed here does not exist.
 {{feedback}}
 <rules>
 1. ONE statement, starting with SELECT or WITH. No semicolon, no trailing comment.
-2. Aggregate in the database: GROUP BY plus count/uniq/avg/quantile. The result is a
-   summary of at most a few hundred rows, never raw events.
+2. Aggregate in the database: GROUP BY plus count/uniq/avg/quantile. Return a
+   summary, never raw events. Group as finely as the task deserves without worrying
+   about the row count: a large grouped result is profiled in full downstream, so a
+   per-city-per-day cut is fine where the task calls for one.
 3. **Every rate must ship with its denominator**, named `<rate_base>_n`. For
    `otp_success_rate` emit `otp_success_n`; for a single unnamed rate, `n` is enough.
    The denominator is the count the rate DIVIDES BY, not the numerator. Without it,
    precision cannot be computed and the figure is reported as unbounded — and a
-   reader cannot tell whether 83% rests on 428 rows or 4.
+   reader cannot tell whether 83% rests on 428 rows or 4. It is also what lets the
+   whole-set rate be computed correctly when the result is large: with denominators
+   the population rate is exact, without them there is no overall rate at all.
 4. If the task compares anything — A vs B, best vs worst, lift, gap, change over time —
    compute that comparison as its own column. A delta you do not compute cannot be
    reported downstream.
@@ -32,6 +36,10 @@ listed here does not exist.
    hard query failure, not a style issue. Bucket `os` as the conventions specify.
 6. Never aggregate money across currencies without grouping by currency.
 7. Rates as fractions 0..1 named `*_rate`; snake_case aliases throughout.
+8. Write a LIMIT only when a top-N IS the task ("the 10 worst cities") — and then
+   pair it with an ORDER BY, or which rows you get is arbitrary. Do NOT add one to
+   keep the result small: every row of your result is analysed either way, and a
+   LIMIT that is not part of the question silently narrows the answer to it.
 </rules>
 
 <performance>

@@ -168,8 +168,15 @@ question
   ├─ plan (LLM)              ≤4 aggregate tasks
   ├─ per task ×N             ALL CONCURRENT: write SQL (LLM) → guard (code) →
   │                          execute read-only → retry ≤3 on a real SQL error
+  ├─ full-set profile (code) only for results bigger than the 24 rows the narrator
+  │                          reads: wraps the task's own SQL as a subquery so
+  │                          ClickHouse computes exact whole-set statistics —
+  │                          count, population-weighted rates with denominators,
+  │                          spread, date range, best/worst rows. The insight is
+  │                          based on every row; the context cost stays constant.
   ├─ sanity gate (code)      drop empty sets and blocked tasks, flag >100% rates
-  │                          and n<50 — everything dropped is reported, not hidden
+  │                          and n<50 — over ALL rows when a profile ran, not just
+  │                          the fetched ones; everything dropped is reported
   ├─ knowledge lookup (LLM)  known issues that might explain an anomaly
   ├─ narrate (LLM)           the insight card
   ├─ citation check (code)   every number must be in the results, or a verified

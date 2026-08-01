@@ -17,11 +17,14 @@ import { loadPrompt, stripFences } from "../core/llm.js";
 
 const VerificationSchema = z.object({
   verification_sql: z.string().min(20),
-  recomputes: z.string().max(160).default(""),
+  // Prose fields are truncated, never rejected: throwing away a completed
+  // execution-backed comparison because its comment ran 20 characters long would
+  // discard the one check that catches "valid SQL, wrong question".
+  recomputes: z.string().transform((s) => s.slice(0, 160)).default(""),
   expected_to_match: z.string().default(""),
   definition_ok: z.boolean().default(true),
   answers_question: z.boolean().default(true),
-  concern: z.string().max(300).default(""),
+  concern: z.string().transform((s) => s.slice(0, 300)).default(""),
 });
 
 export interface VerificationResult {
@@ -52,6 +55,14 @@ export interface VerifyInput {
   taskQuestion: string;
   sql: string;
   rows: Record<string, unknown>[];
+  /** Whole-result-set figures, when the result was too large to show in full.
+   * These are the numbers a reader acts on, so they are what a second query
+   * should have to reproduce. */
+  digest: string;
+  /** The same figures as values, so a verifier that targets one can be checked
+   * against it — searching only the sample rows reported "inconclusive" for
+   * exactly the population figures we most want verified. */
+  digestRow?: Record<string, unknown>;
   definitions: string;
   schemas: string;
 }
@@ -68,6 +79,7 @@ export async function verifyTask(
       task: `${input.taskTitle} — ${input.taskQuestion}`,
       sql: input.sql,
       result: JSON.stringify(input.rows.slice(0, 12)),
+      digest: input.digest,
       definitions: input.definitions,
       schemas: input.schemas,
     });
@@ -119,10 +131,11 @@ export async function verifyTask(
       } satisfies VerificationResult;
     }
 
-    // the figure it claims to reproduce, from the original result
+    // the figure it claims to reproduce, from the original result — the whole-set
+    // profile first, since a population figure is the one worth checking
     const col = plan.expected_to_match;
     let originalValue: number | null = null;
-    for (const row of input.rows) {
+    for (const row of [...(input.digestRow ? [input.digestRow] : []), ...input.rows]) {
       const v = Number((row as Record<string, unknown>)[col]);
       if (Number.isFinite(v)) {
         originalValue = v;

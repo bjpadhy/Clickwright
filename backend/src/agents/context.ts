@@ -443,7 +443,13 @@ export interface Reconciliation {
   liveNotDocumented: string[];
 }
 
-const INTERNAL_TABLES = new Set(["context_store", "runs_log"]);
+/** The application's own storage — not event data, so it must never appear as
+ * "live but undocumented" in a reconciliation warning (that noise makes the DDL
+ * agent think it should document or avoid them). */
+const INTERNAL_TABLES = new Set([
+  "context_store", "runs_log", "conversations", "messages", "dashboards",
+  "optimization_suggestions", "schema_changelog", "trace_summaries",
+]);
 
 export async function reconcileWithLive(): Promise<Reconciliation> {
   const rows = await query<{ name: string }>(`

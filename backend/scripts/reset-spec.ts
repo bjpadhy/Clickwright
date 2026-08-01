@@ -11,7 +11,12 @@
  */
 import { command, query, closeDb } from "../src/core/db.js";
 
-const PROTECTED_SOURCES = ["base_context.md", "data_audit"];
+/** Never reset: the human-authored seed and any verified audit of the BASE
+ * tables. Those are permanent knowledge, not spec products. Prefix match so
+ * future audits (data_audit_*) are protected automatically. */
+const PROTECTED_PREFIXES = ["base_context.md", "data_audit"];
+const isProtected = (source: string) =>
+  PROTECTED_PREFIXES.some((p) => source === p || source.startsWith(`${p}_`));
 
 const args = process.argv.slice(2);
 if (args.length === 0) {
@@ -21,14 +26,13 @@ if (args.length === 0) {
 
 let specs: string[];
 if (args.includes("--all-specs")) {
-  const rows = await query<{ s: string }>(`
-    SELECT DISTINCT source_spec AS s FROM context_store
-    WHERE source_spec NOT IN (${PROTECTED_SOURCES.map((p) => `'${p}'`).join(",")})
-  `);
-  specs = rows.map((r) => r.s);
+  const rows = await query<{ s: string }>(
+    `SELECT DISTINCT source_spec AS s FROM context_store`,
+  );
+  specs = rows.map((r) => r.s).filter((s) => !isProtected(s));
 } else {
   specs = args.filter((a) => !a.startsWith("--"));
-  const banned = specs.filter((s) => PROTECTED_SOURCES.includes(s));
+  const banned = specs.filter(isProtected);
   if (banned.length) {
     console.error(`refusing to reset protected sources: ${banned.join(", ")}`);
     process.exit(1);
@@ -49,7 +53,17 @@ const tableRows = await query<{ entity: string }>(`
 `);
 const tables = tableRows.map((r) => r.entity.slice("table:".length));
 
+// Belt and braces: even if a product table somehow appeared as a table:* entry,
+// never drop the application's own storage.
+const PRODUCT_TABLES = new Set([
+  "context_store", "runs_log", "conversations", "messages", "dashboards",
+  "optimization_suggestions", "schema_changelog", "trace_summaries",
+]);
 for (const t of tables) {
+  if (PRODUCT_TABLES.has(t)) {
+    console.log(`• skipped ${t} — product table, never reset`);
+    continue;
+  }
   await command(`DROP TABLE IF EXISTS ${t}`);
   console.log(`✓ dropped table ${t}`);
 }

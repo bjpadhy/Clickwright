@@ -139,7 +139,8 @@ export class RunManager {
       ts: new Date().toISOString(),
     };
     run.events.push(stored);
-    for (const sub of run.subscribers) sub(stored);
+    // durable write FIRST, then fan out — a broken SSE socket must never lose
+    // history or starve other subscribers
     insert("runs_log", [
       {
         run_id: run.id,
@@ -151,6 +152,13 @@ export class RunManager {
         payload: JSON.stringify(stored.payload),
       },
     ]).catch(() => {});
+    for (const sub of run.subscribers) {
+      try {
+        sub(stored);
+      } catch {
+        run.subscribers.delete(sub); // dead socket — drop it, never starve the rest
+      }
+    }
   }
 
   private status(run: RunRecord, status: RunRecord["status"], extra: Record<string, unknown> = {}): void {

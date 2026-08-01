@@ -147,13 +147,13 @@ app.get("/api/history", async (_req, res) => {
 
 /** Full decision record of one past run (replay source for the report view). */
 app.get("/api/history/:runId", async (req, res) => {
-  const id = req.params.runId.replace(/'/g, "''");
   const rows = await query<{
     seq: string; ts: string; type: string; name: string; payload: string;
-  }>(`
-    SELECT toString(seq) AS seq, toString(ts) AS ts, type, name, payload
-    FROM runs_log WHERE run_id = '${id}' ORDER BY seq ASC
-  `);
+  }>(
+    `SELECT toString(seq) AS seq, toString(ts) AS ts, type, name, payload
+     FROM runs_log WHERE run_id = {runId:String} ORDER BY seq ASC`,
+    { runId: req.params.runId },
+  );
   if (rows.length === 0) return res.status(404).json({ error: "unknown run" });
   res.json(
     rows.map((r) => ({
@@ -172,10 +172,11 @@ app.get("/api/context", async (_req, res) => {
 });
 
 app.get("/api/context/:entity/history", async (req, res) => {
-  const rows = await query(`
-    SELECT entity, definition_md, toUInt32(version) AS version, source_spec, change_note, run_id, toString(updated_at) AS updated_at
-    FROM context_store WHERE entity = {entity:String} ORDER BY version ASC
-  `.replace("{entity:String}", `'${req.params.entity.replace(/'/g, "''")}'`));
+  const rows = await query(
+    `SELECT entity, definition_md, toUInt32(version) AS version, source_spec, change_note, run_id, toString(updated_at) AS updated_at
+     FROM context_store WHERE entity = {entity:String} ORDER BY version ASC`,
+    { entity: req.params.entity },
+  );
   res.json(rows);
 });
 

@@ -87,14 +87,22 @@ export function flattenRow(
   row: Record<string, unknown>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  // Collisions (top-level `payment_amount` + nested `payment.amount`) get a
+  // deterministic __2 suffix. The profiler flattens with THIS same function,
+  // so the LLM sees the suffixed column and the loader writes it — consistent.
+  const put = (name: string, value: unknown) => {
+    let key = name;
+    for (let i = 2; key in out; i++) key = `${name}__${i}`;
+    out[key] = typeof value === "boolean" ? Number(value) : value;
+  };
   for (const [key, val] of Object.entries(row)) {
     if (key === "event") continue;
     if (val !== null && typeof val === "object" && !Array.isArray(val)) {
       for (const [k2, v2] of Object.entries(val as Record<string, unknown>)) {
-        out[`${key}_${k2}`] = typeof v2 === "boolean" ? Number(v2) : v2;
+        put(`${key}_${k2}`, v2);
       }
     } else {
-      out[key] = typeof val === "boolean" ? Number(val) : val;
+      put(key, val);
     }
   }
   return out;
@@ -226,6 +234,11 @@ export async function runInstrumentation(
             );
             if (missing.length)
               throw new Error(`Proposal is missing tables for events: ${missing.join(", ")}`);
+            const phantom = parsed.tables.filter((t) => !groups.has(t.event));
+            if (phantom.length)
+              throw new Error(
+                `Proposed tables reference events that do not exist in the data: ${phantom.map((t) => `${t.name} (event: ${t.event})`).join(", ")}`,
+              );
             const collisions = parsed.tables.filter((t) => liveNames.has(t.name));
             if (collisions.length)
               throw new Error(

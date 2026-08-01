@@ -1,124 +1,41 @@
 /**
- * Roll back everything one or more spec runs produced: drop the tables the run
- * created and delete its context_store rows. Because the store is versioned and
- * append-only, deleting a run's rows automatically restores the previous
- * versions as "latest" — no restore logic needed.
+ * Targeted reset of one or more specs. Thin wrapper over src/core/reset.ts so
+ * there is exactly one implementation of "what is safe to drop".
  *
- *   npx tsx scripts/reset-spec.ts 01_express_checkout 02_group_family
- *   npx tsx scripts/reset-spec.ts --all-specs        # every non-seed, non-audit run
+ *   npx tsx scripts/reset-spec.ts 01_express_checkout
+ *   npx tsx scripts/reset-spec.ts --all-specs
+ *   npx tsx scripts/reset-spec.ts --orphans
  *
- * Never touches: base tables, seed rows (base_context.md), audit rows (data_audit).
+ * For a full reset (including run history and chat) use `npm run reset -- --all`.
  */
-import { command, query, closeDb } from "../src/core/db.js";
-
-/** Never reset: the human-authored seed and any verified audit of the BASE
- * tables. Those are permanent knowledge, not spec products. Prefix match so
- * future audits (data_audit_*) are protected automatically. */
-const PROTECTED_PREFIXES = ["base_context.md", "data_audit"];
-const isProtected = (source: string) =>
-  PROTECTED_PREFIXES.some((p) => source === p || source.startsWith(`${p}_`));
+import { closeDb } from "../src/core/db.js";
+import { instrumentedSpecs, isProtectedSource, resetSpecs, sweepOrphans } from "../src/core/reset.js";
 
 const args = process.argv.slice(2);
 if (args.length === 0) {
-  console.error("usage: npx tsx scripts/reset-spec.ts <specName...> | --all-specs");
+  console.error("usage: reset-spec.ts <specName...> | --all-specs | --orphans");
   process.exit(1);
 }
 
-let specs: string[];
-if (args.includes("--all-specs")) {
-  const rows = await query<{ s: string }>(
-    `SELECT DISTINCT source_spec AS s FROM context_store`,
-  );
-  specs = rows.map((r) => r.s).filter((s) => !isProtected(s));
-} else {
-  specs = args.filter((a) => !a.startsWith("--"));
-  const banned = specs.filter(isProtected);
-  if (banned.length) {
-    console.error(`refusing to reset protected sources: ${banned.join(", ")}`);
-    process.exit(1);
-  }
-}
-
-// Never drop the application's own storage, whatever the context store says.
-const PRODUCT_TABLES = new Set([
-  "context_store", "runs_log", "conversations", "messages", "dashboards",
-  "insight_cache", "optimization_suggestions", "schema_changelog", "trace_summaries",
-]);
-
-// A run that created tables but failed before writing context leaves ORPHANS:
-// real tables with no table:* entry, so the loop above cannot see them. Sweep any
-// table that is neither provided base data nor application storage.
-const BASE_TABLES = new Set([
-  "destination_card_clicked", "application_started", "document_uploaded", "purchase_completed",
-  "search_typed", "landing_page_scrolled", "auth_completed", "pay_now_clicked",
-]);
 if (args.includes("--all-specs") || args.includes("--orphans")) {
-  // engine matters: an approved optimization creates a MaterializedView that no
-  // spec documents, so a name-only sweep would silently destroy it
-  const live = await query<{ name: string; engine: string }>(
-    `SELECT name, engine FROM system.tables
-     WHERE database = currentDatabase() AND NOT is_temporary`,
-  );
-  const documented = new Set(
-    (await query<{ e: string }>(`SELECT DISTINCT entity AS e FROM context_store WHERE entity LIKE 'table:%'`))
-      .map((r) => r.e.slice("table:".length)),
-  );
-  for (const { name, engine } of live) {
-    if (BASE_TABLES.has(name) || PRODUCT_TABLES.has(name) || name.startsWith(".inner")) continue;
-    if (/View/i.test(engine)) {
-      console.log(`• skipped ${name} — ${engine}, created by an optimization run`);
-      continue;
-    }
-    if (documented.has(name)) continue;
-    await command(`DROP TABLE IF EXISTS ${name}`);
-    console.log(`✓ dropped orphan table ${name} (created by a failed run, undocumented)`);
-  }
+  const orphans = await sweepOrphans();
+  for (const t of orphans.dropped) console.log(`✓ dropped orphan ${t}`);
+  for (const t of orphans.skipped) console.log(`• kept ${t} — created by an optimization run`);
 }
 
+const named = args.filter((a) => !a.startsWith("--"));
+const banned = named.filter(isProtectedSource);
+if (banned.length) {
+  console.error(`refusing to reset protected sources: ${banned.join(", ")}`);
+  process.exit(1);
+}
+const specs = args.includes("--all-specs") ? await instrumentedSpecs() : named;
 
 if (specs.length === 0) {
-  console.log("nothing to reset — no spec-run rows in context_store");
-  await closeDb();
-  process.exit(0);
+  console.log("no specs to reset");
+} else {
+  const r = await resetSpecs(specs);
+  for (const t of r.droppedTables ?? []) console.log(`✓ dropped ${t}`);
+  console.log(`✓ context_store ${r.contextRowsBefore} → ${r.contextRowsAfter} rows (${specs.join(", ")})`);
 }
-const specList = specs.map((s) => `'${s}'`).join(",");
-
-// 1. The store knows which tables each spec created
-const tableRows = await query<{ entity: string }>(`
-  SELECT DISTINCT entity FROM context_store
-  WHERE source_spec IN (${specList}) AND entity LIKE 'table:%'
-`);
-const tables = tableRows.map((r) => r.entity.slice("table:".length));
-
-for (const t of tables) {
-  if (PRODUCT_TABLES.has(t)) {
-    console.log(`• skipped ${t} — product table, never reset`);
-    continue;
-  }
-  await command(`DROP TABLE IF EXISTS ${t}`);
-  console.log(`✓ dropped table ${t}`);
-}
-
-// 2. Delete the runs' context rows — prior versions become latest again
-const before = await query<{ n: string }>(`SELECT count() AS n FROM context_store`);
-await command(`
-  ALTER TABLE context_store DELETE WHERE source_spec IN (${specList})
-  SETTINGS mutations_sync = 2
-`);
-const after = await query<{ n: string }>(`SELECT count() AS n FROM context_store`);
-console.log(
-  `✓ context_store: ${before[0]?.n} → ${after[0]?.n} rows (removed ${Number(before[0]?.n) - Number(after[0]?.n)} from: ${specs.join(", ")})`,
-);
-
-// 3. Verify the restored state
-const latest = await query<{ entity: string; version: string; source_spec: string }>(`
-  SELECT entity, version, source_spec FROM context_store
-  ORDER BY entity ASC, version DESC LIMIT 1 BY entity
-`);
-const stale = latest.filter((e) => specs.includes(e.source_spec));
-if (stale.length) {
-  console.error(`✗ rows from reset specs still present: ${stale.map((e) => e.entity).join(", ")}`);
-  process.exit(1);
-}
-console.log(`✓ verified: ${latest.length} entities, none sourced from the reset specs`);
 await closeDb();

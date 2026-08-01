@@ -1,0 +1,144 @@
+/**
+ * Resetting the database back to "provided data only".
+ *
+ * Two categories are protected, always:
+ *   - the 8 provided event tables (the dataset itself)
+ *   - the application's own storage (context_store, runs_log, chat, dashboards…)
+ * Everything else is a spec artifact and may be dropped.
+ *
+ * Knowledge sourced from `base_context.md` or any `data_audit*` pass is protected
+ * too: those are verified facts about the BASE tables, not products of a spec run.
+ */
+import { command, query } from "./db.js";
+
+/** The provided dataset — never dropped, never truncated. */
+export const BASE_TABLES = new Set([
+  "destination_card_clicked",
+  "application_started",
+  "document_uploaded",
+  "purchase_completed",
+  "search_typed",
+  "landing_page_scrolled",
+  "auth_completed",
+  "pay_now_clicked",
+]);
+
+/**
+ * The application's own storage. Add new product tables HERE when you create one,
+ * or a reset will treat it as a spec artifact and drop it.
+ */
+export const PRODUCT_TABLES = new Set([
+  "context_store",
+  "runs_log",
+  "conversations",
+  "messages",
+  "insight_cache",
+  "dashboards",
+  "optimization_suggestions",
+  "schema_changelog",
+  "trace_summaries",
+]);
+
+/** Context sources that survive every reset. */
+const PROTECTED_PREFIXES = ["base_context.md", "data_audit"];
+export const isProtectedSource = (source: string): boolean =>
+  PROTECTED_PREFIXES.some((p) => source === p || source.startsWith(`${p}_`));
+
+export interface ResetReport {
+  droppedTables: string[];
+  droppedOrphans: string[];
+  skipped: string[];
+  contextRowsBefore: number;
+  contextRowsAfter: number;
+  specs: string[];
+  truncated: string[];
+}
+
+/** Spec names that have written to the context store. */
+export async function instrumentedSpecs(): Promise<string[]> {
+  const rows = await query<{ s: string }>(
+    `SELECT DISTINCT source_spec AS s FROM context_store`,
+  );
+  return rows.map((r) => r.s).filter((s) => !isProtectedSource(s));
+}
+
+/** Drop the tables a spec created and delete its context rows. */
+export async function resetSpecs(specs: string[]): Promise<Partial<ResetReport>> {
+  if (specs.length === 0) return { droppedTables: [], specs: [] };
+  const list = specs.map((s) => `'${s.replace(/'/g, "''")}'`).join(",");
+
+  const documented = await query<{ entity: string }>(`
+    SELECT DISTINCT entity FROM context_store
+    WHERE source_spec IN (${list}) AND entity LIKE 'table:%'
+  `);
+  const droppedTables: string[] = [];
+  const skipped: string[] = [];
+  for (const { entity } of documented) {
+    const name = entity.slice("table:".length);
+    if (PRODUCT_TABLES.has(name) || BASE_TABLES.has(name)) {
+      skipped.push(name);
+      continue;
+    }
+    await command(`DROP TABLE IF EXISTS ${name}`);
+    droppedTables.push(name);
+  }
+
+  const before = await countContext();
+  await command(
+    `ALTER TABLE context_store DELETE WHERE source_spec IN (${list}) SETTINGS mutations_sync = 2`,
+  );
+  const after = await countContext();
+  return {
+    droppedTables,
+    skipped,
+    specs,
+    contextRowsBefore: before,
+    contextRowsAfter: after,
+  };
+}
+
+/**
+ * Tables that exist but no context entry describes — left behind by a run that
+ * created tables and then failed before documenting them. Materialized views are
+ * skipped: an approved optimization creates one that no spec documents.
+ */
+export async function sweepOrphans(): Promise<{ dropped: string[]; skipped: string[] }> {
+  const live = await query<{ name: string; engine: string }>(`
+    SELECT name, engine FROM system.tables
+    WHERE database = currentDatabase() AND NOT is_temporary
+  `);
+  const documented = new Set(
+    (
+      await query<{ e: string }>(
+        `SELECT DISTINCT entity AS e FROM context_store WHERE entity LIKE 'table:%'`,
+      )
+    ).map((r) => r.e.slice("table:".length)),
+  );
+
+  const dropped: string[] = [];
+  const skipped: string[] = [];
+  for (const { name, engine } of live) {
+    if (BASE_TABLES.has(name) || PRODUCT_TABLES.has(name) || name.startsWith(".inner")) continue;
+    if (documented.has(name)) continue;
+    if (/View/i.test(engine)) {
+      skipped.push(`${name} (${engine})`);
+      continue;
+    }
+    await command(`DROP TABLE IF EXISTS ${name}`);
+    dropped.push(name);
+  }
+  return { dropped, skipped };
+}
+
+/** Empty a product table without dropping it. Refuses anything not ours. */
+export async function truncateProduct(table: string): Promise<void> {
+  if (!PRODUCT_TABLES.has(table)) {
+    throw new Error(`${table} is not a product table — refusing to truncate`);
+  }
+  await command(`TRUNCATE TABLE IF EXISTS ${table}`);
+}
+
+async function countContext(): Promise<number> {
+  const r = await query<{ n: string }>(`SELECT count() AS n FROM context_store`);
+  return Number(r[0]?.n ?? 0);
+}

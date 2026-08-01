@@ -83,9 +83,32 @@ export class RunManager {
   private runs = new Map<string, RunRecord>();
   private queue: RunRecord[] = [];
   private active: RunRecord | null = null;
-  /** Serial chain of runs_log inserts. Awaited before a run is considered done,
-   * so a completed run can never be missing its final "succeeded" event. */
+  /**
+   * runs_log writes are BUFFERED, not one insert per event. A run emits 50-100+
+   * events; a round trip each is exactly the small-insert pattern ClickHouse warns
+   * against (insert-batch-size). Events accumulate and flush on a short timer, on
+   * a full buffer, or immediately for anything a reader might be waiting on
+   * (approval requests, terminal states). `drain()` forces a flush and awaits it,
+   * so durability is unchanged — a completed run still cannot lose its events.
+   */
+  private buffer: Array<Record<string, unknown>> = [];
+  private flushTimer: NodeJS.Timeout | null = null;
   private writes: Promise<unknown> = Promise.resolve();
+
+  private static readonly FLUSH_MS = 250;
+  private static readonly FLUSH_ROWS = 50;
+
+  /** Queue one insert of everything buffered so far. Never throws. */
+  private flush(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.buffer.length === 0) return;
+    const batch = this.buffer;
+    this.buffer = [];
+    this.writes = this.writes.then(() => insert("runs_log", batch).catch(() => {}));
+  }
 
   async init(): Promise<void> {
     await command(`
@@ -118,9 +141,10 @@ export class RunManager {
     return this.active;
   }
 
-  /** Await every queued runs_log insert — call before the process exits so a
-   * restart cannot truncate a run's event history. */
+  /** Flush anything buffered and await every queued insert — call before the
+   * process exits so a restart cannot truncate a run's event history. */
   async drain(): Promise<void> {
+    this.flush();
     await this.writes.catch(() => {});
   }
 
@@ -202,21 +226,29 @@ export class RunManager {
       ts: new Date().toISOString(),
     };
     run.events.push(stored);
-    // durable write FIRST, then fan out — a broken SSE socket must never lose
-    // history or starve other subscribers
-    this.writes = this.writes.then(() =>
-      insert("runs_log", [
-      {
-        run_id: run.id,
-        spec: run.spec,
-        seq: stored.seq,
-        ts: stored.ts.replace("T", " ").replace("Z", ""),
-        type: stored.type,
-        name: stored.name,
-        payload: JSON.stringify(stored.payload),
-      },
-      ]).catch(() => {}),
-    );
+    // buffer the durable write, then fan out — a broken SSE socket must never
+    // lose history or starve other subscribers
+    this.buffer.push({
+      run_id: run.id,
+      spec: run.spec,
+      seq: stored.seq,
+      ts: stored.ts.replace("T", " ").replace("Z", ""),
+      type: stored.type,
+      name: stored.name,
+      payload: JSON.stringify(stored.payload),
+    });
+
+    // Flush at once for anything someone may be about to read: a gate the UI is
+    // waiting on, or a terminal state. Otherwise coalesce on a short timer.
+    const urgent =
+      stored.type === "approval_request" ||
+      (stored.type === "status" && (stored.name === "succeeded" || stored.name === "failed"));
+    if (urgent || this.buffer.length >= RunManager.FLUSH_ROWS) {
+      this.flush();
+    } else if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => this.flush(), RunManager.FLUSH_MS);
+      this.flushTimer.unref?.(); // never hold the process open for a pending flush
+    }
     for (const sub of run.subscribers) {
       try {
         sub(stored);
@@ -305,7 +337,7 @@ export class RunManager {
       this.status(run, "failed", { error: message });
     } finally {
       setRunSink(null);
-      await this.writes.catch(() => {}); // every event is durable before we finish
+      await this.drain(); // every event is durable before we finish
       await flushTraces().catch(() => {});
     }
   }
@@ -396,7 +428,7 @@ export class RunManager {
       });
     } finally {
       setRunSink(null);
-      await this.writes.catch(() => {}); // every event is durable before we finish
+      await this.drain(); // every event is durable before we finish
       await flushTraces().catch(() => {});
     }
   }

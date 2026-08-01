@@ -40,8 +40,12 @@ Code OAuth login (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` in `backend
 | `npm test` | Unit tests (observe modules) |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npx tsx scripts/run-instrumentation.ts ../specs/01_express_checkout --yes` | Run a spec from the CLI (`--yes` auto-approves both gates) |
-| `npx tsx scripts/reset-spec.ts <spec…> \| --all-specs` | Drop a spec's tables and roll back its context rows |
-| `npx tsx scripts/reset-spec.ts --orphans` | Sweep tables left by a run that failed before writing context |
+| `npm run reset` | Reset to provided data only: drop every spec's tables + context rows, sweep orphans |
+| `npm run reset -- --runs` | …and clear run history (`runs_log`) |
+| `npm run reset -- --chat` | …and clear conversations, messages, insight cache, boards |
+| `npm run reset -- --all` | Everything above |
+| `npm run reset -- --dry-run` | Show what would change, touch nothing |
+| `npx tsx scripts/reset-spec.ts <spec…>` | Reset one named spec (same logic, narrower scope) |
 | `npx tsx scripts/apply-audit-context.ts` | Apply the base-data audit corrections |
 | `npx tsx scripts/apply-ordering-finding.ts` | Apply the event-ordering finding |
 | `npx tsx scripts/comment-tables.ts` | Project context knowledge onto base tables as ClickHouse COMMENTs |
@@ -242,9 +246,14 @@ between funnel events are meaningless and stages must be counted as set membersh
 | `dashboards` | ReplacingMergeTree(created_at) | Saved charts: `dash_id, title, sql, chart_kind, meta_json, deleted, created_at`. **The stored artifact is the SQL** — re-executed on every load, so boards are always fresh data. |
 | `optimization_suggestions` | MergeTree | Advisor output for the Observe screen (severity, target table, action, rationale, status). |
 
-`scripts/reset-spec.ts` drops only the event tables a spec created and deletes that
-spec's `context_store` rows; the seed, the `data_audit*` findings, and every table above
-are protected explicitly.
+**Resetting.** `npm run reset` drops only the event tables a spec created and deletes
+that spec's `context_store` rows. Two categories are protected by name in
+`src/core/reset.ts`: the 8 provided event tables and every application table above —
+**add new product tables to `PRODUCT_TABLES` there**, or a reset will treat them as spec
+artifacts. Knowledge from `base_context.md` and any `data_audit*` pass is protected too,
+since those are verified facts about the base tables rather than products of a run. The
+script verifies the end state and exits non-zero if a provided table went missing or a
+spec table survived.
 
 ### Spec-created tables
 

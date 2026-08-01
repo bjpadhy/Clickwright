@@ -4,6 +4,9 @@ Base URL: `http://localhost:8787` · All routes under `/api`. In the webapp dev
 server, `/api/*` is already proxied here (see `webapp/vite.config.ts`), so the
 frontend calls relative paths (`fetch("/api/runs")`).
 
+Reset the database with `cd backend && npm run reset` (add `--all` to clear run
+history and chat as well; `--dry-run` to preview).
+
 Start the backend with `cd backend && npm run dev` (hot reload) or `npm run serve`
 (no watching — use this for demos and long runs, since a reload abandons an active run). No auth (hackathon; single
 team). All bodies and responses are JSON except the SSE stream. Errors are

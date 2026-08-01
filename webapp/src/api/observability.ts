@@ -141,6 +141,37 @@ export interface ScanResult {
   error?: string
 }
 
+/* ── answer judge ──────────────────────────────────────────────────────── */
+
+export type Verdict = "pass" | "warn" | "fail"
+
+export interface JudgeFinding {
+  kind: "hygiene" | "denominator" | "currency" | "join" | "citation" | "coverage"
+  severity: "info" | "warn" | "fail"
+  text: string
+  task: string | null
+}
+
+export interface Judgement {
+  convId: string
+  seq: number
+  question: string
+  askedAt: string
+  judgedAt: string
+  overall: Verdict
+  /** Did the data returned actually answer the question? */
+  relevance: { verdict: Verdict; score: number; reason: string }
+  /** Was the query the agent wrote correct? */
+  sql: { verdict: Verdict; score: number; reason: string }
+  /** Decided by code, not the model — see judge.ts */
+  findings: JudgeFinding[]
+  queries: { task: string; title: string; sql: string; rowCount: number }[]
+  /** The judge runs on a stronger model than the agent it grades. */
+  model: string
+  answerTraceUrl: string | null
+  judgeTraceUrl: string | null
+}
+
 /* ── transport ─────────────────────────────────────────────────────────── */
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -168,6 +199,9 @@ export const observe = {
 
   /** Plain href — let the browser download it rather than buffering in JS. */
   changelogExportUrl: "/api/observe/changelog/export",
+
+  judgements: (verdict?: Verdict) =>
+    request<Judgement[]>(`/observe/judgements${verdict ? `?verdict=${verdict}` : ""}`),
 
   suggestions: () => request<ScanResult>("/observe/suggestions"),
 

@@ -9,6 +9,7 @@ import { ScreenHeader } from "@/components/ui-kit/panel"
 import { solidButtonSm } from "@/components/ui-kit/styles"
 import { useConsole, type ObsTab } from "@/state/console"
 import { ChangelogTab } from "./changelog-tab"
+import { JudgeTab } from "./judge-tab"
 import { StackTab } from "./stack-tab"
 import { TracesTab } from "./traces-tab"
 
@@ -16,6 +17,7 @@ const SUBTITLE: Record<ObsTab, string> = {
   traces: "What each agent did, why, and what it cost — step by step",
   stack: "Is the database healthy? Queries, latency and storage at a glance",
   log: "Every schema change and context update, in plain terms",
+  judge: "Every chat answer, graded for relevance and SQL correctness",
 }
 
 const CTA: Record<ObsTab, { label: string; icon: string; notice: string }> = {
@@ -33,6 +35,11 @@ const CTA: Record<ObsTab, { label: string; icon: string; notice: string }> = {
     label: "Export changelog",
     icon: "ti-download",
     notice: "Changelog exported for the submission",
+  },
+  judge: {
+    label: "Open in Langfuse",
+    icon: "ti-external-link",
+    notice: "Each judgement links to its own trace",
   },
 }
 
@@ -58,7 +65,10 @@ export function Observability() {
               {cta.label}
             </a>
           </Button>
-        ) : obsTab !== "stack" ? (
+        ) : obsTab !== "stack" && obsTab !== "judge" ? (
+          // Answer quality has no header CTA: every row already links to its own
+          // answer and judge traces, so a toast here would be the only fake
+          // button on a screen whose whole point is being trustworthy.
           <Button onClick={() => toast.success(cta.notice)} className={solidButtonSm}>
             <Icon name={cta.icon} size={14} />
             {cta.label}
@@ -72,6 +82,7 @@ export function Observability() {
             <SegmentedTab value="traces">Agent activity</SegmentedTab>
             <SegmentedTab value="stack">Database health</SegmentedTab>
             <SegmentedTab value="log">Changelog</SegmentedTab>
+            <SegmentedTab value="judge">Answer quality</SegmentedTab>
           </SegmentedTabsList>
 
           <TabsContent value="traces" className="flex flex-none flex-col gap-[14px]">
@@ -82,6 +93,9 @@ export function Observability() {
           </TabsContent>
           <TabsContent value="log" className="flex flex-none flex-col gap-[14px]">
             <ChangelogTab />
+          </TabsContent>
+          <TabsContent value="judge" className="flex flex-none flex-col gap-[14px]">
+            <JudgeTab />
           </TabsContent>
         </div>
       </div>

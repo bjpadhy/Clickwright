@@ -12,6 +12,7 @@ import {
   observe,
   type ChangelogEntryDto,
   type DatabaseHealth,
+  type Judgement,
   type ScanResult,
 } from "@/api/observability"
 
@@ -72,6 +73,23 @@ export function useDatabaseHealth(enabled: boolean): Loadable<DatabaseHealth> {
 
 export function useChangelog(enabled: boolean): Loadable<ChangelogEntryDto[]> {
   return useLoadable(() => observe.changelog(), enabled)
+}
+
+/** Judgements are written by a background queue, so poll while the tab is open
+ *  — an answer asked a minute ago may still be being graded. */
+const JUDGE_POLL_MS = 20_000
+
+export function useJudgements(enabled: boolean): Loadable<Judgement[]> {
+  const base = useLoadable(() => observe.judgements(), enabled)
+  const { reload } = base
+
+  React.useEffect(() => {
+    if (!enabled) return
+    const timer = setInterval(reload, JUDGE_POLL_MS)
+    return () => clearInterval(timer)
+  }, [enabled, reload])
+
+  return base
 }
 
 const SCAN_POLL_MS = 5_000

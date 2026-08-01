@@ -7,8 +7,42 @@ import type { Ctx } from "./tracing.js";
 let anthropic: Anthropic | null = null;
 
 function client(): Anthropic {
-  anthropic ??= new Anthropic({ apiKey: env.llm.apiKey });
+  anthropic ??= new Anthropic({ apiKey: env.llm.apiKey! });
   return anthropic;
+}
+
+/**
+ * No API key → company Claude Code plan: call through the Claude Agent SDK,
+ * which authenticates with the machine's Claude Code OAuth login. Single-turn,
+ * no tools — behaves like a plain completion.
+ */
+async function completeViaAgentSdk(
+  prompt: string,
+  options: CompleteOptions,
+): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const stream = query({
+    prompt,
+    options: {
+      model: env.llm.model,
+      maxTurns: 1,
+      allowedTools: [],
+      ...(options.system ? { customSystemPrompt: options.system } : {}),
+    },
+  });
+  for await (const message of stream) {
+    if (message.type === "result") {
+      if (message.subtype !== "success") {
+        throw new Error(`Agent SDK call failed: ${message.subtype}`);
+      }
+      return {
+        text: message.result,
+        inputTokens: message.usage.input_tokens,
+        outputTokens: message.usage.output_tokens,
+      };
+    }
+  }
+  throw new Error("Agent SDK stream ended without a result message");
 }
 
 const PROMPT_DIR = path.resolve(process.cwd(), "prompts");
@@ -55,26 +89,32 @@ export async function complete(
   });
 
   try {
-    const response = await client().messages.create({
-      model,
-      max_tokens: options.maxTokens ?? 8000,
-      temperature: options.temperature ?? 0,
-      ...(options.system ? { system: options.system } : {}),
-      messages: [{ role: "user", content: prompt }],
-    });
+    let text: string;
+    let usage: { input: number; output: number };
 
-    const text = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === "text")
-      .map((block) => block.text)
-      .join("");
-
-    generation.end({
-      output: text,
-      usage: {
+    if (env.llm.apiKey) {
+      const response = await client().messages.create({
+        model,
+        max_tokens: options.maxTokens ?? 8000,
+        temperature: options.temperature ?? 0,
+        ...(options.system ? { system: options.system } : {}),
+        messages: [{ role: "user", content: prompt }],
+      });
+      text = response.content
+        .filter((block): block is Anthropic.TextBlock => block.type === "text")
+        .map((block) => block.text)
+        .join("");
+      usage = {
         input: response.usage.input_tokens,
         output: response.usage.output_tokens,
-      },
-    });
+      };
+    } else {
+      const result = await completeViaAgentSdk(prompt, options);
+      text = result.text;
+      usage = { input: result.inputTokens, output: result.outputTokens };
+    }
+
+    generation.end({ output: text, usage });
     return text;
   } catch (error) {
     generation.end({

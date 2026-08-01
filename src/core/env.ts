@@ -15,6 +15,20 @@ function optional(name: string, fallback: string): string {
   return value && value.trim() !== "" ? value : fallback;
 }
 
+/**
+ * A real key enables the direct Anthropic API backend. Anything else (missing
+ * or the "sk-ant-" placeholder) selects the Claude Agent SDK backend, which
+ * authenticates via the machine's Claude Code OAuth login — in that case the
+ * placeholder is scrubbed from process.env so the SDK's subprocess doesn't
+ * mistake it for a key.
+ */
+function resolveApiKey(): string | null {
+  const raw = process.env["ANTHROPIC_API_KEY"];
+  if (raw && raw.trim().length > 15) return raw;
+  delete process.env["ANTHROPIC_API_KEY"];
+  return null;
+}
+
 export const env = {
   clickhouse: {
     url: required("CLICKHOUSE_URL"),
@@ -28,7 +42,9 @@ export const env = {
     baseUrl: optional("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"),
   },
   llm: {
-    apiKey: required("ANTHROPIC_API_KEY"),
+    // Two backends: an Anthropic API key if provided, otherwise the Claude
+    // Agent SDK, which reuses the machine's Claude Code login (company plan).
+    apiKey: resolveApiKey(),
     model: optional("CLICKWRIGHT_MODEL", "claude-sonnet-5"),
   },
 };

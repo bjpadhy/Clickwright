@@ -27,11 +27,13 @@ import { getContext, reconcileWithLive } from "./context.js";
 
 /** Hard caps — a verbose rationale is rejected and regenerated, so the FE panel
  * always renders 1-2 tight statements per field. */
+/** Length is a presentation concern — truncate, never reject a sound schema for it. */
+const clamp = (n: number) => z.string().transform((v) => v.trim().slice(0, n));
 const RationaleSchema = z.object({
-  ordering_key: z.string().max(200, "ordering_key must be <= 200 chars — one statement"),
-  partitioning: z.string().max(160, "partitioning must be <= 160 chars"),
-  types_codecs: z.string().max(260, "types_codecs must be <= 260 chars — only non-obvious calls"),
-  deviations: z.string().max(240, "deviations must be <= 240 chars").default(""),
+  ordering_key: clamp(240),
+  partitioning: clamp(160),
+  types_codecs: clamp(340),
+  deviations: clamp(240).default("").catch(""),
 });
 
 /** One concurrent call designs one table. */
@@ -62,7 +64,10 @@ const ProposalSchema = z.object({
 });
 export type InstrumentationProposal = z.infer<typeof ProposalSchema>;
 
-const PurposesSchema = z.object({ purposes: z.record(z.string(), z.string()) });
+const DesignSchema = z.object({
+  ddl: z.string().min(40),
+  rationale: RationaleSchema,
+});
 
 export interface Approval {
   approved: boolean;
@@ -142,6 +147,70 @@ export function flattenRow(
   return out;
 }
 
+/**
+ * Column names declared by a CREATE TABLE, however it is formatted. Splits the
+ * top-level column list on depth-zero commas (so Enum8('a' = 1, 'b' = 2) and
+ * CODEC(Delta(8), ZSTD(1)) stay intact) and takes each item's leading identifier.
+ * INDEX / CONSTRAINT / PROJECTION clauses are skipped.
+ */
+export function parseDeclaredColumns(ddl: string): string[] {
+  const open = ddl.indexOf("(");
+  if (open === -1) return [];
+  let depth = 0;
+  let end = -1;
+  for (let i = open; i < ddl.length; i++) {
+    const ch = ddl[i];
+    if (ch === "'") {
+      // skip a string literal, honouring '' escapes
+      i++;
+      while (i < ddl.length && !(ddl[i] === "'" && ddl[i + 1] !== "'")) {
+        if (ddl[i] === "'" && ddl[i + 1] === "'") i++;
+        i++;
+      }
+      continue;
+    }
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end === -1) return [];
+
+  const body = ddl.slice(open + 1, end);
+  const items: string[] = [];
+  let buf = "";
+  depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]!;
+    if (ch === "'") {
+      buf += ch;
+      i++;
+      while (i < body.length && !(body[i] === "'" && body[i + 1] !== "'")) {
+        if (body[i] === "'" && body[i + 1] === "'") { buf += body[i]; i++; }
+        buf += body[i];
+        i++;
+      }
+      buf += body[i] ?? "";
+      continue;
+    }
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (ch === "," && depth === 0) { items.push(buf); buf = ""; continue; }
+    buf += ch;
+  }
+  if (buf.trim()) items.push(buf);
+
+  const out: string[] = [];
+  for (const raw of items) {
+    const item = raw.trim();
+    if (!item || /^(index|constraint|projection|primary\s+key)\b/i.test(item)) continue;
+    const m = /^`?([a-z_][a-z0-9_]*)`?\s/i.exec(item);
+    if (m?.[1]) out.push(m[1]);
+  }
+  return out;
+}
+
 function groupByEvent(
   rows: Record<string, unknown>[],
 ): Map<string, Record<string, unknown>[]> {
@@ -215,32 +284,33 @@ export async function runInstrumentation(
     );
 
     // ── context via the Context Agent only ──
-    const bundle = await step(span, "context_load", {}, async () => {
-      // DDL needs the RULES and the list of existing table names — not metric
-      // definitions, known issues, or full column docs. Each parallel per-table
-      // call pays for this bundle, so keeping it small matters 5x over.
-      const b = await getContext({
-        core: ["convention", "join_map"],
-        include: ["table"],
-        brief: ["table"],
-        require: ["convention:envelope", "convention:data_hygiene", "join_map:core"],
-      });
-      const byCat = new Map<string, number>();
-      for (const e of b.entries) {
-        const cat = e.entity.split(":")[0] ?? "";
-        byCat.set(cat, (byCat.get(cat) ?? 0) + 1);
-      }
-      return Object.assign(b, {
-        summary: {
-          entities: b.entries.length,
-          byCategory: Object.fromEntries(byCat),
-          updatedEntries: b.entries.filter((e) => e.version > 1).map((e) => `${e.entity} v${e.version}`),
-        },
-      });
-    });
-    const recon = await step(span, "schema_reconciliation", {}, () =>
-      reconcileWithLive(),
-    );
+    // independent reads — the store and the live schema do not depend on each other
+    const [bundle, recon] = await Promise.all([
+      step(span, "context_load", {}, async () => {
+        const b = await getContext({
+          core: ["convention", "join_map"],
+          include: ["table"],
+          brief: ["table"],
+          require: ["convention:envelope", "convention:data_hygiene", "join_map:core"],
+        });
+        const byCat = new Map<string, number>();
+        for (const e of b.entries) {
+          const cat = e.entity.split(":")[0] ?? "";
+          byCat.set(cat, (byCat.get(cat) ?? 0) + 1);
+        }
+        return Object.assign(b, {
+          summary: {
+            entities: b.entries.length,
+            byCategory: Object.fromEntries(byCat),
+            updatedEntries: b.entries
+              .filter((e) => e.version > 1)
+              .map((e) => `${e.entity} v${e.version}`),
+          },
+        });
+      }),
+      step(span, "schema_reconciliation", {}, () => reconcileWithLive()),
+    ]);
+
     const reconNotes = [
       recon.documentedNotLive.length
         ? `WARNING — documented but missing from the database: ${recon.documentedNotLive.join(", ")}`
@@ -297,45 +367,97 @@ export async function runInstrumentation(
             const parsed = parseEventPurposes(spec);
             const purposes: Record<string, string> = {};
             for (const [event, desc] of parsed) purposes[event] = desc;
-            const undescribed = [...plans.keys()].filter((e) => !purposes[e]);
-            if (undescribed.length > 0) try {
-              const tablesDesc = [...plans.values()]
-                .filter((p) => undescribed.includes(p.name))
-                .map(
-                  (p) =>
-                    `- ${p.name} (${p.facts.rows} rows): ${p.columns.map((c) => c.name).join(", ")}`,
-                )
-                .join("\n");
-              const prompt = await loadPrompt("instrument_table_purposes", {
-                spec,
-                tables: tablesDesc,
-                feedback: feedback ? `\n# Reviewer feedback to honour\n${feedback}\n` : "",
-              });
-              const text = await llm(genSpan, "table_purposes", prompt);
-              Object.assign(
-                purposes,
-                PurposesSchema.parse(JSON.parse(stripFences(text))).purposes,
-              );
-            } catch {
-              emitRunEvent({
-                type: "log",
-                name: "purposes_fallback",
-                payload: { note: "purpose text unavailable; schema unaffected" },
-              });
-            }
 
-            const tables = [...plans.values()].map((plan) => {
-              const purpose =
-                purposes[plan.name]?.slice(0, 140) ??
-                `${plan.name} events captured for this feature`;
-              return {
-                name: plan.name,
-                event: plan.event,
-                purpose,
-                ddl: renderCreateTable(plan, purpose),
-                rationale: renderRationale(plan),
-              };
-            });
+            // 3. A ClickHouse engineer designs each table FROM the measured facts:
+            //    codecs, Enum8 vs LowCardinality, ordering-key order for pruning.
+            //    Code validated the arithmetic; this is the judgement that earns the
+            //    marks. Per table, concurrent, with the deterministic plan as both
+            //    the starting point and the fallback if a design is rejected.
+            const tables = await Promise.all(
+              [...plans.entries()].map(([event, plan]) =>
+                step(genSpan, `design_${event}`, { event }, async (dSpan) => {
+                  const purpose =
+                    purposes[event]?.slice(0, 140) ?? `${event} events for this feature`;
+                  const baseline = renderCreateTable(plan, purpose);
+                  const expected = new Set(plan.columns.map((c) => c.name));
+                  let designFeedback = feedback;
+                  let lastDdl = "";
+
+                  for (let tryN = 1; tryN <= MAX_TABLE_TRIES; tryN++) {
+                    try {
+                      const prompt = await loadPrompt("instrument_design_table", {
+                        event,
+                        profile: eventProfiles.get(event) ?? "",
+                        baseline,
+                        spec,
+                        conventions: reconNotes
+                          ? `${bundle.markdown}\n\n## Live-schema warnings\n${reconNotes}`
+                          : bundle.markdown,
+                        feedback: designFeedback
+                          ? `\n<feedback>\nYour previous design was rejected: ${designFeedback}\n</feedback>\n`
+                          : "",
+                      });
+                      const text = await llm(dSpan, `design_${event}`, prompt);
+                      const design = DesignSchema.parse(JSON.parse(stripFences(text)));
+                      // a trailing semicolon is idiomatic, not an error — strip it,
+                      // then reject only a genuine second statement
+                      const ddl = design.ddl.trim().replace(/;+\s*$/, "");
+                      lastDdl = ddl;
+
+                      if (!/^create\s+table\s/i.test(ddl))
+                        throw new Error("must be a single CREATE TABLE statement");
+                      // a ';' inside a quoted COMMENT is legal SQL — strip string
+                      // literals before looking for a genuine second statement
+                      if (ddl.replace(/'(?:[^']|'')*'/g, "''").includes(";"))
+                        throw new Error("only one statement allowed (found a second statement)");
+                      if (!new RegExp(`create\\s+table\\s+\`?${event}\`?[\\s(]`, "i").test(ddl))
+                        throw new Error(`the table must be named ${event}`);
+                      // every measured field must survive, and nothing invented.
+                      // Parse the column list for real: a line-anchored backtick
+                      // regex misses a single-line DDL or unbackticked names, which
+                      // would silently reject every design and fall back to baseline.
+                      const declared = new Set(parseDeclaredColumns(ddl));
+                      const dropped = [...expected].filter((c) => !declared.has(c));
+                      if (dropped.length)
+                        throw new Error(`these measured columns are missing: ${dropped.join(", ")}`);
+                      const invented = [...declared].filter((c) => !expected.has(c));
+                      if (invented.length)
+                        throw new Error(`these columns are not in the profile: ${invented.join(", ")}`);
+                      await command(`EXPLAIN AST ${ddl}`); // ClickHouse must parse it
+
+                      return { name: event, event, purpose, ddl, rationale: design.rationale };
+                    } catch (error) {
+                      designFeedback = error instanceof Error ? error.message : String(error);
+                      emitRunEvent({
+                        type: "log",
+                        name: "design_rejected",
+                        payload: {
+                          event,
+                          attempt: tryN,
+                          reason: designFeedback.slice(0, 300),
+                          // the offending SQL, or a rejection is undiagnosable
+                          ddl: lastDdl.slice(0, 1200),
+                        },
+                      });
+                    }
+                  }
+
+                  // every design attempt failed — ship the deterministic schema
+                  emitRunEvent({
+                    type: "log",
+                    name: "design_fallback",
+                    payload: { event, note: "using the deterministic baseline schema" },
+                  });
+                  return {
+                    name: event,
+                    event,
+                    purpose,
+                    ddl: baseline,
+                    rationale: renderRationale(plan),
+                  };
+                }),
+              ),
+            );
 
             // 3. Dry-run every statement — cheap, and proves the synthesis.
             await step(genSpan, "dry_run", { tables: tables.map((t) => t.name) }, async () => {
@@ -432,6 +554,17 @@ export async function runInstrumentation(
           attempts: attempt,
           tableEntries: loaded.map((t) => {
             const plan = tablePlans.get(t.event);
+            const executed = proposal.tables.find((x) => x.name === t.name);
+            // Document the schema that RAN, not the baseline: the designer is told
+            // to reorder the key for pruning, so the baseline's join key and
+            // ordering would be wrong in the store the analytics agent reads.
+            if (plan && executed) {
+              const orderBy = /ORDER BY \(([^)]+)\)/i.exec(executed.ddl)?.[1];
+              if (orderBy) {
+                const cols = orderBy.split(",").map((c) => c.trim().replace(/`/g, ""));
+                plan.orderBy = cols;
+              }
+            }
             return {
               entity: `table:${t.name}`,
               definition_md: plan

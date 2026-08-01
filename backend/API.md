@@ -4,7 +4,8 @@ Base URL: `http://localhost:8787` · All routes under `/api`. In the webapp dev
 server, `/api/*` is already proxied here (see `webapp/vite.config.ts`), so the
 frontend calls relative paths (`fetch("/api/runs")`).
 
-Start the backend with `cd backend && npm run serve`. No auth (hackathon; single
+Start the backend with `cd backend && npm run dev` (hot reload) or `npm run serve`
+(no watching — use this for demos and long runs, since a reload abandons an active run). No auth (hackathon; single
 team). All bodies and responses are JSON except the SSE stream. Errors are
 `{ "error": string }` with a 4xx/5xx status.
 
@@ -189,14 +190,20 @@ seven event types (they are named events, so plain `onmessage` will NOT fire).
 | type | name | payload |
 |---|---|---|
 | `step_start` | step name (below) | `{ input: object }` |
-| `step_end` | step name | `{ output: object }` — strings >2000 chars clipped with `…[clipped]` |
-| `step_error` | step name | `{ error: string }` — verbatim failure, feeds the retry |
-| `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ tables: LoadedTable[], contextEntries: {entity, version}[], contextWarnings: string[], traceUrl }`; `failed` → `{ error }` |
+| `step_end` | step name | `{ output: object, elapsedMs }` — strings >2000 chars clipped with `…[clipped]` |
+| `step_error` | step name | `{ error: string, elapsedMs }` — verbatim failure, feeds the retry |
+| `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ durationMs, tables: LoadedTable[], contextEntries: {entity, version}[], contextWarnings: string[], traceUrl }`; `failed` → `{ durationMs, error, resetHint }` |
 | `approval_request` | `"ddl"` \| `"context"` | `{ proposal: DdlProposal \| ContextProposal }` — ContextProposal may carry `warnings: string[]` (the "contradiction surfaced" chips) |
 | `log` | `"ddl_statement"` \| `"data_load"` | `{ statement?, table?, rows?, ok, ms }` — per-statement execution progress |
 | `approval_result` | gate | `{ approved: boolean, feedback: string, identity: string }` |
 
 `LoadedTable = { name, event, purpose, rowsInFile, rowsLoaded }`.
+
+**Timing.** Show `durationMs` from the run (or the terminal `status` event) as the
+elapsed time — it is measured from the start of execution to the terminal state and
+includes time spent waiting at the human gates. Per-step `elapsedMs` values are for
+the stepper only: **never sum them for a total**, because concurrent steps
+(per-table DDL, per-task SQL) overlap and would double-count.
 
 ### Step names, in order (the Run screen's stepper)
 
@@ -253,7 +260,9 @@ straight to POST /api/runs. `alreadyInstrumented` disables the Use button.
 
 ## [LIVE] GET /api/history — runs that survive restarts (from runs_log)
 
-`200 [{ run_id, spec, started, finished, last_status, events }]`, newest first.
+`200 [{ run_id, spec, started, finished, last_status, events, durationMs }]`, newest
+first. `durationMs` is the end-to-end wall clock reconstructed from the persisted
+events.
 
 ## [LIVE] GET /api/history/:runId — full decision record of a past run
 
@@ -311,18 +320,39 @@ are what keeps the UI honest during the wait.
 | event | data | meaning |
 |---|---|---|
 | `start` | `{ traceUrl, convId }` | trace link available immediately |
-| `step_start` / `step_end` / `step_error` | `{ name, payload }` | agent steps — same shapes as run events; drive the "how I got this" panel |
+| `step_start` / `step_end` / `step_error` | `{ name, phase, payload }` | agent steps. **Render `phase`, not `name`** — it collapses the twelve technical steps into a handful of reader-facing lines ("Querying ClickHouse"), and concurrent tasks share one phase so they appear as a single entry. An **empty `phase` means plumbing: skip it.** `name` stays available for the "how I got this" detail view |
 | `log` | `{ call, elapsedMs?, promptChars?, outputChars? }` | **progress ticks** — `llm_start`, then `llm_progress` every 3s with `elapsedMs`, then `llm_done`. Render as "writing SQL… 14s" per in-flight call |
 | `insight` | `{ insight: Insight, traceUrl }` | the finished card |
 | `failed` | `{ error, traceUrl }` | answer could not be produced |
 | `done` | `{}` | stream closed (always fires, success or failure) |
 
-Step names, in order:
+**Concurrency in the stream.** `task_<id>` children run at the same time, so their
+`sql_attempt_N` events interleave — group children by their `task_<id>` parent rather
+than assuming sequential arrival. The same applies to `design_<event>` inside an
+instrumentation run.
+
+**Honest-failure semantics.** An agent that cannot answer returns the normal shape with
+the gap stated inside it, never an invented value:
+- a task the SQL writer declared impossible is dropped, with the reason in the sanity
+  notes and reflected in a `caveat` finding;
+- a question that cannot be answered at all yields a headline saying so, `chart: null`,
+  `segmentTable: null`, `sql: []`, and `confidence: "low"`;
+- a chart or table whose source task was dropped is removed rather than shown.
+Render these as first-class outcomes — they are correct answers, not errors.
+
+Phases, in the order a reader sees them: *Reading the knowledge store · Planning the
+analysis · Querying ClickHouse · Validating the results · Looking for known issues ·
+Writing the insight · Reviewing the answer* (the last two are skipped when the answer
+is cached or the quality gate is not needed).
+
+Underlying step names, for the detail view:
 
 ```
 analytics                  (wrapper)
   context_load             knowledge + schemas + contextVersion
   cache_lookup             only when this is not a follow-up; a hit ends the run here
+                           (keyed by question + a digest of every entity version, so
+                           any context write invalidates it)
   plan                     → ≤4 tasks
   task_<id>                ONE PER TASK, RUN CONCURRENTLY — events interleave, so
     sql_attempt_N          group children by their task_<id> parent

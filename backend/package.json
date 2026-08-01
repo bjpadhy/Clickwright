@@ -11,7 +11,8 @@
     "check-env": "tsx scripts/check-env.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
-    "serve": "tsx src/server/index.ts"
+    "serve": "tsx src/server/index.ts",
+    "dev": "tsx watch --include \"prompts/**/*.txt\" --clear-screen=false src/server/index.ts"
   },
   "repository": {
     "type": "git",

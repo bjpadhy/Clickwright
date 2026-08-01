@@ -37,8 +37,9 @@ import {
   initDashboardTables, saveDashboard, listDashboards, runDashboard, deleteDashboard,
 } from "./dashboards.js";
 import { initInsightCache } from "../agents/analytics.js";
-import { query } from "../core/db.js";
+import { closeDb, query } from "../core/db.js";
 import { env } from "../core/env.js";
+import { flushTraces } from "../core/tracing.js";
 import { observeRouter } from "../observe/routes.js";
 
 const app = express();
@@ -98,9 +99,12 @@ app.get("/api/runs/:id/events", (req, res) => {
   for (const e of run.events) send(e); // replay
   run.subscribers.add(send); // live
   const keepalive = setInterval(() => res.write(": keepalive\n\n"), 15000);
+  const handle = { end: () => res.end() };
+  openStreams.add(handle);
   req.on("close", () => {
     clearInterval(keepalive);
     run.subscribers.delete(send);
+    openStreams.delete(handle);
   });
 });
 
@@ -163,10 +167,18 @@ app.get("/api/history", async (_req, res) => {
            -- non-status rows must weigh LESS than any status row, otherwise ties
            -- make argMax return a step name (e.g. "profile") as the status
            argMax(name, if(type = 'status', toInt64(seq) + 1, -1)) AS last_status,
-           toString(count()) AS events
+           toString(count()) AS events,
+           -- end-to-end wall clock of the run, gates included
+           toString(dateDiff('millisecond', min(ts), max(ts))) AS durationMs
     FROM runs_log GROUP BY run_id ORDER BY started DESC
   `);
-  res.json(rows.map((r) => ({ ...r, events: Number(r.events) })));
+  res.json(
+    rows.map((r) => ({
+      ...r,
+      events: Number(r.events),
+      durationMs: Number((r as unknown as { durationMs: string }).durationMs),
+    })),
+  );
 });
 
 /** Full decision record of one past run (replay source for the report view). */
@@ -290,11 +302,59 @@ app.get("/api/context/:entity/history", async (req, res) => {
   res.json(rows);
 });
 
+/** SSE responses have no natural end; track them so a shutdown can close them
+ * cleanly instead of leaving clients waiting on a dead socket. */
+const openStreams = new Set<{ end: () => void }>();
+
 const PORT = Number(process.env["PORT"] ?? 8787);
 await manager.init();
 await initChatTables();
 await initDashboardTables();
 await initInsightCache();
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Clickwright backend listening on http://localhost:${PORT}`);
 });
+
+/**
+ * Graceful shutdown — required for hot reload to be safe. `tsx watch` sends
+ * SIGTERM on every restart; without this a reload would truncate runs_log
+ * (inserts are queued), drop un-flushed Langfuse spans, and leave SSE clients
+ * hanging on a socket that never closes.
+ */
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  const active = manager.activeRun();
+  if (active) {
+    console.warn(
+      `⚠ ${signal} while run ${active.id} (${active.spec}) is ${active.status} — it will be abandoned. ` +
+        `Any tables it created are undocumented: npx tsx scripts/reset-spec.ts --orphans`,
+    );
+  }
+
+  server.close();
+  for (const stream of openStreams) {
+    try {
+      stream.end();
+    } catch {
+      /* already gone */
+    }
+  }
+
+  // bounded: never hang a reload waiting on a slow network
+  await Promise.race([
+    (async () => {
+      await manager.drain();
+      await flushTraces().catch(() => {});
+      await closeDb().catch(() => {});
+    })(),
+    new Promise((r) => setTimeout(r, 4000)),
+  ]);
+  process.exit(0);
+}
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => void shutdown(signal));
+}

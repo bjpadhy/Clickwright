@@ -39,4 +39,11 @@ listed here does not exist.
 - CTEs or window functions where a plain GROUP BY does the job.
 </avoid>
 
+If the task cannot be computed from these columns — a field it needs does not exist,
+or the tables cannot answer it — do NOT approximate with a different column or invent
+one. Emit exactly:
+  SELECT 'cannot compute' AS blocked, '<one sentence: what is missing>' AS reason
+A blocked task is handled honestly downstream; a plausible query over the wrong column
+produces a wrong number that survives review.
+
 Output the SQL statement and nothing else: no fences, no explanation, no blank first line.

@@ -48,8 +48,14 @@ export function chooseType(f: FieldProfile): { type: string; note?: string } {
   if (f.inferredType === "number") {
     const max = f.numericRange?.max ?? 0;
     const min = f.numericRange?.min ?? 0;
+    // sampleValues holds only the first 5 distinct values, so "no dot seen" is
+    // weak evidence. Treat a wide-ranging, high-cardinality numeric as possibly
+    // fractional: a too-wide column is harmless, a truncated one loses data.
+    const looksContinuous = f.distinctCount > 50 && (f.numericRange?.max ?? 0) > 100;
     const fractional =
-      f.sampleValues.some((v) => v.includes(".")) || MONEY_RE.test(f.field);
+      f.sampleValues.some((v) => v.includes(".")) ||
+      MONEY_RE.test(f.field) ||
+      looksContinuous;
     if (fractional) {
       return MONEY_RE.test(f.field)
         ? { type: "Float64", note: `${f.field}: monetary, Float64` }
@@ -167,12 +173,18 @@ export function renderRationale(plan: TablePlan): {
   ]
     .filter(Boolean)
     .join(". ");
+  const hasTs = plan.columns.some((c) => c.name === "timestamp");
   return {
     ordering_key: plan.facts.orderByReason,
     partitioning: plan.partitionBy
       ? `${plan.partitionBy} — monthly parts stay merge-friendly`
       : "no timestamp column, so unpartitioned",
-    types_codecs: types.slice(0, 258),
+    // the base tables are second-precision DateTime; say so, because a reviewer
+    // seeing DateTime64(3) here will otherwise wonder if joins are safe
+    types_codecs: (hasTs
+      ? `timestamp DateTime64(3) — joins cleanly with the second-precision base tables. ${types}`
+      : types
+    ).slice(0, 300),
     deviations: plan.facts.nullableDefaults.length
       ? `empty values present in ${plan.facts.nullableDefaults.slice(0, 4).join(", ")} — String DEFAULT '' per hygiene convention`
       : "",

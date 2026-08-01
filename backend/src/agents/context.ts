@@ -216,9 +216,18 @@ export interface ContextUpdateInput {
   };
 }
 
-const REST_SCOPE =
-  "ONLY the non-table entries: the `spec:<name>` summary, any new `metric:`/`funnel:`/`entity:` definitions, " +
-  "and updated versions of existing `convention:`/`known_issue:` entries. Do NOT emit any `table:` entries.";
+/** Two independent halves — generated concurrently because neither needs the other,
+ * and output tokens are what cost wall-clock. Quality is unaffected: each call sees
+ * the same context and is responsible for a disjoint set of entities. */
+const FEATURE_SCOPE =
+  "ONLY these: the `spec:<name>` summary, and any new `metric:` / `funnel:` / `entity:` " +
+  "definitions this feature's questions require. Emit NO `table:`, `convention:` or " +
+  "`known_issue:` entries and NO warnings — another reviewer owns those.";
+const CONVENTION_SCOPE =
+  "ONLY these: updated versions of EXISTING `convention:` / `known_issue:` entries that " +
+  "this spec has proven something new about, plus the `warnings` array for genuine " +
+  "contradictions. Emit NO `table:`, `spec:`, `metric:`, `funnel:` or `entity:` entries. " +
+  "If nothing existing was disproven, return an empty entries array.";
 
 const MAX_UPDATE_ATTEMPTS = 5;
 
@@ -276,7 +285,13 @@ export async function updateContext(
               spec: input.specText,
               tables_summary: tablesSummary,
               new_fields: input.instrumentation.newEnvelopeFields.join(", ") || "(none)",
-              reasoning: input.instrumentation.reasoning,
+              // only the deviation lines matter here — the codec/ordering prose is
+              // for the human reviewing the DDL gate, not for documenting meaning
+              reasoning:
+                input.instrumentation.reasoning
+                  .split("\n")
+                  .filter((l) => /Deviations|##/.test(l))
+                  .join("\n") || "(no deviations flagged)",
               feedback: feedback
                 ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
                 : "",
@@ -286,19 +301,37 @@ export async function updateContext(
             // the part that genuinely needs judgement: the feature summary, the
             // metrics its questions require, and contradictions with the store.
             const deterministic = input.instrumentation.tableEntries;
-            const restText = await loadPrompt("context_write_knowledge", {
-              ...vars,
-              scope: REST_SCOPE,
-              table_entries: deterministic.length
-                ? deterministic.map((e) => `- ${e.entity}: ${e.definition_md}`).join("\n")
-                : "(none — emit table: entries yourself)",
-            }).then((p) => llm(genSpan, "context_update_knowledge", p));
-            const judged = UpdateProposalSchema.partial({ entries: true }).parse(
-              JSON.parse(stripFences(restText)),
-            );
+            const tableEntriesText = deterministic.length
+              ? deterministic.map((e) => `- ${e.entity}: ${e.definition_md}`).join("\n")
+              : "(none — emit table: entries yourself)";
+
+            // Two disjoint halves, generated CONCURRENTLY. Neither needs the other's
+            // output and each owns a distinct set of entities, so splitting halves the
+            // wall clock (output tokens dominate) without changing what is produced.
+            const half = (scope: string, callName: string) =>
+              loadPrompt("context_write_knowledge", {
+                ...vars,
+                scope,
+                table_entries: tableEntriesText,
+              })
+                .then((prompt) => llm(genSpan, callName, prompt))
+                .then((text) =>
+                  UpdateProposalSchema.partial({ entries: true }).parse(
+                    JSON.parse(stripFences(text)),
+                  ),
+                );
+
+            const [feature, conventions] = await Promise.all([
+              half(FEATURE_SCOPE, "context_write_feature"),
+              half(CONVENTION_SCOPE, "context_write_conventions"),
+            ]);
             const parsed = UpdateProposalSchema.parse({
-              entries: [...deterministic, ...(judged.entries ?? [])],
-              warnings: judged.warnings ?? [],
+              entries: [
+                ...deterministic,
+                ...(feature.entries ?? []),
+                ...(conventions.entries ?? []),
+              ],
+              warnings: conventions.warnings ?? [],
             });
 
             const covered = new Set(

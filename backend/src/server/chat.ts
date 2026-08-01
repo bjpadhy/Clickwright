@@ -22,6 +22,32 @@ import {
 } from "../core/tracing.js";
 import { runAnalytics, type Insight } from "../agents/analytics.js";
 
+/**
+ * Technical step names are noise in a chat UI. Each maps to one of five phases the
+ * reader actually cares about, so the FE can render "Querying ClickHouse · 12s"
+ * instead of a stack of sql_attempt_1 / task_t2 lines. The raw name still rides
+ * along for the "how I got this" detail view.
+ */
+const PHASES: Array<[RegExp, string]> = [
+  // the wrapper span and the cache probe are plumbing — no phase, so the UI skips
+  // them rather than flashing a line the reader cannot act on
+  [/^analytics$/, ""],
+  [/^cache_lookup$/, ""],
+  [/^context_load$/, "Reading the knowledge store"],
+  [/^plan$/, "Planning the analysis"],
+  [/^(task_|sql_attempt)/, "Querying ClickHouse"],
+  [/^sanity_gate$/, "Validating the results"],
+  [/^context_lookup$/, "Looking for known issues"],
+  [/^narrate/, "Writing the insight"],
+  [/^quality_gate$/, "Reviewing the answer"],
+];
+
+/** "" means: plumbing, do not surface it in the chat timeline. */
+export function phaseOf(stepName: string): string {
+  for (const [re, label] of PHASES) if (re.test(stepName)) return label;
+  return "Working";
+}
+
 export interface ChatMessageRow {
   conv_id: string;
   seq: number;
@@ -220,7 +246,10 @@ export async function suggestions(): Promise<Array<{ spec: string; question: str
     try {
       const md = await readFile(path.join(specsRoot, spec, "spec.md"), "utf-8");
       // the questions section, as authored
-      const section = /##\s*Questions[^\n]*\n([\s\S]*?)(\n##|$)/i.exec(md)?.[1] ?? md;
+      // no Questions heading ⇒ no chips for this spec. Falling back to the whole
+      // file turned the event list into "suggested questions".
+      const section = /##\s*Questions[^\n]*\n([\s\S]*?)(\n##|$)/i.exec(md)?.[1];
+      if (!section) continue;
       for (const line of section.split("\n")) {
         const m = /^\s*[-*]\s+(.+)$/.exec(line);
         if (m?.[1]) add(spec, m[1]);
@@ -260,7 +289,6 @@ export async function streamAnswer(
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  let seq = 0;
   const send = (event: string, data: unknown) => {
     try {
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -275,24 +303,36 @@ export async function streamAnswer(
       /* client gone */
     }
   }, 15000);
+  // trace/url must be visible to catch and finally; everything that can throw
+  // goes inside the try, or a pre-flight failure leaves the keepalive interval
+  // writing to a half-open response forever with no terminal event sent.
+  let trace: ReturnType<typeof startRun> | null = null;
+  let url = "";
+  try {
+    trace = startRun(
+      `chat:${question.slice(0, 60)}`,
+      { question, convId },
+      { sessionId: convId },
+    );
+    url = traceUrl(trace);
+    send("start", { traceUrl: url, convId });
 
-  // count(), not max(seq): ClickHouse returns 0 for max() over an empty set, which
-  // made nextSeq 1 for a brand-new conversation and stopped it ever being titled.
-  const priorRows = await query<{ n: string }>(
-    `SELECT toString(count()) AS n FROM messages WHERE conv_id = {conv:String}`,
-    { conv: convId },
-  );
-  const nextSeq = Number(priorRows[0]?.n ?? 0);
-
-  const history = (
-    await query<{ role: string; question: string; insight_json: string }>(
-      `SELECT role, question, insight_json FROM messages
-       WHERE conv_id = {conv:String} ORDER BY seq DESC LIMIT 6`,
-      { conv: convId },
-    )
-  )
-    .reverse()
-    .map((m) => ({
+    // independent reads — run them together rather than back to back
+    const [priorRows, historyRows] = await Promise.all([
+      // count(), not max(seq): ClickHouse returns 0 for max() over an empty set,
+      // which made nextSeq 1 for a new conversation and stopped it being titled.
+      query<{ n: string }>(
+        `SELECT toString(count()) AS n FROM messages WHERE conv_id = {conv:String}`,
+        { conv: convId },
+      ),
+      query<{ role: string; question: string; insight_json: string }>(
+        `SELECT role, question, insight_json FROM messages
+         WHERE conv_id = {conv:String} ORDER BY seq DESC LIMIT 6`,
+        { conv: convId },
+      ),
+    ]);
+    const nextSeq = Number(priorRows[0]?.n ?? 0);
+    const history = historyRows.reverse().map((m) => ({
       role: m.role as "user" | "agent",
       text:
         m.role === "user"
@@ -300,30 +340,31 @@ export async function streamAnswer(
           : ((JSON.parse(m.insight_json || "{}") as Insight).headline ?? ""),
     }));
 
-  const trace = startRun(
-    `chat:${question.slice(0, 60)}`,
-    { question, convId },
-    { sessionId: convId },
-  );
-  const url = traceUrl(trace);
-  send("start", { traceUrl: url, convId });
+    // Title from the first question NOW, not after a successful answer: a failed
+    // first answer still persists the user message, so a later retry would never
+    // see nextSeq === 0 and the conversation would stay "New conversation".
+    if (nextSeq === 0) {
+      const created = now();
+      await insert("conversations", [
+        { conv_id: convId, title: question.slice(0, 70), starred: 0, created_at: created, updated_at: created },
+      ]).catch(() => {});
+    }
 
-  await insert("messages", [
-    {
-      conv_id: convId,
-      seq: nextSeq,
-      role: "user",
-      question,
-      insight_json: "",
-      trace_url: url,
-      ts: now(),
-    },
-  ]);
+    await insert("messages", [
+      { conv_id: convId, seq: nextSeq, role: "user", question, insight_json: "", trace_url: url, ts: now() },
+    ]);
 
-  try {
+    const activeTrace = trace;
     const insight = await withRunSink(
-      (e: RunEvent) => send(e.type, { name: e.name, payload: e.payload }),
-      () => runAnalytics({ question, history }, { trace }),
+      (e: RunEvent) =>
+        send(e.type, {
+          name: e.name,
+          // semantic grouping for the chat UI; several steps share a phase, and
+          // concurrent tasks collapse into one "Querying ClickHouse" line
+          phase: e.type.startsWith("step_") ? phaseOf(e.name) : undefined,
+          payload: e.payload,
+        }),
+      () => runAnalytics({ question, history }, { trace: activeTrace }),
     );
     await insert("messages", [
       {
@@ -358,7 +399,7 @@ export async function streamAnswer(
     send("insight", { insight, traceUrl: url });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    endRun(trace, { status: "failed", error: message });
+    if (trace) endRun(trace, { status: "failed", error: message });
     send("failed", { error: message, traceUrl: url });
   } finally {
     clearInterval(keepalive);

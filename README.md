@@ -20,7 +20,7 @@ nvm use                 # Node 20
 npm install
 npm run check-env       # ClickHouse + LLM + Langfuse must all be green
 npm run seed            # parse base_context.md into context_store (once)
-npm run serve           # http://localhost:8787
+npm run dev             # http://localhost:8787, restarts on any .ts or prompt change
 
 cd ../webapp && npm install && npm run dev    # :5173, proxies /api → :8787
 ```
@@ -35,14 +35,31 @@ Code OAuth login (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` in `backend
 |---|---|
 | `npm run check-env` | Verifies ClickHouse, LLM, Langfuse |
 | `npm run seed` | Seeds `context_store` v1 from `base_context.md` |
-| `npm run serve` | Starts the API server on :8787 |
+| `npm run dev` | API server with hot reload — restarts on `.ts` **and** `prompts/*.txt` edits |
+| `npm run serve` | API server without watching (use for demos and any long run) |
 | `npm test` | Unit tests (observe modules) |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npx tsx scripts/run-instrumentation.ts ../specs/01_express_checkout --yes` | Run a spec from the CLI (`--yes` auto-approves both gates) |
 | `npx tsx scripts/reset-spec.ts <spec…> \| --all-specs` | Drop a spec's tables and roll back its context rows |
+| `npx tsx scripts/reset-spec.ts --orphans` | Sweep tables left by a run that failed before writing context |
 | `npx tsx scripts/apply-audit-context.ts` | Apply the base-data audit corrections |
 | `npx tsx scripts/apply-ordering-finding.ts` | Apply the event-ordering finding |
 | `npx tsx scripts/comment-tables.ts` | Project context knowledge onto base tables as ClickHouse COMMENTs |
+
+### Hot reload
+
+`npm run dev` watches both source and `prompts/*.txt`. Watching the prompts matters:
+they are cached in memory after first load, so without a restart an edited prompt has
+no effect and you debug a version of the file that is no longer on disk.
+
+Restarts are graceful — SIGTERM drains queued `runs_log` inserts, flushes Langfuse
+spans, closes open SSE streams and the ClickHouse client, with a 4s cap so a slow
+network cannot hang the reload. Without that, every reload would truncate a run's
+event history.
+
+**Use `npm run serve` for demos and long runs.** A reload during an active run
+abandons it: the shutdown logs a warning naming the run and reminding you that any
+tables it created are now undocumented (`npx tsx scripts/reset-spec.ts --orphans`).
 
 ### Prompts
 
@@ -54,8 +71,8 @@ site cannot silently drift.
 | File | Used by |
 |---|---|
 | `shared_system.txt` | every LLM call (invariants + terseness) |
-| `instrument_table_purposes.txt` | fallback only — purposes are normally parsed from spec.md |
-| `context_write_knowledge.txt` | the interpretive half of a context update |
+| `instrument_design_table.txt` | designs one production table from the measured profile |
+| `context_write_knowledge.txt` | the two interpretive halves of a context update (scoped per call) |
 | `context_retrieve_relevant.txt` | semantic lookup over the store's index |
 | `analytics_plan_tasks.txt` | question → ≤4 aggregate tasks |
 | `analytics_write_sql.txt` | one task → one guarded query |
@@ -63,42 +80,126 @@ site cannot silently drift.
 | `analytics_review_quality.txt` | quality gate (skipped when code checks pass) |
 | `optimization_scan.txt`, `optimization_ddl.txt` | Observe advisor |
 
+Table purposes are parsed from each spec's own event descriptions, so no prompt is
+needed for them.
+
+`instrument_design_table.txt` distils the schema rules from ClickHouse's official
+[agent-skills](https://github.com/ClickHouse/agent-skills) best-practices set —
+immutable ordering keys, cardinality-ordered keys, filter prioritisation, native and
+minimum-width types, LowCardinality, avoiding Nullable, and partitioning for lifecycle
+rather than speed — and asks the designer to cite the rule it applied. They are
+inlined rather than installed as a skill: that skill is built for an interactive agent
+that reads rule files across many turns, while our design call is single-shot and runs
+one per table in parallel.
+
+### Known gaps
+
+- **Materialized-view proposals** are in the product design but not implemented: no
+  prompt asks for one and nothing executes one. The Observe advisor can propose schema
+  changes separately.
+- **Chat, Boards and Observe screens** still render mock data in the webapp;
+  instrumentation is the only screen wired to the real backend.
+
 ## How it works
 
-```
-Flow A — instrument a spec (human-gated, queued one at a time)
-  spec.md + events.ndjson
-    → profile (code)          measured stats per field per event type
-    → context load            conventions + existing table names
-    → DDL synthesis (CODE)    types/LowCardinality/ORDER BY are arithmetic on the
-                              profile — no LLM, no retries, instant
-    → purposes (CODE)         parsed from the spec's own event descriptions;
-                              an LLM fills only events the spec left undescribed
-    → dry-run                 ClickHouse EXPLAIN-parses every statement
-    → ⛔ HUMAN GATE            approve, or reject with feedback → regenerate
-    → execute + load + verify row counts match the file
-    → context update          table:* entries synthesised in CODE; ONE LLM call for
-                              the feature summary, required metrics and contradictions
-    → ⛔ HUMAN GATE            approve the proposed context entries
+Three agents. They never call each other — all shared knowledge moves through the
+context store, and every step is one Langfuse span.
 
-Flow B — ask a question (chat)
-  question
-    → cache lookup            same question + same context version ⇒ ms, no LLM
-    → plan (LLM)              ≤4 SQL tasks
-    → SQL per task (LLM)      concurrent; guarded + read-only; self-heals ≤3
-    → sanity gate (code)      drop empty sets, flag >100% rates and n<50
-    → knowledge lookup (LLM)  retrieves known issues that explain anomalies
-    → narrate (LLM)           the Insight card
-    → citation check (code)   every number must exist in the SQL results, or be a
-                              verified difference/ratio of two that do
-    → quality gate (LLM)      skipped when the code checks already pass
+### ① Instrumentation Agent — a spec becomes live tables
+
 ```
+spec.md + events.ndjson
+  ├─ profile (code)          per event type: field types, null rates, cardinality,
+  │                          numeric ranges, nesting — measured, never guessed
+  ├─ context load ┐          (these two run CONCURRENTLY — independent reads)
+  ├─ reconcile    ┘          store conventions + the live table list
+  ├─ baseline plan (code)    a correct-but-plain schema from the measurements;
+  │                          also the fallback if design fails
+  ├─ design (LLM) ×N         ONE CALL PER EVENT TYPE, ALL CONCURRENT: codecs,
+  │                          Enum8 vs LowCardinality, and an ordering key shaped
+  │                          by the PM's questions (low cardinality first)
+  ├─ validate (code)         every profiled column present, none invented, one
+  │                          statement, ClickHouse EXPLAIN-parses it — else retry
+  │                          with the verbatim error; after 3 tries ship the baseline
+  ├─ ⛔ HUMAN GATE            approve, or reject with feedback → regenerate
+  └─ execute + load + verify row counts match the file, or the run fails
+```
+
+### ② Context Agent — the shared memory
+
+Read side (`getContext`) assembles a prompt-ready bundle: core rules always, plus the
+categories a caller asks for, with a `brief` mode that collapses entries to one-liners
+when a caller only needs to know something exists. `lookupContext` is a semantic
+retriever for mid-analysis questions ("anything about Apple devices?" finds K1).
+`reconcileWithLive` compares documentation against the live schema.
+
+Write side runs once per spec, after instrumentation:
+
+```
+  ├─ table:* entries (code)  synthesised from the measured profile and the DDL that
+  │                          actually ran — no model needed for facts
+  ├─ feature   (LLM) ┐       CONCURRENT: the spec summary + the metrics its questions
+  ├─ conventions(LLM)┘       require · revisions to existing conventions + warnings
+  ├─ validate (code)         namespaces, one entry per created table, size caps
+  ├─ ⛔ HUMAN GATE            approve the proposed entries
+  └─ write as version n+1    append-only; code owns versions, run ids, timestamps
+```
+
+### ③ Analytics Agent — a question becomes a cited insight
+
+```
+question
+  ├─ context load (code)     4 CONCURRENT reads: knowledge bundle, SQL rules,
+  │                          live tables, exact column schemas
+  ├─ cache lookup            same question + same context digest ⇒ ~0.6s, no LLM
+  ├─ plan (LLM)              ≤4 aggregate tasks
+  ├─ per task ×N             ALL CONCURRENT: write SQL (LLM) → guard (code) →
+  │                          execute read-only → retry ≤3 on a real SQL error
+  ├─ sanity gate (code)      drop empty sets and blocked tasks, flag >100% rates
+  │                          and n<50 — everything dropped is reported, not hidden
+  ├─ knowledge lookup (LLM)  known issues that might explain an anomaly
+  ├─ narrate (LLM)           the insight card
+  ├─ citation check (code)   every number must be in the results, or a verified
+  │                          difference/ratio of two that are — else regenerate
+  └─ quality gate (LLM)      skipped when the code checks already pass
+```
+
+### What runs in parallel, and why that is safe
+
+Parallelism here is never speculative — it is only ever applied to work with **no data
+dependency and no shared mutable state**. Output tokens dominate latency (~60–100/s), so
+splitting one large generation into several smaller concurrent ones is the single most
+effective speed lever available.
+
+| Concurrent work | Why it cannot interfere |
+|---|---|
+| Per-table DDL design (N calls) | Each table is an independent artifact with its own profile, validation, retry budget and fallback. One table failing cannot affect a sibling. Consistency comes from every call receiving identical conventions. |
+| Per-task analytics SQL (≤4 calls) | The planner produces independent tasks by construction; each writes one read-only query. Results are collected before any of them is interpreted. |
+| Context write: feature vs conventions | Two disjoint entity sets — one may only emit `spec:`/`metric:`/`funnel:`/`entity:`, the other only revisions to existing `convention:`/`known_issue:` plus warnings. Neither reads the other's output. |
+| Context bundle + live reconciliation | Two independent reads. |
+| Chat prep queries (count + history) | Two independent reads. |
+
+**Deliberately kept sequential**, because each genuinely consumes the previous stage's
+output and parallelising would mean guessing: plan → SQL, SQL → sanity gate → narrate,
+narrate → citation check → quality gate, and instrumentation ① → context write ②.
+
+**Whole runs are serialized.** A run is a read-modify-write on shared state (it creates
+tables and appends context versions), so the queue admits one at a time — that is what
+makes the per-step concurrency above safe. Chat answers run alongside a run without
+interference because each answer carries its own event sink (`AsyncLocalStorage`), so
+their progress events never cross.
 
 **Three invariants worth knowing before changing anything.** Numbers only come from
 ClickHouse — the LLM never computes one. Knowledge only comes from the Context Agent
 (`getContext` / `lookupContext`), never from sampling the database. And the Analytics
 Agent is read-only by construction: SQL runs with ClickHouse `readonly=1` after code
 guards, and `updateContext` requires an instrumentation result it can never have.
+
+**Quality is never traded for speed.** Every prompt inherits `shared_system.txt`, which
+makes fabrication the one unacceptable failure: an agent that cannot do the task returns
+the requested shape with the honest answer inside it (an empty result, a headline saying
+what is unanswerable, a `'cannot compute'` sentinel the code turns into a reported gap)
+and escalates a judgement call to the human rather than guessing.
 
 ## Database tables
 

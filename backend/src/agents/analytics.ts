@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { command, insert, isTransientDbError, query, queryReadonly } from "../core/db.js";
 import { withQueryContext } from "../core/query-context.js";
-import { step, scoreRun, recordQuery, type Ctx } from "../core/tracing.js";
+import { step, scoreRun, recordQuery, emitRunEvent, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import { getContext, lookupContext, reconcileWithLive } from "./context.js";
 
@@ -203,11 +203,14 @@ interface TaskResult {
   flags: string[];
 }
 
-function numericPool(results: TaskResult[]): number[] {
+/** Build the pool from exactly the rows the narrator was shown. Using every row
+ * let one 1000-row task consume the whole budget and starve later tasks, so a
+ * number the narrator could see was reported as uncited and the answer died. */
+function numericPool(results: TaskResult[], rowsShown: number): number[] {
   const pool: number[] = [];
   for (const r of results) {
     pool.push(r.rows.length);
-    for (const row of r.rows) {
+    for (const row of r.rows.slice(0, rowsShown)) {
       for (const v of Object.values(row)) {
         const n = typeof v === "number" ? v : Number(v);
         if (Number.isFinite(n)) {
@@ -229,13 +232,17 @@ function numericPool(results: TaskResult[]): number[] {
 export function findUncitedNumbers(texts: string[], pool: number[]): string[] {
   const near = (a: number, b: number) =>
     Math.abs(a - b) <= Math.max(0.06, Math.abs(b) * 0.015);
-  const base = [...new Set(pool)].slice(0, 400);
+  const base = [...new Set(pool)];
+  // Derived pairs are for legitimate deltas, but ~n² of them makes the check
+  // permissive on rich results. Only pair the values a narrator actually
+  // compares — the first 60 distinct — keeping the guard tight.
+  const pairable = base.slice(0, 60);
   const derived: number[] = [];
-  for (let i = 0; i < base.length; i++) {
-    for (let j = 0; j < base.length; j++) {
+  for (let i = 0; i < pairable.length; i++) {
+    for (let j = 0; j < pairable.length; j++) {
       if (i === j) continue;
-      const a = base[i]!;
-      const b = base[j]!;
+      const a = pairable[i]!;
+      const b = pairable[j]!;
       derived.push(a - b);
       if (b !== 0) derived.push(a / b);
     }
@@ -271,14 +278,19 @@ export type ValueFormat =
   | "currency"
   | "number";
 
-export function inferFormat(name: string, values: number[]): ValueFormat {
+export function inferFormat(name: string, values: number[], sql = ""): ValueFormat {
   const n = name.toLowerCase();
   const max = values.length ? Math.max(...values.map(Math.abs)) : 0;
+  // A query that multiplies by 100 emits percentages; 0.383 then means 0.383%,
+  // not 38.3%. Values alone cannot distinguish this below 1%.
+  const scaledToPercent = /\*\s*100(\.0)?\b/.test(sql);
   if (/_pp$|percentage_point|_delta_pct/.test(n)) return "percentage_points";
   if (/_ms$|latency|duration_ms/.test(n)) return "ms";
   if (/_s$|_sec|seconds|elapsed/.test(n)) return "seconds";
   if (/amount|revenue|value|price|discount|fee/.test(n)) return "currency";
-  if (/rate|ratio|share|pct|percent|conversion|success/.test(n)) {
+  // suffix match — "share_clicked_applications" is a count, not a share
+  if (/(^|_)(rate|ratio|pct|percent)$/.test(n) || /_rate_|success_rate/.test(n)) {
+    if (scaledToPercent) return "percent";
     return max <= 1.05 ? "fraction" : "percent";
   }
   if (/^(n|count|users|sessions|rows|payers|uploads|events)/.test(n) || Number.isInteger(max))
@@ -292,6 +304,13 @@ function annotateFormats(insight: Narration, results: TaskResult[]): void {
     const r = results.find((x) => x.id === taskId);
     return r?.rows[0] ? Object.keys(r.rows[0]) : [];
   };
+  const sqlOf = (taskId: string) => results.find((x) => x.id === taskId)?.sql ?? "";
+  const known = new Set(results.map((r) => r.id));
+  // a chart or table pointing at a dropped task cannot be format-inferred, and
+  // would cite results the reader cannot open — drop the visual instead
+  if (insight.chart && !known.has(insight.chart.sourceTask)) insight.chart = null;
+  if (insight.segmentTable && !known.has(insight.segmentTable.sourceTask))
+    insight.segmentTable = null;
   if (insight.chart) {
     const cols = columnsOf(insight.chart.sourceTask);
     const valueCol =
@@ -301,6 +320,7 @@ function annotateFormats(insight: Narration, results: TaskResult[]): void {
     insight.chart.valueFormat = inferFormat(
       valueCol,
       insight.chart.series.map((s) => s.value),
+      sqlOf(insight.chart.sourceTask),
     );
   }
   if (insight.segmentTable) {
@@ -308,7 +328,9 @@ function annotateFormats(insight: Narration, results: TaskResult[]): void {
       const vals = insight.segmentTable!.rows
         .map((r) => Number(r[i]))
         .filter((v) => Number.isFinite(v));
-      return vals.length === 0 ? "text" : inferFormat(col, vals);
+      return vals.length === 0
+        ? "text"
+        : inferFormat(col, vals, sqlOf(insight.segmentTable!.sourceTask));
     });
   }
 }
@@ -324,11 +346,24 @@ function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[
       notes.push(`task ${r.id} (${r.title}): dropped — empty result set`);
       continue;
     }
+    // The SQL writer declares an impossible task instead of approximating it
+    // (see analytics_write_sql). Honour that: drop the task and carry the reason
+    // forward, rather than letting the sentinel row be read as data.
+    const first = r.rows[0] as Record<string, unknown>;
+    if (first && "blocked" in first) {
+      const reason = String(first["reason"] ?? "not computable from the available columns");
+      r.dropped = `not computable: ${reason}`;
+      r.rows = [];
+      notes.push(`task ${r.id} (${r.title}): the query could not be written — ${reason}`);
+      continue;
+    }
     for (const row of r.rows) {
       for (const [col, v] of Object.entries(row)) {
         const n = Number(v);
         if (!Number.isFinite(n)) continue;
-        if (/rate|ratio|pct|share|conversion/i.test(col) && n > 1.05) {
+        // suffix match, not substring: "share_clicked_applications" is a count,
+        // and matching "share" inside it flagged 1,601 as a rate above 100%
+        if (/(^|_)(rate|ratio|pct|percent)$/i.test(col) && n > 1.05) {
           r.flags.push(`${col}=${n} looks like a rate above 100%`);
         }
       }
@@ -348,6 +383,8 @@ function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[
 
 // ── main ─────────────────────────────────────────────────────────
 
+/** Rows per task shown to the narrator — and therefore the rows it may cite. */
+const NARRATION_ROWS = 24;
 const MAX_SQL_ATTEMPTS = 3;
 const MAX_NARRATE_ATTEMPTS = 3;
 
@@ -379,7 +416,7 @@ export async function runAnalytics(
   return withQueryContext({ agent: "analytics" }, () =>
    step(opts.trace, "analytics", { question: input.question }, async (span) => {
     // ── context (read-only) ──
-    const { bundle, sqlRules, liveTables, schemas, contextVersion } = await step(
+    const { bundle, sqlRules, schemas, contextVersion, contextKey } = await step(
       span,
       "context_load",
       {},
@@ -398,6 +435,13 @@ export async function runAnalytics(
           reconcileWithLive(),
           tableSchemas(),
         ]);
+        // A digest over every (entity, version) pair — the entity count and the
+        // global max both miss a revision that lands below the current max, which
+        // would serve a stale answer after a context write.
+        const versionDigest = createHash("sha1")
+          .update(b.entries.map((e) => `${e.entity}@${e.version}`).sort().join("|"))
+          .digest("hex")
+          .slice(0, 10);
         const maxV = Math.max(...b.entries.map((e) => e.version));
         return {
           bundle: b,
@@ -405,13 +449,14 @@ export async function runAnalytics(
           liveTables: recon.liveTables,
           schemas,
           contextVersion: `${b.entries.length} entities · max v${maxV}`,
+          contextKey: versionDigest,
         };
       },
     );
 
     // Cache hit → milliseconds. Skipped for follow-ups, whose meaning depends
     // on conversation state rather than the question text alone.
-    const key = cacheKey(input.question, contextVersion);
+    const key = cacheKey(input.question, contextKey);
     if (!input.history?.length && !input.noCache) {
       const cached = await step(span, "cache_lookup", { key }, () => readCache(key));
       if (cached) {
@@ -464,6 +509,7 @@ export async function runAnalytics(
       plan.tasks.map((task) =>
         step(span, `task_${task.id}`, { title: task.title }, async (taskSpan) => {
           let feedback = "";
+          let lastTransient = "";
           for (let attempt = 1; attempt <= MAX_SQL_ATTEMPTS; attempt++) {
             sqlAttemptsTotal++;
             try {
@@ -474,7 +520,6 @@ export async function runAnalytics(
                 async (sqlSpan) => {
                   const prompt = await loadPrompt("analytics_write_sql", {
                     context: sqlRules.markdown,
-                    live_tables: task.tables.join(", "),
                     schemas: schemaSubset(schemas, task.tables),
                     task: JSON.stringify(task),
                     feedback: feedback
@@ -489,7 +534,10 @@ export async function runAnalytics(
               );
             } catch (error) {
               if (isTransientDbError(error)) {
-                // infrastructure, not the SQL — keep the statement, back off, retry
+                // infrastructure, not the SQL: back off and regenerate without
+                // blaming the model, but say so if we exhaust the attempts
+                feedback = "";
+                lastTransient = error instanceof Error ? error.message : String(error);
                 await new Promise((r) => setTimeout(r, 1000 * attempt));
                 continue;
               }
@@ -502,7 +550,7 @@ export async function runAnalytics(
             sql: "",
             rows: [],
             flags: [],
-            dropped: `gave up after ${MAX_SQL_ATTEMPTS} attempts: ${feedback}`,
+            dropped: `gave up after ${MAX_SQL_ATTEMPTS} attempts: ${feedback || lastTransient || "unknown error"}`,
           } as TaskResult;
         }),
       ),
@@ -526,7 +574,7 @@ export async function runAnalytics(
     const resultsText = kept
       .map(
         (r) =>
-          `### ${r.id} — ${r.title} (${r.rows.length} rows${r.flags.length ? `; flags: ${r.flags.join("; ")}` : ""})\nSQL: ${r.sql}\nrows: ${JSON.stringify(r.rows.slice(0, 24))}${r.rows.length > 24 ? `\n(+${r.rows.length - 24} more rows not shown — do not infer beyond what is listed)` : ""}`,
+          `### ${r.id} — ${r.title} (${r.rows.length} rows${r.flags.length ? `; flags: ${r.flags.join("; ")}` : ""})\nSQL: ${r.sql}\nrows: ${JSON.stringify(r.rows.slice(0, NARRATION_ROWS))}${r.rows.length > NARRATION_ROWS ? `\n(+${r.rows.length - NARRATION_ROWS} more rows not shown — do not infer beyond what is listed)` : ""}`,
       )
       .join("\n\n");
     // What the queries ACTUALLY did, read off the executed SQL. The citation
@@ -535,10 +583,12 @@ export async function runAnalytics(
     const methodNotes = kept
       .map((r) => {
         const bits: string[] = [];
+        // Only state what can be checked from the SQL itself. Whether the columns
+        // exist is a separate fact we are not verifying here, so do not claim it.
         bits.push(
-          /duplicate_id/i.test(r.sql)
+          /\bduplicate_id\b/i.test(r.sql)
             ? "hygiene filters applied (duplicate_id / is_back_filled)"
-            : "no hygiene filters — those columns do not exist on these tables",
+            : "no hygiene filters were applied in this query",
         );
         if (/if\s*\(\s*os\s+IS\s+NULL|multiIf\s*\(\s*\(?\s*os\s+IS\s+NULL/i.test(r.sql))
           bits.push("empty/NULL os bucketed as 'unknown'");
@@ -548,7 +598,7 @@ export async function runAnalytics(
       .join("\n");
 
     const pool = [
-      ...numericPool(kept),
+      ...numericPool(kept, NARRATION_ROWS),
       // numbers the agent was shown in the gate notes are citable too
       ...sanityNotes
         .join(" ")
@@ -643,6 +693,7 @@ export async function runAnalytics(
     });
 
     if (quality.verdict === "revise" && quality.revision_note) {
+      const preRevision = narration;
       narration = await step(span, "narrate_revision", { note: quality.revision_note }, async (rSpan) => {
         const prompt = await loadPrompt("analytics_narrate_insight", {
           question: input.question,
@@ -661,9 +712,18 @@ export async function runAnalytics(
           [parsed.headline, ...parsed.findings.map((f) => f.text)],
           pool,
         );
-        if (uncited.length > 0) throw new Error(`revision introduced uncited numbers: ${uncited.join(", ")}`);
+        if (uncited.length > 0) {
+          // keep the answer that already passed every check rather than failing
+          // the request over a cosmetic revision
+          emitRunEvent({
+            type: "log",
+            name: "revision_discarded",
+            payload: { reason: `introduced uncited numbers: ${uncited.join(", ")}` },
+          });
+          return preRevision;
+        }
         return parsed;
-      });
+      }).catch(() => preRevision);
     }
 
     annotateFormats(narration, kept);

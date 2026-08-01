@@ -72,11 +72,13 @@ Flow A — instrument a spec (human-gated, queued one at a time)
     → context load            conventions + existing table names
     → DDL synthesis (CODE)    types/LowCardinality/ORDER BY are arithmetic on the
                               profile — no LLM, no retries, instant
-    → purposes (1 small LLM call, optional)
+    → purposes (CODE)         parsed from the spec's own event descriptions;
+                              an LLM fills only events the spec left undescribed
     → dry-run                 ClickHouse EXPLAIN-parses every statement
     → ⛔ HUMAN GATE            approve, or reject with feedback → regenerate
     → execute + load + verify row counts match the file
-    → context update (LLM)    versioned entries + contradiction warnings
+    → context update          table:* entries synthesised in CODE; ONE LLM call for
+                              the feature summary, required metrics and contradictions
     → ⛔ HUMAN GATE            approve the proposed context entries
 
 Flow B — ask a question (chat)

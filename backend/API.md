@@ -321,14 +321,20 @@ either appears in one of the attached `sql` results or is a code-verified
 difference/ratio of two such numbers. SQL runs read-only (`readonly=1`), so chat
 can never mutate data, and the agent cannot write context.
 
-## [PLANNED] Dashboards
+## [LIVE] Dashboards (Boards)
 
 ```
-POST /api/dashboards            { title, sql, chartKind, meta? } → 201 { id }   // "Save to dashboard" on an insight chart
-GET  /api/dashboards            → [{ id, title, chartKind, createdAt }]
-GET  /api/dashboards/:id/run    → { headline?, series, ms, ranAt }              // re-executes the saved SQL — fresh data every load
-DELETE /api/dashboards/:id
+POST   /api/dashboards          { title, sql, chartKind?, meta? } → 201 { id }
+GET    /api/dashboards          → [{ id, title, chartKind, meta, createdAt }]
+GET    /api/dashboards/:id/run  → { id, title, chartKind, meta, series, rows, rowCount, sql, ms, ranAt }
+DELETE /api/dashboards/:id      → { ok: true }
 ```
+
+"Save to dashboard" on an insight chart posts the chart's title plus the SQL
+from `insight.sql[i].query`. **The stored artifact is the SQL** — `:id/run`
+re-executes it read-only on every load, so a board always shows fresh data
+(`ms` + `ranAt` give you the "re-ran <time> · fresh data" stamp). Non-SELECT SQL
+is rejected at save time and again at run time.
 
 ## [PLANNED] Observability
 

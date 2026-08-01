@@ -17,7 +17,7 @@ import type { AgentKind, ServerState } from "@/api/types"
 
 export type NavId = "chat" | "instr" | "obs" | "dash"
 export type InstrTab = "run" | "hist"
-export type ObsTab = "traces" | "stack" | "log"
+export type ObsTab = "traces" | "stack" | "log" | "judge"
 export type TraceFilter = "all" | AgentKind
 /** Mirrors the agents that can appear in system.query_log's log_comment. */
 export type QueryFilter = "all" | "analytics" | "instrumentation" | "context"

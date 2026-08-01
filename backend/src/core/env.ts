@@ -55,5 +55,10 @@ export const env = {
     // Agent SDK, which reuses the machine's Claude Code login (company plan).
     apiKey: resolveApiKey(),
     model: optional("CLICKWRIGHT_MODEL", "claude-sonnet-5"),
+    // The answer judge deliberately runs on a stronger model at higher effort
+    // than the agent it grades: a judge that shares the generator's capability
+    // and framing tends to agree with it.
+    judgeModel: optional("CLICKWRIGHT_JUDGE_MODEL", "claude-opus-5"),
+    judgeEffort: optional("CLICKWRIGHT_JUDGE_EFFORT", "high"),
   },
 };

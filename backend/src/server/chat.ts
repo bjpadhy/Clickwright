@@ -20,7 +20,8 @@ import {
   withRunSink,
   type RunEvent,
 } from "../core/tracing.js";
-import { runAnalytics, type Insight } from "../agents/analytics.js";
+import { runAnalytics, type AnswerEvidence, type Insight } from "../agents/analytics.js";
+import { enqueueJudgement } from "../agents/judge.js";
 
 /**
  * Technical step names are noise in a chat UI. Each maps to one of five phases the
@@ -355,6 +356,9 @@ export async function streamAnswer(
     ]);
 
     const activeTrace = trace;
+    // Captured for the judge. Never fires on a cache hit — same question, same
+    // context version, same answer, already judged.
+    let evidence: AnswerEvidence[] | null = null;
     const insight = await withRunSink(
       (e: RunEvent) =>
         send(e.type, {
@@ -364,7 +368,11 @@ export async function streamAnswer(
           phase: e.type.startsWith("step_") ? phaseOf(e.name) : undefined,
           payload: e.payload,
         }),
-      () => runAnalytics({ question, history }, { trace: activeTrace }),
+      () =>
+        runAnalytics(
+          { question, history },
+          { trace: activeTrace, onEvidence: (e) => { evidence = e; } },
+        ),
     );
     await insert("messages", [
       {
@@ -397,6 +405,23 @@ export async function streamAnswer(
     }
     endRun(trace, { headline: insight.headline, confidence: insight.confidence.value });
     send("insight", { insight, traceUrl: url });
+
+    // Grade the answer out of band, AFTER it has been sent and outside the
+    // withRunSink scope — a judge event leaking into a chat stream that has
+    // already closed is a bug waiting to happen. Queued, never awaited, and
+    // incapable of affecting anything above: judgeAnswer swallows its own
+    // failures.
+    if (evidence) {
+      enqueueJudgement({
+        convId,
+        seq: nextSeq + 1,
+        question,
+        askedAt: new Date().toISOString(),
+        insight,
+        evidence,
+        answerTraceUrl: url,
+      });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (trace) endRun(trace, { status: "failed", error: message });

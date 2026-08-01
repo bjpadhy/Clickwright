@@ -623,6 +623,54 @@ and `/api/runs/:id/approve` — but its gate is `"optimization"` and its
 executes the statements byte-for-byte; rejecting sends feedback back to the model,
 which regenerates (up to 4 attempts).
 
+## [LIVE] GET /api/observe/judgements — the Answer quality tab
+
+`200 Judgement[]`, newest first. Optional `?verdict=pass|warn|fail`.
+
+Every chat answer is graded **after** it is sent by a second agent that never
+changes it. Two axes: did the data returned answer the question (`relevance`),
+and was the query correct (`sql`).
+
+```ts
+export type Verdict = "pass" | "warn" | "fail";
+
+export interface Judgement {
+  convId: string; seq: number;          // the agent turn that was graded
+  question: string; askedAt: string; judgedAt: string;
+  overall: Verdict;                     // the worse of the two axes
+  relevance: { verdict: Verdict; score: number; reason: string };
+  sql:       { verdict: Verdict; score: number; reason: string };
+  findings: Array<{
+    kind: "hygiene" | "denominator" | "currency" | "join" | "citation" | "coverage";
+    severity: "info" | "warn" | "fail";
+    text: string;
+    task: string | null;
+  }>;
+  queries: Array<{ task: string; title: string; sql: string; rowCount: number }>;
+  model: string;                        // the judge's model, not the agent's
+  answerTraceUrl: string | null;
+  judgeTraceUrl: string | null;
+}
+```
+
+Three things a consumer should know:
+
+- **`findings` are decided by code, not the model.** Each is a documented trap
+  from `base_context.md` checked with a regex over the SQL — missing
+  `duplicate_id`/`is_back_filled` filters, `sum(value)` without `GROUP BY
+  currency`, unbucketed `os`, an `application_id` join at top of funnel. A
+  `severity: "fail"` finding forces `sql.verdict` to `fail` regardless of what
+  the grader concluded.
+- **The judge runs on a stronger model at higher effort than the agent it
+  grades** (`CLICKWRIGHT_JUDGE_MODEL`, default `claude-opus-5`;
+  `CLICKWRIGHT_JUDGE_EFFORT`, default `high`). A judge that shares the
+  generator's capability tends to agree with it.
+- **Grading is asynchronous and queued.** A judgement appears seconds to a
+  couple of minutes after the answer; cache hits are never re-judged, because
+  the same question at the same context version is the same already-graded
+  answer. Poll this endpoint rather than expecting it to be ready when the
+  answer arrives.
+
 ## [PLANNED] Remaining observability
 
 ```

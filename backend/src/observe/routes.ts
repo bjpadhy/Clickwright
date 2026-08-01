@@ -23,6 +23,7 @@ import {
 } from "./db-health.js";
 import { changelogToMarkdown, getChangelog } from "./changelog.js";
 import { latestScan, runScan, type ScanResult } from "./advisor.js";
+import { listJudgements } from "../agents/judge.js";
 import type { RunManager } from "../server/runs.js";
 
 /** Run a collector, falling back to a safe value if its system table is unavailable. */
@@ -137,6 +138,21 @@ export function observeRouter(manager: RunManager): Router {
         scanning = false;
       });
     res.status(202).json({ status: "scanning" });
+  });
+
+  /** Answer-quality tab: one entry per graded chat answer, newest first. */
+  router.get("/judgements", async (req, res) => {
+    try {
+      const verdict = req.query["verdict"];
+      const all = await withQueryContext({ agent: "observe" }, () => listJudgements(100));
+      const filtered =
+        verdict === "fail" || verdict === "warn" || verdict === "pass"
+          ? all.filter((j) => j.overall === verdict)
+          : all;
+      res.json(filtered);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   /** "Ask agent to draft it" — enqueues an optimization run behind the same

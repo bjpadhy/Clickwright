@@ -22,7 +22,10 @@ function client(): Anthropic {
  * These prompts are tightly specified and schema-validated, so medium is the
  * right trade, and pinning it keeps runs comparable across machines.
  */
-const EFFORT = "medium" as const;
+const EFFORT: Effort = "medium";
+
+/** Reasoning-effort levels accepted by both backends. */
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
  * No API key → company Claude Code plan: call through the Claude Agent SDK,
@@ -42,8 +45,8 @@ async function completeViaAgentSdk(
   const stream = query({
     prompt,
     options: {
-      model: env.llm.model,
-      effort: EFFORT,
+      model: options.model ?? env.llm.model,
+      effort: options.effort ?? EFFORT,
       // No tools are allowed, but the CLI can split long responses across
       // assistant turns — maxTurns: 1 intermittently dies with
       // error_max_turns on big prompts (seen in trace pipeline:01_express_checkout).
@@ -119,6 +122,11 @@ export type CompleteOptions = {
   temperature?: number;
   /** Set false to skip the shared system prompt (prompts/system.txt). */
   useSystemPrompt?: boolean;
+  /** Override the pipeline model for one call — the judge runs on a stronger
+   *  model than the agent it grades. Defaults to env.llm.model. */
+  model?: string;
+  /** Override the pinned reasoning effort for one call. */
+  effort?: Effort;
 };
 
 let systemPrompt: string | null = null;
@@ -137,7 +145,7 @@ export async function complete(
   prompt: string,
   options: CompleteOptions = {},
 ): Promise<string> {
-  const model = env.llm.model;
+  const model = options.model ?? env.llm.model;
   if (options.useSystemPrompt !== false && !options.system) {
     options = { ...options, system: await sharedSystem() };
   }
@@ -173,7 +181,9 @@ export async function complete(
       const response = await client().messages.create({
         model,
         max_tokens: options.maxTokens ?? 8000,
-        output_config: { effort: EFFORT },
+        // On claude-opus-5 thinking is ON by default and max_tokens caps
+        // thinking + response together, so a judge call needs real headroom.
+        output_config: { effort: options.effort ?? EFFORT },
         // `temperature` is NOT sent: on claude-sonnet-5 and every other current
         // model a non-default sampling parameter is rejected with a 400.
         ...(options.system ? { system: options.system } : {}),
@@ -215,6 +225,59 @@ export async function complete(
       statusMessage: error instanceof Error ? error.message : String(error),
     });
     throw error;
+  }
+}
+
+/**
+ * Pull a JSON object out of a model response.
+ *
+ * `stripFences` only helps when the model actually fenced its output. A reasoning
+ * model asked for "ONLY JSON" still sometimes writes a sentence first, or leaves a
+ * trailing comma — both of which make JSON.parse fail on text that is otherwise
+ * perfectly good. Scan for the first balanced top-level object instead (respecting
+ * strings and escapes so a brace inside a reason string doesn't end it early),
+ * then drop trailing commas.
+ *
+ * Throws with a slice of the offending text: a parse failure you cannot see is
+ * undiagnosable.
+ */
+export function extractJson<T = unknown>(raw: string): T {
+  const text = stripFences(raw);
+  const start = text.indexOf("{");
+  if (start === -1) {
+    throw new Error(`no JSON object in model output: ${text.slice(0, 300)}`);
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let end = -1;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}" && --depth === 0) {
+      end = i + 1;
+      break;
+    }
+  }
+  if (end === -1) {
+    throw new Error(`unterminated JSON object in model output: ${text.slice(start, start + 300)}`);
+  }
+
+  const candidate = text.slice(start, end).replace(/,(\s*[}\]])/g, "$1");
+  try {
+    return JSON.parse(candidate) as T;
+  } catch (error) {
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)} — model output was: ${candidate.slice(0, 400)}`,
+    );
   }
 }
 

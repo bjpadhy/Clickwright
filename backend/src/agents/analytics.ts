@@ -423,9 +423,29 @@ export interface AnalyticsInput {
   history?: Array<{ role: "user" | "agent"; text: string }>;
 }
 
+/** What the answer judge needs and the Insight does not carry: the rows behind
+ *  each figure. Judging relevance from the SQL text alone is guesswork. */
+export interface AnswerEvidence {
+  task: string;
+  title: string;
+  sql: string;
+  rowCount: number;
+  /** Bounded sample of exactly the rows the narrator was shown. */
+  rows: Record<string, unknown>[];
+  dropped?: string;
+  flags: string[];
+}
+
 export interface RunAnalyticsOptions {
   trace: Ctx;
   llm?: (parent: Ctx, name: string, prompt: string) => Promise<string>;
+  /**
+   * Called with the task results once, on a freshly computed answer. Deliberately
+   * a callback rather than a return value: it leaves the Insight contract (and
+   * therefore insight_cache) untouched, and it simply does not fire on a cache
+   * hit — which is exactly when there is nothing new to judge.
+   */
+  onEvidence?: (evidence: AnswerEvidence[]) => void;
 }
 
 export async function runAnalytics(
@@ -862,6 +882,18 @@ export async function runAnalytics(
     const tightest = precision.filter((p) => p.interval).sort((a, b) => a.interval!.halfWidthPp - b.interval!.halfWidthPp)[0];
     if (tightest) scoreRun(span, "precision_half_width_pp", tightest.interval!.halfWidthPp);
     scoreRun(span, "confidence_computed", confidence.value === "high" ? 2 : confidence.value === "medium" ? 1 : 0, confidence.note);
+
+    opts.onEvidence?.(
+      results.map((r) => ({
+        task: r.id,
+        title: r.title,
+        sql: r.sql,
+        rowCount: r.rows.length,
+        rows: r.rows.slice(0, 20),
+        ...(r.dropped ? { dropped: r.dropped } : {}),
+        flags: r.flags,
+      })),
+    );
 
     return insight;
    }),

@@ -41,7 +41,8 @@ Every entry needs a change_note: ONE clause (<= 140 chars) stating what is new a
 
 # warnings — real contradictions only, AT MOST 3
 Emit a warning ONLY when the measured reality contradicts a specific existing entry.
-Each warning must name that entity and the concrete conflict, in one sentence, e.g.
+Each warning must name that entity and the concrete conflict, in ONE sentence of
+AT MOST 300 characters — state the conflict, do not argue it. For example:
 "convention:sessionization claims every table carries app_session_id, but these 5 tables have none."
 Do NOT warn about things the store already documents as exceptions. Do NOT warn about
 absences that are merely expected (a feature not having a column it never emits).

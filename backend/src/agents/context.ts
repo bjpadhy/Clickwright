@@ -167,23 +167,50 @@ export async function getContext(
 // LLM proposes entry content; code enforces completeness, namespaces, and all
 // bookkeeping (versions, run_id, timestamps). Human approval gates the write.
 
+const ProposedEntrySchema = z.object({
+  entity: z
+    .string()
+    .regex(
+      /^(table|spec|metric|funnel|entity|convention|known_issue):[a-z0-9_]+$/i,
+    ),
+  definition_md: z.string().min(20).max(1800, "definition_md must be <= 1800 chars — be precise, not exhaustive"),
+  change_note: z.string().min(5).max(200, "change_note must be one clause <= 200 chars"),
+});
+
+/** Real contradictions only — the UI's "contradiction surfaced" chip. */
+const WarningsSchema = z
+  .array(z.string().max(300, "each warning must be one sentence <= 300 chars"))
+  .max(3, "at most 3 warnings — only genuine contradictions")
+  .optional();
+
 const UpdateProposalSchema = z.object({
   entries: z
-    .array(
-      z.object({
-        entity: z
-          .string()
-          .regex(
-            /^(table|spec|metric|funnel|entity|convention|known_issue):[a-z0-9_]+$/i,
-          ),
-        definition_md: z.string().min(20).max(1800, "definition_md must be <= 1800 chars — be precise, not exhaustive"),
-        change_note: z.string().min(5).max(200, "change_note must be one clause <= 200 chars"),
-      }),
-    )
+    .array(ProposedEntrySchema)
     .min(1)
     .max(16, "at most 16 entries per spec — emit only what genuinely changed"),
-  /** Real contradictions only — the UI's "contradiction surfaced" chip. */
-  warnings: z.array(z.string().max(300)).max(3, "at most 3 warnings — only genuine contradictions").optional(),
+  warnings: WarningsSchema,
+});
+
+/**
+ * One generation half's output, which is NOT a whole proposal.
+ *
+ * A half legitimately has nothing to add: CONVENTION_SCOPE tells the model
+ * outright to return an empty entries array when this spec disproved nothing,
+ * which is the common case. Validating a half with `.partial({entries: true})`
+ * made the key optional but left the `.min(1)` floor intact, so the moment the
+ * model did what it was told and sent `[]`, the parse threw `too_small` and
+ * burned the whole 40-second generation. Retries could not fix it — the prompt
+ * kept asking for the same empty array.
+ *
+ * The >=1 floor belongs on the MERGED proposal, which always carries the
+ * deterministic table entries.
+ */
+const HalfProposalSchema = z.object({
+  entries: z
+    .array(ProposedEntrySchema)
+    .max(16, "at most 16 entries per spec — emit only what genuinely changed")
+    .optional(),
+  warnings: WarningsSchema,
 });
 export type ContextUpdateProposal = z.infer<typeof UpdateProposalSchema>;
 
@@ -315,11 +342,7 @@ export async function updateContext(
                 table_entries: tableEntriesText,
               })
                 .then((prompt) => llm(genSpan, callName, prompt))
-                .then((text) =>
-                  UpdateProposalSchema.partial({ entries: true }).parse(
-                    JSON.parse(stripFences(text)),
-                  ),
-                );
+                .then((text) => HalfProposalSchema.parse(JSON.parse(stripFences(text))));
 
             // The conventions half exists to catch contradictions between the new
             // spec and existing conventions. When instrumentation flagged no

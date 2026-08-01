@@ -49,7 +49,7 @@ export interface RunEvent {
 
 // ── gate proposals (payload.proposal of approval_request) ────────
 export interface DdlProposal {
-  reasoning: string;        // the agent's design rationale, plain text
+  reasoning: string;        // markdown with ## sections: Ordering keys / Partitioning / Types & codecs / Deviations & flags
   tables: Array<{
     name: string;           // table to create
     event: string;          // source event type
@@ -171,8 +171,9 @@ listeners per type.
 | `step_start` | step name (below) | `{ input: object }` |
 | `step_end` | step name | `{ output: object }` — strings >2000 chars clipped with `…[clipped]` |
 | `step_error` | step name | `{ error: string }` — verbatim failure, feeds the retry |
-| `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ tables: LoadedTable[], contextEntries: {entity, version}[], traceUrl }`; `failed` → `{ error }` |
-| `approval_request` | `"ddl"` \| `"context"` | `{ proposal: DdlProposal \| ContextProposal }` |
+| `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ tables: LoadedTable[], contextEntries: {entity, version}[], contextWarnings: string[], traceUrl }`; `failed` → `{ error }` |
+| `approval_request` | `"ddl"` \| `"context"` | `{ proposal: DdlProposal \| ContextProposal }` — ContextProposal may carry `warnings: string[]` (the "contradiction surfaced" chips) |
+| `log` | `"ddl_statement"` \| `"data_load"` | `{ statement?, table?, rows?, ok, ms }` — per-statement execution progress |
 | `approval_result` | gate | `{ approved: boolean, feedback: string, identity: string }` |
 
 `LoadedTable = { name, event, purpose, rowsInFile, rowsLoaded }`.
@@ -182,10 +183,12 @@ listeners per type.
 ```
 instrumentation                      (wrapper — spans the whole ① phase)
   profile                            output: field stats + newFields
+  context_load                       output.summary: entities count, byCategory, updatedEntries
   schema_reconciliation              output: liveTables, documentedNotLive, liveNotDocumented
   ddl_generation_attempt_N           N = 1.. (step_error ⇒ another attempt follows)
+  dry_run_attempt_N                  ClickHouse EXPLAIN-parses every statement pre-gate
   approval_attempt_N                 (the gate; approval_request/result events bracket it)
-  ddl_execution_attempt_N            output: LoadedTable[] (execute + load + verify)
+  ddl_execution_attempt_N            output: LoadedTable[]; emits per-statement log events
 context_update                       (wrapper — spans the whole ② phase)
   update_generation_attempt_N
   update_approval_attempt_N
@@ -219,6 +222,21 @@ endpoint; the server knows which gate is pending.
 (free-text; use the user's name/handle). UI for reject = "Request changes" box.
 
 ---
+
+## [LIVE] GET /api/specs — the "start from a sample spec" list
+
+`200 [{ id, specDir, events, eventTypes, alreadyInstrumented }]` — pass `specDir`
+straight to POST /api/runs. `alreadyInstrumented` disables the Use button.
+
+## [LIVE] GET /api/history — runs that survive restarts (from runs_log)
+
+`200 [{ run_id, spec, started, finished, last_status, events }]`, newest first.
+
+## [LIVE] GET /api/history/:runId — full decision record of a past run
+
+`200 StoredEvent[]` — same shapes as the SSE stream; renders the report view
+(executed DDL from approval_request, approver identity from approval_result,
+rationale, context diff) without the run being in memory. `404` if unknown.
 
 ## [LIVE] GET /api/context — the Context Browser's main list
 

@@ -14,6 +14,9 @@
  *   GET  /api/context/:entity/history     full version history for one entity
  */
 import express from "express";
+import { readdir, readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { RunManager, type StoredEvent } from "./runs.js";
 import { query } from "../core/db.js";
 import { env } from "../core/env.js";
@@ -89,6 +92,75 @@ app.post("/api/runs/:id/approve", (req, res) => {
   } catch (error) {
     res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
   }
+});
+
+/** Sample specs from the repo's specs/ dir — the "start from a sample" list. */
+app.get("/api/specs", async (_req, res) => {
+  const specsRoot = fileURLToPath(new URL("../../../specs", import.meta.url));
+  const instrumented = new Set(
+    (
+      await query<{ s: string }>(
+        `SELECT DISTINCT source_spec AS s FROM context_store`,
+      )
+    ).map((r) => r.s),
+  );
+  const dirs = (await readdir(specsRoot, { withFileTypes: true }))
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name)
+    .sort();
+  const specs = await Promise.all(
+    dirs.map(async (dir) => {
+      const nd = await readFile(path.join(specsRoot, dir, "events.ndjson"), "utf-8");
+      const lines = nd.split("\n").filter((l) => l.trim());
+      const eventTypes = new Set<string>();
+      for (const line of lines) {
+        try {
+          eventTypes.add(String((JSON.parse(line) as { event?: string }).event ?? ""));
+        } catch { /* skip bad lines */ }
+      }
+      return {
+        id: dir,
+        specDir: `../specs/${dir}`,
+        events: lines.length,
+        eventTypes: eventTypes.size,
+        alreadyInstrumented: instrumented.has(dir),
+      };
+    }),
+  );
+  res.json(specs);
+});
+
+/** History that survives restarts — reconstructed from runs_log. */
+app.get("/api/history", async (_req, res) => {
+  const rows = await query<{
+    run_id: string; spec: string; started: string; finished: string;
+    last_status: string; events: string;
+  }>(`
+    SELECT run_id, any(spec) AS spec,
+           toString(min(ts)) AS started, toString(max(ts)) AS finished,
+           argMax(name, seq * (type = 'status')) AS last_status,
+           toString(count()) AS events
+    FROM runs_log GROUP BY run_id ORDER BY started DESC
+  `);
+  res.json(rows.map((r) => ({ ...r, events: Number(r.events) })));
+});
+
+/** Full decision record of one past run (replay source for the report view). */
+app.get("/api/history/:runId", async (req, res) => {
+  const id = req.params.runId.replace(/'/g, "''");
+  const rows = await query<{
+    seq: string; ts: string; type: string; name: string; payload: string;
+  }>(`
+    SELECT toString(seq) AS seq, toString(ts) AS ts, type, name, payload
+    FROM runs_log WHERE run_id = '${id}' ORDER BY seq ASC
+  `);
+  if (rows.length === 0) return res.status(404).json({ error: "unknown run" });
+  res.json(
+    rows.map((r) => ({
+      seq: Number(r.seq), ts: r.ts, type: r.type, name: r.name,
+      payload: JSON.parse(r.payload) as unknown,
+    })),
+  );
 });
 
 app.get("/api/context", async (_req, res) => {

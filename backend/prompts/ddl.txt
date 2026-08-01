@@ -35,7 +35,7 @@ Fields NOT part of the standard platform envelope (event-specific or new): {{new
 # Output
 STRICT JSON only — no prose outside the JSON, no markdown fences:
 {
-  "reasoning": "why these tables/types/ordering keys — cite the measured stats that drove each decision, and flag anything surprising",
+  "reasoning": "markdown with EXACTLY these ## sections: '## Ordering keys', '## Partitioning', '## Types & codecs', '## Deviations & flags'. In each, cite the measured stats that drove the decision; in Deviations & flags, note anything that contradicts documented conventions (the Context Agent reads this)",
   "tables": [
     { "name": "<event_name>", "event": "<event_name>", "purpose": "<one line: what this table holds and its role in the feature>", "ddl": "CREATE TABLE <event_name> (...) ENGINE = MergeTree PARTITION BY toYYYYMM(timestamp) ORDER BY (...)" }
   ]

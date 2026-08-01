@@ -23,10 +23,16 @@ Instrumentation agent's reasoning (verbatim):
 
 Every entry requires a change_note — for new entries, one line on why it exists.
 
+If anything the instrumentation learned CONTRADICTS the existing context (a documented
+column that doesn't exist, a convention the new tables violate, a definition proven wrong),
+also emit a one-line warning per contradiction in a top-level "warnings" array. Omit the
+array when there are none — never fabricate a contradiction.
+
 # Output — STRICT JSON only, no prose outside it, no markdown fences
 {
   "entries": [
     { "entity": "table:express_checkout_shown", "definition_md": "...", "change_note": "..." }
-  ]
+  ],
+  "warnings": ["group_* tables lack the duplicate_id/is_back_filled hygiene columns documented as universal"]
 }
 Allowed entity namespaces: table: spec: metric: funnel: entity: convention: known_issue:

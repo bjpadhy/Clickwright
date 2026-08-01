@@ -13,8 +13,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { command, insert, rowCount } from "../core/db.js";
-import { step, scoreRun, type Ctx } from "../core/tracing.js";
+import { command, insert, query, rowCount } from "../core/db.js";
+import { step, scoreRun, emitRunEvent, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import { profileRecords, profileSummary } from "../core/profiler.js";
 import { getContext, reconcileWithLive } from "./context.js";
@@ -164,7 +164,21 @@ export async function runInstrumentation(
     );
 
     // ── context via the Context Agent only ──
-    const bundle = await getContext({ include: ["table"] });
+    const bundle = await step(span, "context_load", {}, async () => {
+      const b = await getContext({ include: ["table"] });
+      const byCat = new Map<string, number>();
+      for (const e of b.entries) {
+        const cat = e.entity.split(":")[0] ?? "";
+        byCat.set(cat, (byCat.get(cat) ?? 0) + 1);
+      }
+      return Object.assign(b, {
+        summary: {
+          entities: b.entries.length,
+          byCategory: Object.fromEntries(byCat),
+          updatedEntries: b.entries.filter((e) => e.version > 1).map((e) => `${e.entity} v${e.version}`),
+        },
+      });
+    });
     const recon = await step(span, "schema_reconciliation", {}, () =>
       reconcileWithLive(),
     );
@@ -227,6 +241,20 @@ export async function runInstrumentation(
             return parsed;
           },
         );
+
+        // dry-run: ClickHouse parses every statement BEFORE a human reads it.
+        // command() (not query()) — EXPLAIN returns plain text, not JSON rows.
+        await step(
+          span,
+          `dry_run_attempt_${attempt}`,
+          { tables: proposal.tables.map((t) => t.name) },
+          async () => {
+            for (const table of proposal.tables) {
+              await command(`EXPLAIN AST ${table.ddl}`);
+            }
+            return { passed: proposal.tables.length };
+          },
+        );
       } catch (error) {
         feedback = `Your output was rejected before execution: ${error instanceof Error ? error.message : String(error)}`;
         continue;
@@ -254,16 +282,28 @@ export async function runInstrumentation(
           async () => {
             const results: LoadedTable[] = [];
             for (const table of proposal.tables) {
+              const t0 = Date.now();
               await command(table.ddl);
               created.push(table.name);
+              emitRunEvent({
+                type: "log",
+                name: "ddl_statement",
+                payload: { statement: `CREATE TABLE ${table.name}`, ok: true, ms: Date.now() - t0 },
+              });
             }
             for (const table of proposal.tables) {
+              const t0 = Date.now();
               const records = groups.get(table.event) ?? [];
               const flat = records.map(flattenRow);
               for (let i = 0; i < flat.length; i += 5000) {
                 await insert(table.name, flat.slice(i, i + 5000));
               }
               const loadedCount = await rowCount(table.name);
+              emitRunEvent({
+                type: "log",
+                name: "data_load",
+                payload: { table: table.name, rows: loadedCount, ok: loadedCount === records.length, ms: Date.now() - t0 },
+              });
               if (loadedCount !== records.length) {
                 throw new Error(
                   `Row count mismatch for ${table.name}: file has ${records.length}, table has ${loadedCount}`,

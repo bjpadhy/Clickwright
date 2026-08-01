@@ -59,6 +59,7 @@ export class RunManager {
     await command(`
       CREATE TABLE IF NOT EXISTS runs_log (
         run_id  String,
+        spec    String,
         seq     UInt32,
         ts      DateTime64(3),
         type    LowCardinality(String),
@@ -67,6 +68,7 @@ export class RunManager {
       ) ENGINE = MergeTree ORDER BY (run_id, seq)
       COMMENT 'Clickwright run events — powers the UI live stepper, replay, and history'
     `);
+    await command(`ALTER TABLE runs_log ADD COLUMN IF NOT EXISTS spec String AFTER run_id`);
   }
 
   list(): Array<Omit<RunRecord, "events" | "subscribers" | "resolveApproval">> {
@@ -141,6 +143,7 @@ export class RunManager {
     insert("runs_log", [
       {
         run_id: run.id,
+        spec: run.spec,
         seq: stored.seq,
         ts: stored.ts.replace("T", " ").replace("Z", ""),
         type: stored.type,
@@ -202,7 +205,7 @@ export class RunManager {
       });
 
       const specText = await readFile(path.join(run.specDir, "spec.md"), "utf-8");
-      const entries = await updateContext(
+      const ctx = await updateContext(
         {
           specName: run.spec,
           specText,
@@ -222,14 +225,16 @@ export class RunManager {
         {
           status: "success",
           tables: instr.tables.map((t) => `${t.name} (${t.rowsLoaded} rows)`),
-          contextEntries: entries.map((e) => `${e.entity} v${e.version}`),
+          contextEntries: ctx.entries.map((e) => `${e.entity} v${e.version}`),
+          contextWarnings: ctx.warnings,
           instrumentationAttempts: instr.attempts,
         },
         { spec: run.spec, runId: run.id },
       );
       this.status(run, "succeeded", {
         tables: instr.tables,
-        contextEntries: entries.map((e) => ({ entity: e.entity, version: e.version })),
+        contextEntries: ctx.entries.map((e) => ({ entity: e.entity, version: e.version })),
+        contextWarnings: ctx.warnings,
         traceUrl: run.traceUrl,
       });
     } catch (error) {

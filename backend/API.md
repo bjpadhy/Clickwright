@@ -189,14 +189,20 @@ seven event types (they are named events, so plain `onmessage` will NOT fire).
 | type | name | payload |
 |---|---|---|
 | `step_start` | step name (below) | `{ input: object }` |
-| `step_end` | step name | `{ output: object }` — strings >2000 chars clipped with `…[clipped]` |
-| `step_error` | step name | `{ error: string }` — verbatim failure, feeds the retry |
-| `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ tables: LoadedTable[], contextEntries: {entity, version}[], contextWarnings: string[], traceUrl }`; `failed` → `{ error }` |
+| `step_end` | step name | `{ output: object, elapsedMs }` — strings >2000 chars clipped with `…[clipped]` |
+| `step_error` | step name | `{ error: string, elapsedMs }` — verbatim failure, feeds the retry |
+| `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ durationMs, tables: LoadedTable[], contextEntries: {entity, version}[], contextWarnings: string[], traceUrl }`; `failed` → `{ durationMs, error, resetHint }` |
 | `approval_request` | `"ddl"` \| `"context"` | `{ proposal: DdlProposal \| ContextProposal }` — ContextProposal may carry `warnings: string[]` (the "contradiction surfaced" chips) |
 | `log` | `"ddl_statement"` \| `"data_load"` | `{ statement?, table?, rows?, ok, ms }` — per-statement execution progress |
 | `approval_result` | gate | `{ approved: boolean, feedback: string, identity: string }` |
 
 `LoadedTable = { name, event, purpose, rowsInFile, rowsLoaded }`.
+
+**Timing.** Show `durationMs` from the run (or the terminal `status` event) as the
+elapsed time — it is measured from the start of execution to the terminal state and
+includes time spent waiting at the human gates. Per-step `elapsedMs` values are for
+the stepper only: **never sum them for a total**, because concurrent steps
+(per-table DDL, per-task SQL) overlap and would double-count.
 
 ### Step names, in order (the Run screen's stepper)
 
@@ -253,7 +259,9 @@ straight to POST /api/runs. `alreadyInstrumented` disables the Use button.
 
 ## [LIVE] GET /api/history — runs that survive restarts (from runs_log)
 
-`200 [{ run_id, spec, started, finished, last_status, events }]`, newest first.
+`200 [{ run_id, spec, started, finished, last_status, events, durationMs }]`, newest
+first. `durationMs` is the end-to-end wall clock reconstructed from the persisted
+events.
 
 ## [LIVE] GET /api/history/:runId — full decision record of a past run
 

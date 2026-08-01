@@ -40,6 +40,7 @@ Code OAuth login (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` in `backend
 | `npm run typecheck` | `tsc --noEmit` |
 | `npx tsx scripts/run-instrumentation.ts ../specs/01_express_checkout --yes` | Run a spec from the CLI (`--yes` auto-approves both gates) |
 | `npx tsx scripts/reset-spec.ts <spec…> \| --all-specs` | Drop a spec's tables and roll back its context rows |
+| `npx tsx scripts/reset-spec.ts --orphans` | Sweep tables left by a run that failed before writing context |
 | `npx tsx scripts/apply-audit-context.ts` | Apply the base-data audit corrections |
 | `npx tsx scripts/apply-ordering-finding.ts` | Apply the event-ordering finding |
 | `npx tsx scripts/comment-tables.ts` | Project context knowledge onto base tables as ClickHouse COMMENTs |

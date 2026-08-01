@@ -70,6 +70,11 @@ export interface RunRecord {
   specDir: string;
   /** Set only when kind === "optimization". */
   suggestionId: string | null;
+  /** Wall-clock of the whole run: set when execution starts, not when queued. */
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** Total end-to-end milliseconds, gates and all — the number the UI shows. */
+  durationMs: number | null;
 }
 
 const UPLOADS = fileURLToPath(new URL("../../uploads", import.meta.url));
@@ -159,6 +164,9 @@ export class RunManager {
       resolveApproval: null,
       specDir,
       suggestionId,
+      startedAt: null,
+      finishedAt: null,
+      durationMs: null,
     };
     this.runs.set(record.id, record);
     this.queue.push(record);
@@ -247,6 +255,7 @@ export class RunManager {
    * view this is just a run whose gate happens to be "optimization".
    */
   private async executeOptimization(run: RunRecord, trace: ReturnType<typeof startRun>): Promise<void> {
+    const startedMs = run.startedAt ? Date.parse(run.startedAt) : Date.now();
     try {
       const suggestion = run.suggestionId ? await findSuggestion(run.suggestionId) : null;
       if (!suggestion) throw new Error(`suggestion ${run.suggestionId} no longer exists`);
@@ -271,7 +280,10 @@ export class RunManager {
         },
         { kind: "optimization", runId: run.id },
       );
+      run.finishedAt = new Date().toISOString();
+      run.durationMs = Date.now() - startedMs;
       this.status(run, "succeeded", {
+        durationMs: run.durationMs,
         statements: result.statements,
         expectedEffect: result.expectedEffect,
         traceUrl: run.traceUrl,
@@ -294,6 +306,8 @@ export class RunManager {
       { sessionId: run.spec },
     );
     run.traceUrl = traceUrl(trace);
+    run.startedAt = new Date().toISOString();
+    const startedMs = Date.now();
     setRunSink((e) => this.push(run, e));
     this.status(run, "running", { traceUrl: run.traceUrl });
 
@@ -347,7 +361,10 @@ export class RunManager {
         },
         { spec: run.spec, runId: run.id },
       );
+      run.finishedAt = new Date().toISOString();
+      run.durationMs = Date.now() - startedMs;
       this.status(run, "succeeded", {
+        durationMs: run.durationMs,
         tables: instr.tables,
         contextEntries: ctx.entries.map((e) => ({ entity: e.entity, version: e.version })),
         contextWarnings: ctx.warnings,
@@ -356,7 +373,10 @@ export class RunManager {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       endRun(trace, { status: "failed", error: message }, { spec: run.spec, runId: run.id });
+      run.finishedAt = new Date().toISOString();
+      run.durationMs = Date.now() - startedMs;
       this.status(run, "failed", {
+        durationMs: run.durationMs,
         error: message,
         // A failure after the tables were created leaves them in place but
         // undocumented; the UI should offer a reset rather than a bare retry,

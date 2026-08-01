@@ -123,16 +123,27 @@ export async function step<T>(
   fn: (span: LangfuseSpanClient) => Promise<T>,
 ): Promise<T> {
   const span = parent.span({ name, input });
+  const t0 = Date.now();
   emitRunEvent({ type: "step_start", name, payload: { input: clip(input) } });
   try {
     const output = await fn(span);
     span.end({ output: output as object });
-    emitRunEvent({ type: "step_end", name, payload: { output: clip(output) } });
+    // elapsedMs on every step: nested steps overlap (tasks run concurrently), so
+    // the UI must use the run's own durationMs for the total, never a sum of these.
+    emitRunEvent({
+      type: "step_end",
+      name,
+      payload: { output: clip(output), elapsedMs: Date.now() - t0 },
+    });
     return output;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     span.end({ level: "ERROR", statusMessage: message });
-    emitRunEvent({ type: "step_error", name, payload: { error: message } });
+    emitRunEvent({
+      type: "step_error",
+      name,
+      payload: { error: message, elapsedMs: Date.now() - t0 },
+    });
     throw error;
   }
 }

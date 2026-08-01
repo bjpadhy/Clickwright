@@ -162,10 +162,18 @@ app.get("/api/history", async (_req, res) => {
            -- non-status rows must weigh LESS than any status row, otherwise ties
            -- make argMax return a step name (e.g. "profile") as the status
            argMax(name, if(type = 'status', toInt64(seq) + 1, -1)) AS last_status,
-           toString(count()) AS events
+           toString(count()) AS events,
+           -- end-to-end wall clock of the run, gates included
+           toString(dateDiff('millisecond', min(ts), max(ts))) AS durationMs
     FROM runs_log GROUP BY run_id ORDER BY started DESC
   `);
-  res.json(rows.map((r) => ({ ...r, events: Number(r.events) })));
+  res.json(
+    rows.map((r) => ({
+      ...r,
+      events: Number(r.events),
+      durationMs: Number((r as unknown as { durationMs: string }).durationMs),
+    })),
+  );
 });
 
 /** Full decision record of one past run (replay source for the report view). */

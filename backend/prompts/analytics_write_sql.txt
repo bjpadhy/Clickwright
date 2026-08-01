@@ -17,8 +17,8 @@ listed here does not exist.
 {{feedback}}
 <rules>
 1. ONE statement, starting with SELECT or WITH. No semicolon, no trailing comment.
-2. Aggregate in the database: GROUP BY plus count/uniqExact/avg/quantile. The result is
-   a summary of at most a few hundred rows, never raw events.
+2. Aggregate in the database: GROUP BY plus count/uniq/avg/quantile. The result is a
+   summary of at most a few hundred rows, never raw events.
 3. Put a sample-size column (n, users, sessions…) beside every rate, so a reader can see
    when a rate rests on 12 rows.
 4. If the task compares anything — A vs B, best vs worst, lift, gap, change over time —
@@ -28,15 +28,51 @@ listed here does not exist.
    exactly as that line says — referencing duplicate_id on a table without it is a
    hard query failure, not a style issue. Bucket `os` as the conventions specify.
 6. Never aggregate money across currencies without grouping by currency.
-7. Rates as fractions 0..1 named `*_rate`; snake_case aliases throughout; `uniqExact`
-   for entity counts.
+7. Rates as fractions 0..1 named `*_rate`; snake_case aliases throughout.
 </rules>
+
+<performance>
+These decide whether the query reads a granule or the whole table. They come from
+ClickHouse's official best-practice rules; the named rule is given so you can cite it.
+
+**One scan per table.** Never read the same table twice to slice it differently — no
+UNION ALL of near-identical subqueries, no repeated scalar subqueries over the same
+source. Compute every variant in a single pass with conditional aggregation:
+
+    -- WRONG: three scans of the same table
+    SELECT 'ios' AS seg, count() FROM t WHERE os='iOS'
+    UNION ALL SELECT 'android', count() FROM t WHERE os='Android'
+    UNION ALL SELECT 'all', count() FROM t
+    -- RIGHT: one scan
+    SELECT countIf(os='iOS') AS ios, countIf(os='Android') AS android, count() AS all FROM t
+
+UNION ALL is only appropriate across genuinely DIFFERENT tables (e.g. one funnel stage
+per table), and then each table must appear exactly once.
+
+**Filter before joining** (`query-join-filter-before`). Restrict each side in a subquery
+first; joining full tables and filtering afterwards reads everything.
+
+**Join deliberately** (`query-join-use-any`). ClickHouse loads the RIGHT side into
+memory, so put the SMALLER relation on the right. When one match per row suffices —
+looking a row up rather than fanning out — use `LEFT ANY JOIN`, which stops at the
+first match. Prefer aggregating each side to one row per key before joining.
+
+**Let the index prune** (`schema-pk-filter-on-orderby`). Filter on the leading ORDER BY
+columns shown in the schema block; a predicate that skips the prefix forces a full scan.
+Put those filters in WHERE, not in HAVING.
+
+**Sizing.** `uniqExact` is exact but expensive; on tables of millions of rows use `uniq`
+(approximate, ~1% error) unless the task needs an exact figure — say which you used in
+the column name if it matters. Never `SELECT *`. Never `FINAL`.
+</performance>
 
 <avoid>
 - A column, table or alias absent from the schema block.
-- SELECT * or any raw-row dump.
+- Reading one table more than once in the same query.
+- SELECT *, FINAL, or any raw-row dump.
 - Ordering funnel stages by timestamp — the conventions explain why that is unsafe here.
 - CTEs or window functions where a plain GROUP BY does the job.
+- A SETTINGS clause: the server applies read-only mode, row and time caps itself.
 </avoid>
 
 If the task cannot be computed from these columns — a field it needs does not exist,

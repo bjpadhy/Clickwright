@@ -182,14 +182,26 @@ function schemaSubset(all: Map<string, string>, tables: string[]): string {
 const BANNED =
   /\b(insert|alter|drop|create|truncate|delete|rename|grant|revoke|attach|detach|optimize|system|kill|set|settings)\b/i;
 
+/** Aggregates return summaries; anything larger is a row dump we do not want to
+ * ship to the model or the browser. The server cannot enforce this for us —
+ * ClickHouse Cloud pins this user to readonly=1, which discards row-limit
+ * settings — so the cap lives here. */
+const MAX_RESULT_ROWS = 1000;
+
 export function guardSql(raw: string): string {
-  const sql = stripFences(raw).trim().replace(/;+\s*$/, "");
+  let sql = stripFences(raw).trim().replace(/;+\s*$/, "");
   if (sql.includes(";")) throw new Error("exactly one statement allowed (found ';')");
   if (!/^(select|with)\b/i.test(sql)) throw new Error("statement must start with SELECT or WITH");
   if (BANNED.test(sql)) {
     throw new Error(`banned keyword in SQL: ${BANNED.exec(sql)?.[0]}`);
   }
-  return /\blimit\s+\d+/i.test(sql) ? sql : `${sql}\nLIMIT 1000`;
+  const limit = /\blimit\s+(\d+)\s*$/i.exec(sql);
+  if (!limit) return `${sql}\nLIMIT ${MAX_RESULT_ROWS}`;
+  // clamp an oversized explicit LIMIT rather than rejecting an otherwise good query
+  if (Number(limit[1]) > MAX_RESULT_ROWS) {
+    sql = sql.slice(0, limit.index) + `LIMIT ${MAX_RESULT_ROWS}`;
+  }
+  return sql;
 }
 
 // ── citation checker: every number in prose must exist in results ──

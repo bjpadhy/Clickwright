@@ -382,6 +382,13 @@ export interface ChatMessage {
 }
 ```
 
+**Query safety.** Generated SQL is read-only by construction: the guard rejects
+anything that is not a single SELECT/WITH, strips banned keywords, and clamps any
+LIMIT above 1000; the server runs it with `readonly=1` and a 30s execution cap.
+(ClickHouse Cloud pins this user to `readonly=1`, which discards row-limit settings,
+so the row cap is enforced in the guard rather than as a server setting — verified
+against `system.settings`.)
+
 **Number guarantees** (worth surfacing in the UI): every number in an Insight
 either appears in one of the attached `sql` results or is a code-verified
 difference/ratio of two such numbers. SQL runs read-only (`readonly=1`), so chat

@@ -83,6 +83,13 @@ site cannot silently drift.
 Table purposes are parsed from each spec's own event descriptions, so no prompt is
 needed for them.
 
+`analytics_write_sql.txt` carries the query rules from the same official set —
+one scan per table (conditional aggregation instead of UNION ALL over the same
+source), filter before joining, `LEFT ANY JOIN` when one match suffices, filter on the
+leading ORDER BY columns so the index prunes, and `uniq` over `uniqExact` on large
+tables. Safety limits are enforced in code, not asked of the model: the guard clamps
+LIMIT and the server applies a 30s cap.
+
 `instrument_design_table.txt` distils the schema rules from ClickHouse's official
 [agent-skills](https://github.com/ClickHouse/agent-skills) best-practices set —
 immutable ordering keys, cardinality-ordered keys, filter prioritisation, native and

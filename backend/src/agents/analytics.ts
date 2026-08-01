@@ -16,6 +16,8 @@ import { withQueryContext } from "../core/query-context.js";
 import { step, scoreRun, recordQuery, emitRunEvent, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import { getContext, lookupContext, reconcileWithLive } from "./context.js";
+import { precisionForRow, deriveConfidence, type Precision } from "../core/precision.js";
+import { verifyTask, type VerificationResult } from "./verifier.js";
 
 // ── answer cache ────────────────────────────────────────────────
 // A question whose wording and context version are unchanged has the same
@@ -75,7 +77,21 @@ export interface Insight {
     /** Per-column render hint, parallel to `columns`. */
     columnFormats?: string[] | undefined;
   };
+  /** COMPUTED from measured precision and checks — never the model's opinion. */
   confidence: { value: "high" | "medium" | "low"; note: string };
+  /** Per-figure 95% bounds, or a stated reason none could be computed. */
+  precision: Precision[];
+  /** Result of recomputing a figure with an independently written query. */
+  verification: {
+    agreed: boolean | null;
+    originalValue: number | null;
+    verifiedValue: number | null;
+    sql: string;
+    note: string;
+    concern: string;
+    definitionOk: boolean;
+    answersQuestion: boolean;
+  } | null;
   contextVersion: string;
   sql: Array<{ task: string; title: string; query: string; rowCount: number }>;
   /** True when served from insight_cache (no LLM calls, ~ms). */
@@ -128,10 +144,9 @@ const NarrationSchema = z.object({
     })
     .nullish()
     .transform((v) => v ?? null),
-  confidence: z.object({
-    value: z.enum(["high", "medium", "low"]),
-    note: z.string().min(1),
-  }),
+  // No confidence field: the level is computed from measured precision, and asking
+  // the model for one only invites a plausible-sounding guess. Uncertainty belongs
+  // in a `caveat` finding, which it does emit.
 });
 type Narration = z.infer<typeof NarrationSchema>;
 
@@ -508,6 +523,8 @@ export async function runAnalytics(
         chart: null,
         segmentTable: null,
         confidence: { value: "low", note: "no queryable data for this question" },
+        precision: [],
+        verification: null,
         contextVersion,
         sql: [],
       };
@@ -575,12 +592,66 @@ export async function runAnalytics(
     const failedTasks = results.filter((r) => r.dropped);
     const sanityNotes = [...notes, ...failedTasks.map((r) => `task ${r.id}: ${r.dropped}`)];
 
+    // ── independent verification ──
+    // One task only: the cost is a full LLM call plus a query, and the figure a
+    // reader acts on is the headline one. Skipped when nothing usable survived.
+    const toVerify = kept.find((r) => r.rows.length > 0);
+    const verification: VerificationResult | null = toVerify
+      ? await verifyTask(
+          span,
+          {
+            question: input.question,
+            taskTitle: toVerify.title,
+            taskQuestion: plan.tasks.find((t) => t.id === toVerify.id)?.question ?? toVerify.title,
+            sql: toVerify.sql,
+            rows: toVerify.rows as Record<string, unknown>[],
+            definitions: bundle.markdown,
+            schemas: schemaSubset(schemas, plan.tasks.find((t) => t.id === toVerify.id)?.tables ?? []),
+          },
+          guardSql,
+          llm,
+        ).catch(() => null)
+      : null;
+
     // ── knowledge lookup for the "why" ──
     const digest = kept
       .map((r) => `${r.title}: ${JSON.stringify(r.rows.slice(0, 3))}`)
       .join("\n")
       .slice(0, 1500);
     const lookup = await lookupContext(span, `${input.question}\n${digest}`, opts.llm);
+
+    // ── computed precision, replacing the model's self-assessment ──
+    const precision: Precision[] = await step(span, "precision", {}, async () => {
+      const out: Precision[] = [];
+      for (const r of kept) {
+        for (const row of r.rows.slice(0, NARRATION_ROWS)) {
+          out.push(...precisionForRow(row as Record<string, unknown>, r.sql));
+        }
+      }
+      // one entry per column: keep the WIDEST interval, since that is the figure
+      // a reader should be most careful with
+      const byColumn = new Map<string, Precision>();
+      for (const p of out) {
+        const prev = byColumn.get(p.column);
+        const wider =
+          !prev ||
+          (p.interval && prev.interval && p.interval.halfWidthPp > prev.interval.halfWidthPp) ||
+          (!prev.interval && !!p.interval);
+        if (wider) byColumn.set(p.column, p);
+      }
+      return [...byColumn.values()];
+    });
+
+    const precisionText =
+      precision.length === 0
+        ? "(no rate or average figures in these results)"
+        : precision
+            .map((p) =>
+              p.interval
+                ? `${p.column} = ${p.value} — 95% CI [${p.interval.lo.toFixed(4)}, ${p.interval.hi.toFixed(4)}] (±${p.interval.halfWidthPp.toFixed(1)}pp, n=${p.n})`
+                : `${p.column} = ${p.value} — precision NOT computable: ${p.note}`,
+            )
+            .join("\n");
 
     // ── narrate → citation check → (maybe) quality revision ──
     const resultsText = kept
@@ -635,6 +706,7 @@ export async function runAnalytics(
               results: resultsText || "(all tasks failed — say so honestly)",
               sanity: sanityNotes.join("\n") || "(clean)",
               method: methodNotes || "(no queries succeeded)",
+              precision: precisionText,
               lookup: lookup.markdown || "(nothing relevant retrieved)",
               context_version: contextVersion,
               history: input.history?.length ? `\n# Conversation so far\n${historyText}\n` : "",
@@ -671,13 +743,12 @@ export async function runAnalytics(
     }
     if (!narration) throw new Error("unreachable: narration missing");
 
-    // code-enforced confidence cap — the LLM can't self-award "high"
-    if ((sanityNotes.length > 0 || citationFailures > 0) && narration.confidence.value === "high") {
-      narration.confidence = {
-        value: "medium",
-        note: `capped by gate: ${sanityNotes[0] ?? "citation retries occurred"}`,
-      };
-    }
+    const confidence = deriveConfidence({
+      precisions: precision,
+      sanityFlags: sanityNotes.length,
+      citationRetries: citationFailures,
+      verificationAgreed: verification?.agreed ?? null,
+    });
 
     // ── quality gate ──
     // Skip the call when the deterministic checks all passed and the narration
@@ -713,6 +784,7 @@ export async function runAnalytics(
           results: resultsText || "(all tasks failed)",
           sanity: sanityNotes.join("\n") || "(clean)",
           method: methodNotes || "(no queries succeeded)",
+          precision: precisionText,
           lookup: lookup.markdown || "(nothing relevant retrieved)",
           context_version: contextVersion,
           history: "",
@@ -742,6 +814,20 @@ export async function runAnalytics(
 
     const insight: Insight = {
       ...narration,
+      confidence,
+      precision,
+      verification: verification
+        ? {
+            agreed: verification.agreed,
+            originalValue: verification.originalValue,
+            verifiedValue: verification.verifiedValue,
+            sql: verification.sql,
+            note: verification.note,
+            concern: verification.concern,
+            definitionOk: verification.definitionOk,
+            answersQuestion: verification.answersQuestion,
+          }
+        : null,
       contextVersion,
       sql: results.map((r) => ({
         task: r.id,
@@ -755,7 +841,7 @@ export async function runAnalytics(
         {
           cache_key: key,
           question: input.question,
-          context_key: contextVersion,
+          context_key: contextKey,
           insight_json: JSON.stringify(insight),
           created_at: new Date().toISOString().replace("T", " ").replace("Z", ""),
         },
@@ -767,17 +853,17 @@ export async function runAnalytics(
     scoreRun(span, "sanity_flags", sanityNotes.length);
     scoreRun(span, "citation_failures", citationFailures);
     scoreRun(span, "quality_gate_passed", quality.verdict === "pass" ? 1 : 0);
+    scoreRun(
+      span,
+      "verification_agreed",
+      verification?.agreed === true ? 1 : verification?.agreed === false ? 0 : -1,
+      verification?.note ?? "no verification run",
+    );
+    const tightest = precision.filter((p) => p.interval).sort((a, b) => a.interval!.halfWidthPp - b.interval!.halfWidthPp)[0];
+    if (tightest) scoreRun(span, "precision_half_width_pp", tightest.interval!.halfWidthPp);
+    scoreRun(span, "confidence_computed", confidence.value === "high" ? 2 : confidence.value === "medium" ? 1 : 0, confidence.note);
 
-    return {
-      ...narration,
-      contextVersion,
-      sql: results.map((r) => ({
-        task: r.id,
-        title: r.title,
-        query: r.sql,
-        rowCount: r.rows.length,
-      })),
-    };
+    return insight;
    }),
   );
 }

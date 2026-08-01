@@ -403,7 +403,26 @@ export interface Insight {
     columns: string[]; rows: Array<Array<string | number>>; sourceTask: string;
     columnFormats?: Array<ValueFormat | "text">;   // parallel to `columns`
   };
-  confidence: { value: "high" | "medium" | "low"; note: string };  // capped by code when gates flag
+  // COMPUTED in code, never the model's opinion — see "Confidence" below
+  confidence: { value: "high" | "medium" | "low"; note: string };
+  precision: Array<{
+    column: string;
+    kind: "proportion" | "mean" | "quantile" | "ratio" | "count" | "unknown";
+    value: number;
+    n: number | null;                    // denominator; null when none was emitted
+    interval: { lo: number; hi: number; halfWidthPp: number } | null;
+    note: string;                        // why there is no interval, when there isn't
+  }>;
+  verification: null | {
+    agreed: boolean | null;              // null ⇒ inconclusive, NOT passed
+    originalValue: number | null;
+    verifiedValue: number | null;
+    sql: string;                         // the independent query that was run
+    note: string;
+    concern: string;                     // strongest reason the figure might be wrong
+    definitionOk: boolean;               // did the SQL use the documented denominator
+    answersQuestion: boolean;
+  };
   contextVersion: string;                            // e.g. "44 entities · max v2" — the badge
   sql: Array<{ task: string; title: string; query: string; rowCount: number }>;
   cached?: boolean;                                  // true ⇒ served from insight_cache, no LLM ran
@@ -416,6 +435,27 @@ export interface ChatMessage {
   traceUrl?: string;             // role=agent
 }
 ```
+
+**Confidence is computed, not claimed.** The model no longer rates its own answer.
+`confidence.value` is derived from: the widest 95% interval among the reported figures,
+whether the sanity gate flagged anything, whether the narration needed a citation
+retry, and whether an **independently written query reproduced the headline figure**.
+`high` requires a tight interval and a successful verification; a failed verification
+forces `low`.
+
+`precision[]` carries the bounds per figure. Only *proportions* get an interval —
+means need a standard deviation, quantiles need bootstrapping, and unbounded ratios
+(a K-factor, travellers per group) need a different method entirely. For those,
+`interval` is `null` and `note` says why. **Render "precision not computable" rather
+than implying certainty**; an interval we could not compute is never silently omitted.
+Intervals assume independent trials, so they are a lower bound on real uncertainty —
+several events can come from one user.
+
+`verification` is the strongest correctness signal available: a second query, written
+adversarially by a different route, recomputes the figure and the two are compared.
+`agreed: null` means inconclusive — surface it as unverified, never as passed. Show
+`concern` when present even if the numbers agreed; it is the auditor's best argument
+that the figure is wrong.
 
 **Query safety.** Generated SQL is read-only by construction: the guard rejects
 anything that is not a single SELECT/WITH, strips banned keywords, and clamps any

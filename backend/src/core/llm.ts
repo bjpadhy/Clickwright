@@ -98,10 +98,19 @@ export async function loadPrompt(
     template = await readFile(path.join(PROMPT_DIR, `${name}.txt`), "utf8");
     promptCache.set(name, template);
   }
-  return Object.entries(vars).reduce(
+  const rendered = Object.entries(vars).reduce(
     (text, [key, value]) => text.replaceAll(`{{${key}}}`, value),
     template,
   );
+  // An unfilled placeholder means the prompt and its call site have drifted apart;
+  // sending "{{spec}}" to the model would degrade output invisibly.
+  const leftover = [...new Set(rendered.match(/\{\{\w+\}\}/g) ?? [])];
+  if (leftover.length > 0) {
+    throw new Error(
+      `prompt ${name} has unfilled placeholders: ${leftover.join(", ")} — the call site is missing these variables`,
+    );
+  }
+  return rendered;
 }
 
 export type CompleteOptions = {

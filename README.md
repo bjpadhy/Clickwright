@@ -44,6 +44,25 @@ Code OAuth login (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` in `backend
 | `npx tsx scripts/apply-ordering-finding.ts` | Apply the event-ordering finding |
 | `npx tsx scripts/comment-tables.ts` | Project context knowledge onto base tables as ClickHouse COMMENTs |
 
+### Prompts
+
+All prompts live in `backend/prompts/*.txt`, named `<agent>_<action>` — tuning one never
+means editing TypeScript. `shared_system.txt` is prepended to every call.
+`loadPrompt` throws if a `{{placeholder}}` is left unfilled, so a prompt and its call
+site cannot silently drift.
+
+| File | Used by |
+|---|---|
+| `shared_system.txt` | every LLM call (invariants + terseness) |
+| `instrument_table_purposes.txt` | fallback only — purposes are normally parsed from spec.md |
+| `context_write_knowledge.txt` | the interpretive half of a context update |
+| `context_retrieve_relevant.txt` | semantic lookup over the store's index |
+| `analytics_plan_tasks.txt` | question → ≤4 aggregate tasks |
+| `analytics_write_sql.txt` | one task → one guarded query |
+| `analytics_narrate_insight.txt` | verified results → the Insight card |
+| `analytics_review_quality.txt` | quality gate (skipped when code checks pass) |
+| `optimization_scan.txt`, `optimization_ddl.txt` | Observe advisor |
+
 ## How it works
 
 ```

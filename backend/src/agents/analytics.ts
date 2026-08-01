@@ -359,8 +359,7 @@ export async function runAnalytics(
     // ── plan ──
     const plan: Plan = await step(span, "plan", {}, async (planSpan) => {
       const prompt = await loadPrompt("analytics_plan_tasks", {
-        context: bundle.markdown,
-        live_tables: liveTables.join(", "),
+        knowledge: bundle.markdown,
         // planning needs column NAMES to choose tables/dimensions; exact types
         // only matter when writing SQL, so strip them here (~half the tokens)
         schemas: [...schemas.values()]

@@ -1,4 +1,5 @@
 import { Langfuse, type LangfuseTraceClient, type LangfuseSpanClient } from "langfuse";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execSync } from "node:child_process";
 import { env } from "./env.js";
 
@@ -45,10 +46,19 @@ export interface RunEvent {
 }
 
 type RunEventSink = (event: RunEvent) => void;
-let runSink: RunEventSink | null = null;
+
+/** Per-async-context sink so an instrumentation run and a chat answer can
+ * stream concurrently without stealing each other's events. */
+const sinkStore = new AsyncLocalStorage<RunEventSink>();
+let runSink: RunEventSink | null = null; // legacy global (instrumentation runs)
 
 export function setRunSink(sink: RunEventSink | null): void {
   runSink = sink;
+}
+
+/** Run `fn` with its own event sink — events emitted inside go only to it. */
+export function withRunSink<T>(sink: RunEventSink, fn: () => Promise<T>): Promise<T> {
+  return sinkStore.run(sink, fn);
 }
 
 const clip = (v: unknown): unknown => {
@@ -59,7 +69,9 @@ const clip = (v: unknown): unknown => {
 };
 
 export function emitRunEvent(event: RunEvent): void {
-  runSink?.(event);
+  const scoped = sinkStore.getStore();
+  if (scoped) scoped(event);
+  else runSink?.(event);
 }
 
 export function startRun(

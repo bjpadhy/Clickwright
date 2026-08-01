@@ -14,6 +14,9 @@ New non-envelope fields observed: {{new_fields}}
 Instrumentation agent's reasoning (verbatim):
 {{reasoning}}
 {{feedback}}
+# YOUR SCOPE FOR THIS RESPONSE
+{{scope}}
+
 # Task — propose entries
 1. One `table:<name>` entry per created table: purpose, key event-specific columns and their meanings, the join keys, and any gotchas (carry them over from the reasoning — e.g. id format deviations, empty-string quirks, currency traps). Match the style and depth of the existing table entries.
 2. One `spec:<spec_name>` entry: 5–8 lines distilling the feature — what it is, its event funnel in order, the PM's questions verbatim or tightly paraphrased, and anything analytics must know to answer them.

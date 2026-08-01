@@ -10,7 +10,7 @@
  * SQL runs through queryReadonly (ClickHouse readonly=1) after code guards.
  */
 import { z } from "zod";
-import { queryReadonly } from "../core/db.js";
+import { query, queryReadonly } from "../core/db.js";
 import { withQueryContext } from "../core/query-context.js";
 import { step, scoreRun, recordQuery, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
@@ -97,6 +97,19 @@ const QualitySchema = z.object({
   verdict: z.enum(["pass", "revise"]),
   revision_note: z.string(),
 });
+
+/** Exact column names+types per table. Injected into plan/SQL prompts: the
+ * single biggest accuracy win — the model stops guessing column names, which
+ * also removes most retry rounds (so it is a latency win too). */
+async function tableSchemas(): Promise<string> {
+  const rows = await query<{ table: string; cols: string }>(`
+    SELECT table, arrayStringConcat(groupArray(concat(name, ' ', type)), ', ') AS cols
+    FROM system.columns
+    WHERE database = currentDatabase() AND table NOT IN ('context_store', 'runs_log', 'conversations', 'messages')
+    GROUP BY table ORDER BY table
+  `);
+  return rows.map((r) => `- ${r.table}: ${r.cols}`).join("\n");
+}
 
 // ── SQL guards (deterministic — prompts are not a security boundary) ──
 
@@ -241,17 +254,21 @@ export async function runAnalytics(
   return withQueryContext({ agent: "analytics" }, () =>
    step(opts.trace, "analytics", { question: input.question }, async (span) => {
     // ── context (read-only) ──
-    const { bundle, liveTables, contextVersion } = await step(
+    const { bundle, liveTables, schemas, contextVersion } = await step(
       span,
       "context_load",
       {},
       async () => {
-        const b = await getContext({ include: ["*"] });
-        const recon = await reconcileWithLive();
+        const [b, recon, schemas] = await Promise.all([
+          getContext({ include: ["*"] }),
+          reconcileWithLive(),
+          tableSchemas(),
+        ]);
         const maxV = Math.max(...b.entries.map((e) => e.version));
         return {
           bundle: b,
           liveTables: recon.liveTables,
+          schemas,
           contextVersion: `${b.entries.length} entities · max v${maxV}`,
         };
       },
@@ -270,6 +287,7 @@ export async function runAnalytics(
       const prompt = await loadPrompt("analytics_plan", {
         context: bundle.markdown,
         live_tables: liveTables.join(", "),
+        schemas,
         history: historyText,
         question: input.question,
       });
@@ -290,50 +308,51 @@ export async function runAnalytics(
     }
 
     // ── SQL per task, guarded + self-healing ──
+    // Tasks are independent → generate + execute them CONCURRENTLY. Wall clock
+    // becomes the slowest single task instead of their sum.
     let sqlAttemptsTotal = 0;
-    const results: TaskResult[] = [];
-    for (const task of plan.tasks) {
-      let feedback = "";
-      let done = false;
-      for (let attempt = 1; attempt <= MAX_SQL_ATTEMPTS && !done; attempt++) {
-        sqlAttemptsTotal++;
-        try {
-          await step(
-            span,
-            `task_${task.id}_sql_attempt_${attempt}`,
-            { task: task.title, feedback },
-            async (sqlSpan) => {
-              const prompt = await loadPrompt("analytics_sql", {
-                context: bundle.markdown,
-                live_tables: liveTables.join(", "),
-                task: JSON.stringify(task),
-                feedback: feedback
-                  ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
-                  : "",
-              });
-              const sql = guardSql(await llm(sqlSpan, `sql_${task.id}`, prompt));
-              const rows = await queryReadonly(sql);
-              recordQuery(sqlSpan, `result_${task.id}`, sql, rows);
-              results.push({ id: task.id, title: task.title, sql, rows, flags: [] });
-              done = true;
-              return { rows: rows.length };
-            },
-          );
-        } catch (error) {
-          feedback = `Your SQL failed: ${error instanceof Error ? error.message : String(error)}`;
-          if (attempt === MAX_SQL_ATTEMPTS) {
-            results.push({
-              id: task.id,
-              title: task.title,
-              sql: "",
-              rows: [],
-              flags: [],
-              dropped: `gave up after ${MAX_SQL_ATTEMPTS} attempts: ${feedback}`,
-            });
+    const results: TaskResult[] = await Promise.all(
+      plan.tasks.map((task) =>
+        step(span, `task_${task.id}`, { title: task.title }, async (taskSpan) => {
+          let feedback = "";
+          for (let attempt = 1; attempt <= MAX_SQL_ATTEMPTS; attempt++) {
+            sqlAttemptsTotal++;
+            try {
+              return await step(
+                taskSpan,
+                `sql_attempt_${attempt}`,
+                { task: task.title, feedback },
+                async (sqlSpan) => {
+                  const prompt = await loadPrompt("analytics_sql", {
+                    context: bundle.markdown,
+                    live_tables: liveTables.join(", "),
+                    schemas,
+                    task: JSON.stringify(task),
+                    feedback: feedback
+                      ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
+                      : "",
+                  });
+                  const sql = guardSql(await llm(sqlSpan, `sql_${task.id}`, prompt));
+                  const rows = await queryReadonly(sql);
+                  recordQuery(sqlSpan, `result_${task.id}`, sql, rows);
+                  return { id: task.id, title: task.title, sql, rows, flags: [] } as TaskResult;
+                },
+              );
+            } catch (error) {
+              feedback = `Your SQL failed: ${error instanceof Error ? error.message : String(error)}`;
+            }
           }
-        }
-      }
-    }
+          return {
+            id: task.id,
+            title: task.title,
+            sql: "",
+            rows: [],
+            flags: [],
+            dropped: `gave up after ${MAX_SQL_ATTEMPTS} attempts: ${feedback}`,
+          } as TaskResult;
+        }),
+      ),
+    );
 
     // ── sanity gate ──
     const { kept, notes } = await step(span, "sanity_gate", {}, async () =>
@@ -356,7 +375,15 @@ export async function runAnalytics(
           `### ${r.id} — ${r.title} (${r.rows.length} rows${r.flags.length ? `; flags: ${r.flags.join("; ")}` : ""})\nSQL: ${r.sql}\nrows: ${JSON.stringify(r.rows.slice(0, 50))}`,
       )
       .join("\n\n");
-    const pool = numericPool(kept);
+    const pool = [
+      ...numericPool(kept),
+      // numbers the agent was shown in the gate notes are citable too
+      ...sanityNotes
+        .join(" ")
+        .match(/-?\d[\d,]*(?:\.\d+)?/g)
+        ?.map((n) => Number(n.replaceAll(",", "")))
+        .filter((n) => Number.isFinite(n)) ?? [],
+    ];
 
     let narration: Narration | null = null;
     let citationFailures = 0;

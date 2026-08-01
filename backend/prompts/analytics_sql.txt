@@ -6,6 +6,9 @@ You are the Analytics Agent of Clickwright writing ClickHouse SQL for one planne
 # Live tables
 {{live_tables}}
 
+# EXACT column names and types — use these verbatim, never guess a column
+{{schemas}}
+
 # The task
 {{task}}
 {{feedback}}

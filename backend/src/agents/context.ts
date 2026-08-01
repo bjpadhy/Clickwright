@@ -173,6 +173,12 @@ export interface ContextUpdateInput {
   };
 }
 
+const TABLES_SCOPE =
+  "ONLY the `table:<name>` entries — one per created table. Emit no other namespaces in this response.";
+const REST_SCOPE =
+  "ONLY the non-table entries: the `spec:<name>` summary, any new `metric:`/`funnel:`/`entity:` definitions, " +
+  "and updated versions of existing `convention:`/`known_issue:` entries. Do NOT emit any `table:` entries.";
+
 const MAX_UPDATE_ATTEMPTS = 5;
 
 export interface ContextUpdateResult {
@@ -214,7 +220,10 @@ export async function updateContext(
           `update_generation_attempt_${attempt}`,
           { feedback },
           async (genSpan) => {
-            const prompt = await loadPrompt("context_update", {
+            // Two concurrent halves — table docs vs feature/metric/convention
+            // knowledge. Output tokens dominate latency, so splitting the
+            // generation roughly halves this step's wall clock.
+            const vars = {
               context: current.markdown,
               spec: input.specText,
               tables_summary: tablesSummary,
@@ -223,9 +232,23 @@ export async function updateContext(
               feedback: feedback
                 ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
                 : "",
+            };
+            const [tablesText, restText] = await Promise.all([
+              loadPrompt("context_update", { ...vars, scope: TABLES_SCOPE }).then((p) =>
+                llm(genSpan, "context_update_tables", p),
+              ),
+              loadPrompt("context_update", { ...vars, scope: REST_SCOPE }).then((p) =>
+                llm(genSpan, "context_update_knowledge", p),
+              ),
+            ]);
+            const half = (t: string) =>
+              UpdateProposalSchema.partial({ entries: true }).parse(JSON.parse(stripFences(t)));
+            const a = half(tablesText);
+            const b = half(restText);
+            const parsed = UpdateProposalSchema.parse({
+              entries: [...(a.entries ?? []), ...(b.entries ?? [])],
+              warnings: [...(a.warnings ?? []), ...(b.warnings ?? [])],
             });
-            const text = await llm(genSpan, "context_update", prompt);
-            const parsed = UpdateProposalSchema.parse(JSON.parse(stripFences(text)));
 
             const covered = new Set(
               parsed.entries

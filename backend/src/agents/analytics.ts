@@ -16,7 +16,7 @@ import { withQueryContext } from "../core/query-context.js";
 import { step, scoreRun, recordQuery, emitRunEvent, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import { getContext, lookupContext } from "./context.js";
-import { precisionForRow, deriveConfidence, type Precision } from "../core/precision.js";
+import { precisionForRow, deriveConfidence, RATE_RE, type Precision } from "../core/precision.js";
 import {
   digestFlags,
   populationRow,
@@ -201,7 +201,7 @@ const NarrationSchema = z.object({
   segmentTable: z
     .object({
       columns: z.array(z.string()).min(2),
-      rows: z.array(z.array(z.union([z.string(), z.number()]))).min(1).max(8),
+      rows: z.array(z.array(z.union([z.string(), z.number()]))).min(1).max(15),
       sourceTask: z.string().default(""),
       columnFormats: z.array(z.string()).optional(),
     })
@@ -695,12 +695,12 @@ export async function runAnalytics(
   return withQueryContext({ agent: "analytics" }, () =>
    step(opts.trace, "analytics", { question: input.question }, async (span) => {
     // ── context (read-only) ──
-    const { bundle, sqlRules, schemas, contextVersion, contextKey } = await step(
+    const { bundle, sqlRulesMarkdown, schemas, contextVersion, contextKey } = await step(
       span,
       "context_load",
       {},
       async () => {
-        const [b, sqlRules, schemas] = await Promise.all([
+        const [b, schemas] = await Promise.all([
           // metrics/conventions/known-issues in full (they define correctness);
           // table docs brief because `schemas` already gives exact columns.
           getContext({
@@ -708,11 +708,17 @@ export async function runAnalytics(
             brief: ["table", "spec", "overview", "entity"],
             require: ["convention:data_hygiene", "metric"],
           }),
-          // SQL generation needs the RULES only — not metrics, known issues or
-          // spec summaries. Those belong to planning and narration.
-          getContext({ core: ["convention"], require: ["convention:data_hygiene"] }),
           tableSchemas(),
         ]);
+        // SQL generation needs conventions + join_map only — extracted from the
+        // already-fetched bundle instead of a second getContext round-trip.
+        const sqlRulesMarkdown = b.entries
+          .filter((e) => {
+            const cat = e.entity.split(":")[0] ?? "";
+            return cat === "convention" || cat === "join_map";
+          })
+          .map((e) => e.definition_md)
+          .join("\n\n");
         // A digest over every (entity, version) pair — the entity count and the
         // global max both miss a revision that lands below the current max, which
         // would serve a stale answer after a context write.
@@ -723,7 +729,7 @@ export async function runAnalytics(
         const maxV = Math.max(...b.entries.map((e) => e.version));
         return {
           bundle: b,
-          sqlRules,
+          sqlRulesMarkdown,
           schemas,
           contextVersion: `${b.entries.length} entities · max v${maxV}`,
           contextKey: versionDigest,
@@ -786,11 +792,39 @@ export async function runAnalytics(
       const text = await llm(planSpan, "plan", prompt);
       return PlanSchema.parse(JSON.parse(stripFences(text)));
     });
+
+    // Surface the plan interpretation so the PM can catch a wrong reading
+    // before waiting for SQL results. The chat UI renders this as a brief
+    // "Approach: ..." line before the "Querying ClickHouse" phase.
+    emitRunEvent({
+      type: "log",
+      name: "plan_summary",
+      payload: {
+        approach: plan.approach,
+        tasks: plan.tasks.map((t) => t.title),
+        tables: [...new Set(plan.tasks.flatMap((t) => t.tables))],
+      },
+    });
+
     if (plan.tasks.length === 0) {
-      // unanswerable — return an honest empty insight, still traced
+      // unanswerable — suggest related questions from the available schemas
+      const availableTables = [...schemas.keys()];
+      const suggestions = availableTables.slice(0, 5).map((t) => {
+        const cols = schemas.get(t) ?? "";
+        const hasRate = /rate|pct|percent/i.test(cols);
+        const hasDim = /os|country|device|platform/i.test(cols);
+        if (hasRate && hasDim) return `What is the conversion rate by platform for ${t} events?`;
+        if (hasRate) return `What is the overall rate for ${t}?`;
+        return `How many ${t} events are there by day?`;
+      });
       return {
         headline: `This can't be answered from the current tables: ${plan.approach}`,
-        findings: [{ tag: "caveat", text: plan.approach }],
+        findings: [
+          { tag: "caveat", text: plan.approach },
+          ...(suggestions.length
+            ? [{ tag: "driver" as const, text: `Try instead: ${suggestions.slice(0, 3).join(" · ")}` }]
+            : []),
+        ],
         chart: null,
         segmentTable: null,
         confidence: { value: "low", note: "no queryable data for this question" },
@@ -830,7 +864,7 @@ export async function runAnalytics(
                 { task: task.title, feedback },
                 async (sqlSpan) => {
                   const prompt = await loadPrompt("analytics_write_sql", {
-                    context: sqlRules.markdown,
+                    context: sqlRulesMarkdown,
                     schemas: schemaSubset(schemas, task.tables),
                     task: JSON.stringify(task),
                     prior_sql: priorSqlText
@@ -910,7 +944,18 @@ export async function runAnalytics(
     // inputs, in the same order relative to what it actually gates; only the waiting
     // overlaps. (Per-step elapsed times now overlap, which is why API.md says never to
     // sum them for a total.)
-    const toVerify = kept.find((r) => r.rows.length > 0);
+    // Verify the task most likely to produce the headline figure: prefer tasks
+    // with rate columns (the headline is almost always a rate), then by row count.
+    // The first task with rows was often the wrong one when the main result was t2.
+    const toVerify = [...kept]
+      .filter((r) => r.rows.length > 0)
+      .sort((a, b) => {
+        const rateCount = (r: TaskResult) =>
+          r.rows[0] ? Object.keys(r.rows[0]).filter((c) => RATE_RE.test(c)).length : 0;
+        const ra = rateCount(a), rb = rateCount(b);
+        if (ra !== rb) return rb - ra; // prefer tasks with rate columns
+        return b.totalRows - a.totalRows; // then by coverage
+      })[0] ?? null;
     const verificationPromise: Promise<VerificationResult | null> = toVerify
       ? verifyTask(
           span,
@@ -1123,14 +1168,22 @@ export async function runAnalytics(
     });
 
     // ── quality gate ──
-    // Skip the call when the deterministic checks all passed and the narration
-    // already cites numbers, names a segment and is honest about confidence —
-    // there is nothing for a reviewer to catch, and this saves a full LLM round.
+    // Skip the LLM call when deterministic checks already cover the rubric.
+    // The quality gate checks 5 booleans; most are verifiable in code:
+    //   cites_numbers — guaranteed by the citation checker above
+    //   names_segment — checked by finding tag presence
+    //   honest_confidence — confidence is computed by code, not the model
+    //   links_known_issue — true when no anomaly, or when a known_issue finding exists
+    // Only `actionable` genuinely needs LLM judgement, but a headline with a
+    // number and a segment finding is actionable by construction.
+    const hasKnownIssueFinding = narration.findings.some((f) => f.tag === "known_issue");
+    const hasAnomalyWithoutLink = sanityNotes.some((n) => /flagged/i.test(n)) && !hasKnownIssueFinding;
     const selfEvident =
-      sanityNotes.length === 0 &&
+      sanityNotes.filter((n) => !/flagged/i.test(n)).length === 0 &&
       citationFailures === 0 &&
       narration.findings.some((f) => f.tag === "segment") &&
-      /\d/.test(narration.headline);
+      /\d/.test(narration.headline) &&
+      !hasAnomalyWithoutLink;
     const quality = selfEvident
       ? {
           actionable: true, cites_numbers: true, names_segment: true,

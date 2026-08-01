@@ -61,7 +61,7 @@ try {
 
   // ── ② context update ──
   const specText = await readFile(path.join(specDir, "spec.md"), "utf-8");
-  const entries = await updateContext(
+  const ctx = await updateContext(
     {
       specName,
       specText,
@@ -81,15 +81,17 @@ try {
       },
     },
   );
-  console.log(`\n✓ context updated: ${entries.length} entries`);
-  for (const e of entries) console.log(`    ${e.entity} v${e.version}`);
+  console.log(`\n✓ context updated: ${ctx.entries.length} entries`);
+  for (const e of ctx.entries) console.log(`    ${e.entity} v${e.version}`);
+  for (const w of ctx.warnings) console.log(`  ⚠ contradiction: ${w}`);
 
   endRun(
     trace,
     {
       status: "success",
       tables: instr.tables.map((t) => `${t.name} (${t.rowsLoaded} rows)`),
-      contextEntries: entries.map((e) => `${e.entity} v${e.version}`),
+      contextEntries: ctx.entries.map((e) => `${e.entity} v${e.version}`),
+      contextWarnings: ctx.warnings,
       instrumentationAttempts: instr.attempts,
     },
     { spec: specName, runId },

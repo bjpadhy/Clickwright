@@ -172,3 +172,18 @@ test("the export names every entry and keeps trace links", () => {
   assert.match(md, /https:\/\/cloud\.langfuse\.com\/trace\/abc/);
   assert.match(md, /contradiction surfaced/);
 });
+
+// ── runs_log.spec column (added on main while this branch was in flight) ──
+
+test("prefers the runs_log spec column when present", () => {
+  const withSpec: RunLogRow[] = runRows.map((r) => ({ ...r, spec: "04_abandoned_checkout" }));
+  const entries = buildChangelog([], withSpec);
+  assert.equal(entries.find((e) => e.kind === "table")?.spec, "04_abandoned_checkout");
+});
+
+test("falls back to specDir for rows written before the spec column existed", () => {
+  // ALTER ... ADD COLUMN backfills existing rows with '', not null.
+  const legacy: RunLogRow[] = runRows.map((r) => ({ ...r, spec: "" }));
+  const entries = buildChangelog([], legacy);
+  assert.equal(entries.find((e) => e.kind === "table")?.spec, "02_group_family");
+});

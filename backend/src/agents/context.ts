@@ -143,6 +143,8 @@ const UpdateProposalSchema = z.object({
       }),
     )
     .min(1),
+  /** One-liners where new findings contradict existing context — the UI's "contradiction surfaced" chip. */
+  warnings: z.array(z.string()).optional(),
 });
 export type ContextUpdateProposal = z.infer<typeof UpdateProposalSchema>;
 
@@ -173,6 +175,12 @@ export interface ContextUpdateInput {
 
 const MAX_UPDATE_ATTEMPTS = 5;
 
+export interface ContextUpdateResult {
+  entries: ContextEntry[];
+  /** Contradictions between new findings and existing context — surfaced, never hidden. */
+  warnings: string[];
+}
+
 export async function updateContext(
   input: ContextUpdateInput,
   trace: Ctx,
@@ -180,7 +188,7 @@ export async function updateContext(
     approve?: ContextApprovalCallback;
     llm?: (parent: Ctx, name: string, prompt: string) => Promise<string>;
   } = {},
-): Promise<ContextEntry[]> {
+): Promise<ContextUpdateResult> {
   const approve = opts.approve ?? autoApproveContext;
   const llm =
     opts.llm ??
@@ -284,13 +292,16 @@ export async function updateContext(
       scoreRun(span, "context_entries_written", rows.length);
       scoreRun(span, "context_update_attempts", attempt,
         attempt === 1 ? "clean first attempt" : `${attempt - 1} failed attempt(s) healed`);
-      return rows.map((r) => ({
-        entity: r.entity,
-        definition_md: r.definition_md,
-        version: r.version,
-        source_spec: r.source_spec,
-        change_note: r.change_note,
-      }));
+      return {
+        entries: rows.map((r) => ({
+          entity: r.entity,
+          definition_md: r.definition_md,
+          version: r.version,
+          source_spec: r.source_spec,
+          change_note: r.change_note,
+        })),
+        warnings: proposal.warnings ?? [],
+      };
     }
 
     throw new Error(

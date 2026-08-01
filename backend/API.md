@@ -40,7 +40,8 @@ export interface RunDetail extends RunSummary {
 
 export type RunEventType =
   | "step_start" | "step_end" | "step_error"
-  | "status" | "approval_request" | "approval_result";
+  | "status" | "approval_request" | "approval_result"
+  | "log";                  // per-statement execution progress (ddl_statement, data_load)
 
 export interface RunEvent {
   seq: number;              // 0-based, dense, ordering key
@@ -52,7 +53,7 @@ export interface RunEvent {
 
 // ── gate proposals (payload.proposal of approval_request) ────────
 export interface DdlProposal {
-  reasoning: string;        // the agent's design rationale, plain text
+  reasoning: string;        // markdown with ## sections: Ordering keys / Partitioning / Types & codecs / Deviations & flags
   tables: Array<{
     name: string;           // table to create
     event: string;          // source event type
@@ -67,6 +68,7 @@ export interface ContextProposal {
     definition_md: string;  // full replacement text (markdown)
     change_note: string;    // why this entry/version exists
   }>;
+  warnings?: string[];      // contradictions with existing context — the "contradiction surfaced" chips
 }
 
 // payload.proposal when gate === "optimization" (advisor-drafted schema change).
@@ -144,11 +146,12 @@ several times). `failed` only occurs on exhausted retries or hard errors.
 
 ---
 
-## [LIVE] GET /api/runs — run list
+## [LIVE] GET /api/runs — run list (current server session)
 
-`200 RunSummary[]`, newest first. In-memory: restarts clear it (history
-survives in the `runs_log` ClickHouse table; a history endpoint over it is
-[PLANNED], see below).
+`200 RunSummary[]`, newest first. This is the in-memory hot list (live +
+recently finished runs). Every event is ALSO persisted to the `runs_log`
+ClickHouse table as it happens — for history across restarts use the [LIVE]
+`GET /api/history` endpoints below.
 
 ## [LIVE] GET /api/runs/:id — run detail
 
@@ -171,9 +174,8 @@ data: <RunEvent as JSON>       // one line
 
 Keepalive comments (`: keepalive`) every 15s — EventSource ignores them.
 Reconnect = full replay (dedupe by `seq`; `Last-Event-ID` resume is not
-implemented). With `EventSource`, either register `addEventListener` for each
-of the six event types, or just use one generic handler via `onmessage`-style
-listeners per type.
+implemented). With `EventSource`, register `addEventListener` for each of the
+seven event types (they are named events, so plain `onmessage` will NOT fire).
 
 ### Event payload shapes by type
 
@@ -182,8 +184,9 @@ listeners per type.
 | `step_start` | step name (below) | `{ input: object }` |
 | `step_end` | step name | `{ output: object }` — strings >2000 chars clipped with `…[clipped]` |
 | `step_error` | step name | `{ error: string }` — verbatim failure, feeds the retry |
-| `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ tables: LoadedTable[], contextEntries: {entity, version}[], traceUrl }`; `failed` → `{ error }` |
-| `approval_request` | `"ddl"` \| `"context"` | `{ proposal: DdlProposal \| ContextProposal }` |
+| `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ tables: LoadedTable[], contextEntries: {entity, version}[], contextWarnings: string[], traceUrl }`; `failed` → `{ error }` |
+| `approval_request` | `"ddl"` \| `"context"` | `{ proposal: DdlProposal \| ContextProposal }` — ContextProposal may carry `warnings: string[]` (the "contradiction surfaced" chips) |
+| `log` | `"ddl_statement"` \| `"data_load"` | `{ statement?, table?, rows?, ok, ms }` — per-statement execution progress |
 | `approval_result` | gate | `{ approved: boolean, feedback: string, identity: string }` |
 
 `LoadedTable = { name, event, purpose, rowsInFile, rowsLoaded }`.
@@ -193,10 +196,12 @@ listeners per type.
 ```
 instrumentation                      (wrapper — spans the whole ① phase)
   profile                            output: field stats + newFields
+  context_load                       output.summary: entities count, byCategory, updatedEntries
   schema_reconciliation              output: liveTables, documentedNotLive, liveNotDocumented
   ddl_generation_attempt_N           N = 1.. (step_error ⇒ another attempt follows)
+  dry_run_attempt_N                  ClickHouse EXPLAIN-parses every statement pre-gate
   approval_attempt_N                 (the gate; approval_request/result events bracket it)
-  ddl_execution_attempt_N            output: LoadedTable[] (execute + load + verify)
+  ddl_execution_attempt_N            output: LoadedTable[]; emits per-statement log events
 context_update                       (wrapper — spans the whole ② phase)
   update_generation_attempt_N
   update_approval_attempt_N
@@ -230,6 +235,21 @@ endpoint; the server knows which gate is pending.
 (free-text; use the user's name/handle). UI for reject = "Request changes" box.
 
 ---
+
+## [LIVE] GET /api/specs — the "start from a sample spec" list
+
+`200 [{ id, specDir, events, eventTypes, alreadyInstrumented }]` — pass `specDir`
+straight to POST /api/runs. `alreadyInstrumented` disables the Use button.
+
+## [LIVE] GET /api/history — runs that survive restarts (from runs_log)
+
+`200 [{ run_id, spec, started, finished, last_status, events }]`, newest first.
+
+## [LIVE] GET /api/history/:runId — full decision record of a past run
+
+`200 StoredEvent[]` — same shapes as the SSE stream; renders the report view
+(executed DDL from approval_request, approver identity from approval_result,
+rationale, context diff) without the run being in memory. `404` if unknown.
 
 ## [LIVE] GET /api/context — the Context Browser's main list
 
@@ -419,21 +439,23 @@ GET /api/observe/activity             → runs_log aggregated per 15min per type
 4. **Timings**: a run takes 3–6 minutes; generation steps are 1–3 min each with
    no intermediate events — show an elapsed timer/spinner on the running step,
    don't treat silence as a stall (keepalives confirm liveness).
-5. **runs list is in-memory** — after a backend restart, live runs are gone but
-   `runs_log` (ClickHouse) still has all events; the History screen should not
-   assume `/api/runs` is complete history once the [PLANNED] endpoint lands.
+5. **`/api/runs` is the session's hot list, `/api/history` is the truth** —
+   after a backend restart the hot list is empty but every event is already in
+   `runs_log` (verified: inserts happen per-event, not on completion). History
+   screen = `/api/history`; live screen = `/api/runs` + SSE.
 6. Statuses `queued → running` can flip fast for an idle queue — don't animate
    on `queued` unless it persists.
-7. **Gate event ordering**: entering a gate emits `approval_request` *before*
+7. **A `dry_run_attempt_N` `step_error` is not a run failure** — it feeds the
+   retry loop like any other error; a new generation attempt follows.
+8. **Gate event ordering**: entering a gate emits `approval_request` *before*
    `status: awaiting_approval`; resolving one emits `status: running` *before*
    `approval_result`. Re-enable the approve panel on `approval_request`, not on
    `status: running`, or it flashes on every rejection.
-8. **`queryLogAvailable: false` is not "zero activity."** On ClickHouse Cloud the
+9. **`queryLogAvailable: false` is not "zero activity."** On ClickHouse Cloud the
    query log lives per replica; the backend unions it with `clusterAllReplicas`
    (measured: the local table saw 63k queries in 24h against 127k clustered) and
    reports `queryLogClustered` so you can tell. It also flushes on an interval, so
    a query run seconds ago may not be listed yet.
-9. **Query attribution is not retroactive.** `agent` comes from a `log_comment`
-   stamped at execution time, so anything run before this shipped — or from a
-   ClickHouse console — is `null` forever.
-```
+10. **Query attribution is not retroactive.** `agent` comes from a `log_comment`
+    stamped at execution time, so anything run before this shipped — or from a
+    ClickHouse console — is `null` forever.

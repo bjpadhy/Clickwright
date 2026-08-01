@@ -28,6 +28,8 @@ export interface RunLogRow {
   type: string;
   name: string;
   payload: Record<string, unknown>;
+  /** runs_log.spec — empty for rows written before the column was added. */
+  spec?: string;
 }
 
 export interface ChangelogEntry {
@@ -116,7 +118,10 @@ export function summariseRuns(runRows: RunLogRow[]): Map<string, RunFacts> {
   for (const row of runRows) {
     const facts = factsFor(row.runId);
 
-    if (row.type === "step_start" && row.name === "instrumentation") {
+    // Prefer the spec column; rows predating it fall back to the specDir below.
+    if (row.spec) facts.spec = row.spec;
+
+    if (!facts.spec && row.type === "step_start" && row.name === "instrumentation") {
       const input = row.payload["input"];
       const specDir =
         typeof input === "object" && input !== null
@@ -278,7 +283,7 @@ export async function loadContextRows(): Promise<ContextRow[]> {
 
 export async function loadRunRows(): Promise<RunLogRow[]> {
   const rows = await query<Record<string, unknown>>(`
-    SELECT run_id, toString(ts) AS at, type, name, payload
+    SELECT run_id, spec, toString(ts) AS at, type, name, payload
     FROM runs_log
     WHERE (type = 'status' AND name IN ('running', 'succeeded', 'failed'))
        OR type = 'approval_result'
@@ -301,6 +306,7 @@ export async function loadRunRows(): Promise<RunLogRow[]> {
       type: String(r["type"] ?? ""),
       name: String(r["name"] ?? ""),
       payload,
+      spec: String(r["spec"] ?? ""),
     };
   });
 }

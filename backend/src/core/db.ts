@@ -27,14 +27,33 @@ export function db(): ClickHouseClient {
   return client;
 }
 
-/** Run a SELECT and get typed rows back. */
+/** Run a SELECT and get typed rows back. Use {name:Type} placeholders with
+ * `params` for any user-supplied value — never string interpolation. */
 export async function query<T = Record<string, unknown>>(
   sql: string,
+  params?: Record<string, unknown>,
 ): Promise<T[]> {
   const result = await db().query({
     query: sql,
     format: "JSONEachRow",
     clickhouse_settings: tagged(),
+    ...(params ? { query_params: params } : {}),
+  });
+  return result.json<T>();
+}
+
+/** Read-only SELECT with a hard server-side guard: the analytics/chat path
+ * physically cannot mutate anything, regardless of what SQL reaches it. */
+export async function queryReadonly<T = Record<string, unknown>>(
+  sql: string,
+): Promise<T[]> {
+  const result = await db().query({
+    query: sql,
+    format: "JSONEachRow",
+    // readonly=1 and log_comment coexist — verified against the live service.
+    // The analytics agent runs the most interesting queries in the system; if
+    // they were untagged they would show as unattributed on the Observe screen.
+    clickhouse_settings: tagged({ readonly: "1", max_execution_time: 30 }),
   });
   return result.json<T>();
 }

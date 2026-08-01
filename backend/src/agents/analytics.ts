@@ -140,7 +140,26 @@ function numericPool(results: TaskResult[]): number[] {
   return pool;
 }
 
+/**
+ * A number is citable when it appears in the results, OR when it is the
+ * difference/ratio of two values that do — arithmetic code can verify, so the
+ * chain back to ClickHouse stays unbroken (PMs need deltas; inventing them is
+ * still forbidden).
+ */
 export function findUncitedNumbers(texts: string[], pool: number[]): string[] {
+  const near = (a: number, b: number) =>
+    Math.abs(a - b) <= Math.max(0.06, Math.abs(b) * 0.015);
+  const base = [...new Set(pool)].slice(0, 400);
+  const derived: number[] = [];
+  for (let i = 0; i < base.length; i++) {
+    for (let j = 0; j < base.length; j++) {
+      if (i === j) continue;
+      const a = base[i]!;
+      const b = base[j]!;
+      derived.push(a - b);
+      if (b !== 0) derived.push(a / b);
+    }
+  }
   const uncited: string[] = [];
   for (const text of texts) {
     for (const m of text.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)) {
@@ -149,10 +168,9 @@ export function findUncitedNumbers(texts: string[], pool: number[]): string[] {
       if (!Number.isFinite(n)) continue;
       if (Number.isInteger(n) && Math.abs(n) <= 12) continue; // "3 steps", ordinals
       if (Number.isInteger(n) && n >= 2020 && n <= 2030) continue; // years
-      const ok = pool.some(
-        (v) => Math.abs(v - n) <= Math.max(0.06, Math.abs(v) * 0.015),
-      );
-      if (!ok) uncited.push(raw);
+      if (base.some((v) => near(n, v))) continue;
+      if (derived.some((v) => near(n, v))) continue;
+      uncited.push(raw);
     }
   }
   return [...new Set(uncited)];
@@ -370,7 +388,8 @@ export async function runAnalytics(
             if (uncited.length > 0) {
               citationFailures++;
               throw new Error(
-                `these numbers do not exist in the SQL results (do not invent or derive numbers): ${uncited.join(", ")}`,
+                `these numbers are not in the SQL results and are not a difference/ratio of two numbers that are: ${uncited.join(", ")}. ` +
+                  `Rewrite using only values present in the results (or a difference/ratio of two such values), or describe the comparison in words instead of a figure.`,
               );
             }
             return parsed;

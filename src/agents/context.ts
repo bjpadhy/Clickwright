@@ -11,6 +11,7 @@
  * call invalidateContextCache() after writing.
  */
 import { query } from "../core/db.js";
+import { env } from "../core/env.js";
 
 export interface ContextEntry {
   entity: string;
@@ -115,4 +116,42 @@ export async function getContext(
   }
 
   return { markdown: parts.join("\n\n"), entries };
+}
+
+// ── reconciliation service ───────────────────────────────────────
+// Agents never introspect the database for knowledge; the Context Agent is the
+// single component that knows both the documentation and how to verify it
+// against reality. This is a safety check, not a context source.
+
+export interface Reconciliation {
+  /** Every table that exists in the database right now. */
+  liveTables: string[];
+  /** Documented in context_store but missing from the database (stale docs / failed run). */
+  documentedNotLive: string[];
+  /** Exists in the database but undocumented (manual create / half-finished run). */
+  liveNotDocumented: string[];
+}
+
+const INTERNAL_TABLES = new Set(["context_store", "runs_log"]);
+
+export async function reconcileWithLive(): Promise<Reconciliation> {
+  const rows = await query<{ name: string }>(`
+    SELECT name FROM system.tables
+    WHERE database = '${env.clickhouse.database}' AND NOT is_temporary
+  `);
+  const liveTables = rows
+    .map((r) => r.name)
+    .filter((n) => !INTERNAL_TABLES.has(n) && !n.startsWith(".inner"));
+
+  const documented = (await latestEntries())
+    .filter((e) => category(e.entity) === "table")
+    .map((e) => e.entity.slice("table:".length));
+
+  const live = new Set(liveTables);
+  const doc = new Set(documented);
+  return {
+    liveTables,
+    documentedNotLive: documented.filter((t) => !live.has(t)),
+    liveNotDocumented: liveTables.filter((t) => !doc.has(t)),
+  };
 }

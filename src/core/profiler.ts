@@ -41,25 +41,34 @@ function inferType(
 }
 
 export async function profileNdjson(filePath: string): Promise<NdjsonProfile> {
+  const records: Record<string, unknown>[] = [];
+  const rl = createInterface({
+    input: createReadStream(filePath, { encoding: "utf-8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of rl) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      records.push(JSON.parse(trimmed) as Record<string, unknown>);
+    } catch {
+      continue;
+    }
+  }
+  return profileRecords(records, filePath);
+}
+
+/** Profile already-parsed records — used for per-event-type profiling. */
+export function profileRecords(
+  records: Record<string, unknown>[],
+  label: string,
+): NdjsonProfile {
   const fieldValues: Map<string, unknown[]> = new Map();
   const fieldDistinct: Map<string, Set<string>> = new Map();
   const fieldDistinctCapped: Map<string, boolean> = new Map();
   let totalRows = 0;
 
-  const rl = createInterface({
-    input: createReadStream(filePath, { encoding: "utf-8" }),
-    crlfDelay: Infinity,
-  });
-
-  for await (const line of rl) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let row: Record<string, unknown>;
-    try {
-      row = JSON.parse(trimmed) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
+  for (const row of records) {
     totalRows++;
 
     for (const [key, val] of Object.entries(row)) {
@@ -146,7 +155,7 @@ export async function profileNdjson(filePath: string): Promise<NdjsonProfile> {
     fields.push(profile);
   }
 
-  return { filePath, totalRows, fields };
+  return { filePath: label, totalRows, fields };
 }
 
 export function profileSummary(profile: NdjsonProfile): string {

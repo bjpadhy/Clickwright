@@ -36,7 +36,12 @@ export async function insert(
   rows: Record<string, unknown>[],
 ): Promise<void> {
   if (rows.length === 0) return;
-  await db().insert({ table, values: rows, format: "JSONEachRow" });
+  await db().insert({
+    table,
+    values: rows,
+    format: "JSONEachRow",
+    clickhouse_settings: { date_time_input_format: "best_effort" },
+  });
 }
 
 /**

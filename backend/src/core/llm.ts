@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { env } from "./env.js";
-import type { Ctx } from "./tracing.js";
+import { emitRunEvent, type Ctx } from "./tracing.js";
 
 let anthropic: Anthropic | null = null;
 
@@ -114,7 +114,7 @@ export type CompleteOptions = {
 
 let systemPrompt: string | null = null;
 async function sharedSystem(): Promise<string> {
-  systemPrompt ??= await readFile(path.join(PROMPT_DIR, "system.txt"), "utf8");
+  systemPrompt ??= await readFile(path.join(PROMPT_DIR, "shared_system.txt"), "utf8");
   return systemPrompt;
 }
 
@@ -138,6 +138,22 @@ export async function complete(
     input: prompt,
     ...(options.system ? { metadata: { system: options.system } } : {}),
   });
+
+  // A generation can run for a minute with nothing to show. Emit a progress tick
+  // so the UI can display "thinking… 12s" instead of an inert spinner.
+  const startedAt = Date.now();
+  emitRunEvent({
+    type: "log",
+    name: "llm_start",
+    payload: { call: name, promptChars: prompt.length },
+  });
+  const ticker = setInterval(() => {
+    emitRunEvent({
+      type: "log",
+      name: "llm_progress",
+      payload: { call: name, elapsedMs: Date.now() - startedAt },
+    });
+  }, 3000);
 
   try {
     let text: string;
@@ -169,6 +185,12 @@ export async function complete(
       usageEstimated = result.estimated;
     }
 
+    clearInterval(ticker);
+    emitRunEvent({
+      type: "log",
+      name: "llm_done",
+      payload: { call: name, elapsedMs: Date.now() - startedAt, outputChars: text.length },
+    });
     generation.end({
       output: text,
       usage,
@@ -178,6 +200,7 @@ export async function complete(
     });
     return text;
   } catch (error) {
+    clearInterval(ticker);
     generation.end({
       level: "ERROR",
       statusMessage: error instanceof Error ? error.message : String(error),

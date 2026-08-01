@@ -142,14 +142,24 @@ const QualitySchema = z.object({
 /** Exact column names+types per table. Injected into plan/SQL prompts: the
  * single biggest accuracy win — the model stops guessing column names, which
  * also removes most retry rounds (so it is a latency win too). */
-async function tableSchemas(): Promise<string> {
+async function tableSchemas(): Promise<Map<string, string>> {
   const rows = await query<{ table: string; cols: string }>(`
     SELECT table, arrayStringConcat(groupArray(concat(name, ' ', type)), ', ') AS cols
     FROM system.columns
-    WHERE database = currentDatabase() AND table NOT IN ('context_store', 'runs_log', 'conversations', 'messages')
+    WHERE database = currentDatabase() AND table NOT IN (
+      'context_store', 'runs_log', 'conversations', 'messages', 'dashboards',
+      'insight_cache', 'optimization_suggestions', 'schema_changelog', 'trace_summaries'
+    )
     GROUP BY table ORDER BY table
   `);
-  return rows.map((r) => `- ${r.table}: ${r.cols}`).join("\n");
+  return new Map(rows.map((r) => [r.table, `- ${r.table}: ${r.cols}`]));
+}
+
+/** Only the tables this step needs — a SQL prompt paying for 13 schemas when it
+ * touches 2 is pure waste, and the noise hurts accuracy as well as cost. */
+function schemaSubset(all: Map<string, string>, tables: string[]): string {
+  const picked = tables.map((t) => all.get(t)).filter(Boolean);
+  return (picked.length ? picked : [...all.values()]).join("\n");
 }
 
 // ── SQL guards (deterministic — prompts are not a security boundary) ──
@@ -297,12 +307,12 @@ export async function runAnalytics(
   return withQueryContext({ agent: "analytics" }, () =>
    step(opts.trace, "analytics", { question: input.question }, async (span) => {
     // ── context (read-only) ──
-    const { bundle, liveTables, schemas, contextVersion } = await step(
+    const { bundle, sqlRules, liveTables, schemas, contextVersion } = await step(
       span,
       "context_load",
       {},
       async () => {
-        const [b, recon, schemas] = await Promise.all([
+        const [b, sqlRules, recon, schemas] = await Promise.all([
           // metrics/conventions/known-issues in full (they define correctness);
           // table docs brief because `schemas` already gives exact columns.
           getContext({
@@ -310,12 +320,16 @@ export async function runAnalytics(
             brief: ["table", "spec", "overview", "entity"],
             require: ["convention:data_hygiene", "metric"],
           }),
+          // SQL generation needs the RULES only — not metrics, known issues or
+          // spec summaries. Those belong to planning and narration.
+          getContext({ core: ["convention"], require: ["convention:data_hygiene"] }),
           reconcileWithLive(),
           tableSchemas(),
         ]);
         const maxV = Math.max(...b.entries.map((e) => e.version));
         return {
           bundle: b,
+          sqlRules,
           liveTables: recon.liveTables,
           schemas,
           contextVersion: `${b.entries.length} entities · max v${maxV}`,
@@ -344,10 +358,14 @@ export async function runAnalytics(
 
     // ── plan ──
     const plan: Plan = await step(span, "plan", {}, async (planSpan) => {
-      const prompt = await loadPrompt("analytics_plan", {
+      const prompt = await loadPrompt("analytics_plan_tasks", {
         context: bundle.markdown,
         live_tables: liveTables.join(", "),
-        schemas,
+        // planning needs column NAMES to choose tables/dimensions; exact types
+        // only matter when writing SQL, so strip them here (~half the tokens)
+        schemas: [...schemas.values()]
+          .map((line) => line.replace(/ (String|UInt\d+|Int\d+|Float\d+|DateTime64?\(\d\)|LowCardinality\(String\)|Nullable\([^)]+\)|UUID)(,|$)/g, "$2"))
+          .join("\n"),
         history: historyText,
         question: input.question,
       });
@@ -383,10 +401,10 @@ export async function runAnalytics(
                 `sql_attempt_${attempt}`,
                 { task: task.title, feedback },
                 async (sqlSpan) => {
-                  const prompt = await loadPrompt("analytics_sql", {
-                    context: bundle.markdown,
-                    live_tables: liveTables.join(", "),
-                    schemas,
+                  const prompt = await loadPrompt("analytics_write_sql", {
+                    context: sqlRules.markdown,
+                    live_tables: task.tables.join(", "),
+                    schemas: schemaSubset(schemas, task.tables),
                     task: JSON.stringify(task),
                     feedback: feedback
                       ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
@@ -437,7 +455,7 @@ export async function runAnalytics(
     const resultsText = kept
       .map(
         (r) =>
-          `### ${r.id} — ${r.title} (${r.rows.length} rows${r.flags.length ? `; flags: ${r.flags.join("; ")}` : ""})\nSQL: ${r.sql}\nrows: ${JSON.stringify(r.rows.slice(0, 50))}`,
+          `### ${r.id} — ${r.title} (${r.rows.length} rows${r.flags.length ? `; flags: ${r.flags.join("; ")}` : ""})\nSQL: ${r.sql}\nrows: ${JSON.stringify(r.rows.slice(0, 24))}${r.rows.length > 24 ? `\n(+${r.rows.length - 24} more rows not shown — do not infer beyond what is listed)` : ""}`,
       )
       .join("\n\n");
     const pool = [
@@ -460,7 +478,7 @@ export async function runAnalytics(
           `narrate_attempt_${attempt}`,
           { feedback },
           async (nSpan) => {
-            const prompt = await loadPrompt("analytics_narrate", {
+            const prompt = await loadPrompt("analytics_narrate_insight", {
               question: input.question,
               plan: plan.approach,
               results: resultsText || "(all tasks failed — say so honestly)",
@@ -525,7 +543,7 @@ export async function runAnalytics(
           verdict: "pass" as const, revision_note: "",
         }
       : await step(span, "quality_gate", {}, async (qSpan) => {
-      const prompt = await loadPrompt("analytics_quality", {
+      const prompt = await loadPrompt("analytics_review_quality", {
         question: input.question,
         insight: JSON.stringify(narration),
         results: resultsText.slice(0, 4000),
@@ -536,7 +554,7 @@ export async function runAnalytics(
 
     if (quality.verdict === "revise" && quality.revision_note) {
       narration = await step(span, "narrate_revision", { note: quality.revision_note }, async (rSpan) => {
-        const prompt = await loadPrompt("analytics_narrate", {
+        const prompt = await loadPrompt("analytics_narrate_insight", {
           question: input.question,
           plan: plan.approach,
           results: resultsText || "(all tasks failed)",

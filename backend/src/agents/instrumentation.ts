@@ -17,7 +17,10 @@ import { command, insert, query, rowCount } from "../core/db.js";
 import { step, scoreRun, emitRunEvent, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import { profileRecords, profileSummary, type NdjsonProfile } from "../core/profiler.js";
-import { planTable, renderCreateTable, renderRationale } from "../core/ddl.js";
+import {
+  planTable, renderCreateTable, renderRationale, parseEventPurposes, renderTableContextEntry,
+  type TablePlan,
+} from "../core/ddl.js";
 import { getContext, reconcileWithLive } from "./context.js";
 
 // ── types ────────────────────────────────────────────────────────
@@ -89,6 +92,9 @@ export interface InstrumentationResult {
   tables: LoadedTable[];
   newEnvelopeFields: string[];
   attempts: number;
+  /** Ready-to-store `table:*` context entries, synthesised from measurements —
+   * the Context Agent stores these verbatim instead of asking a model. */
+  tableEntries: Array<{ entity: string; definition_md: string; change_note: string }>;
 }
 
 // ── envelope knowledge (mirrors convention:envelope in the context store) ──
@@ -169,6 +175,8 @@ export async function runInstrumentation(
       complete(parent, name, prompt, { maxTokens: 8000 }));
 
   return step(opts.trace, "instrumentation", { specDir: opts.specDir }, async (span) => {
+    const specName = path.basename(opts.specDir.replace(/\/+$/, ""));
+    const tablePlans = new Map<string, TablePlan>();
     const spec = await readFile(path.join(opts.specDir, "spec.md"), "utf-8");
     const raw = await readFile(path.join(opts.specDir, "events.ndjson"), "utf-8");
     const rows = raw
@@ -271,27 +279,35 @@ export async function runInstrumentation(
                 if (liveNames.has(plan.name))
                   throw new Error(`table ${plan.name} already exists`);
                 out.set(event, plan);
+                tablePlans.set(event, plan);
               }
               return out;
             }).then((m) => m as Map<string, ReturnType<typeof planTable>>);
 
-            // 2. ONE small call for the human-facing purposes (short output).
-            //    If it fails we still ship: purposes fall back to the spec name.
-            let purposes: Record<string, string> = {};
-            try {
+            // 2. Purposes come from the spec itself — the PM already described every
+            //    event. Only events the spec failed to describe need a model.
+            const parsed = parseEventPurposes(spec);
+            const purposes: Record<string, string> = {};
+            for (const [event, desc] of parsed) purposes[event] = desc;
+            const undescribed = [...plans.keys()].filter((e) => !purposes[e]);
+            if (undescribed.length > 0) try {
               const tablesDesc = [...plans.values()]
+                .filter((p) => undescribed.includes(p.name))
                 .map(
                   (p) =>
                     `- ${p.name} (${p.facts.rows} rows): ${p.columns.map((c) => c.name).join(", ")}`,
                 )
                 .join("\n");
-              const prompt = await loadPrompt("table_purposes", {
+              const prompt = await loadPrompt("instrument_table_purposes", {
                 spec,
                 tables: tablesDesc,
                 feedback: feedback ? `\n# Reviewer feedback to honour\n${feedback}\n` : "",
               });
               const text = await llm(genSpan, "table_purposes", prompt);
-              purposes = PurposesSchema.parse(JSON.parse(stripFences(text))).purposes;
+              Object.assign(
+                purposes,
+                PurposesSchema.parse(JSON.parse(stripFences(text))).purposes,
+              );
             } catch {
               emitRunEvent({
                 type: "log",
@@ -405,6 +421,16 @@ export async function runInstrumentation(
           tables: loaded,
           newEnvelopeFields: newFields,
           attempts: attempt,
+          tableEntries: loaded.map((t) => {
+            const plan = tablePlans.get(t.event);
+            return {
+              entity: `table:${t.name}`,
+              definition_md: plan
+                ? renderTableContextEntry(plan, t.purpose, specName)
+                : `**\`${t.name}\`** — ${t.purpose}`,
+              change_note: `New table from spec ${specName}; documented from measured profile (${t.rowsLoaded} rows).`,
+            };
+          }),
         };
       } catch (error) {
         for (const name of created.reverse()) {

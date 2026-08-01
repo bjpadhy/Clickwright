@@ -209,11 +209,11 @@ export interface ContextUpdateInput {
     reasoning: string;
     newEnvelopeFields: string[];
     tables: { name: string; event: string; purpose: string; rowsLoaded: number }[];
+    /** Code-synthesised `table:*` entries — stored verbatim, no model needed. */
+    tableEntries?: Array<{ entity: string; definition_md: string; change_note: string }>;
   };
 }
 
-const TABLES_SCOPE =
-  "ONLY the `table:<name>` entries — one per created table. Emit no other namespaces in this response.";
 const REST_SCOPE =
   "ONLY the non-table entries: the `spec:<name>` summary, any new `metric:`/`funnel:`/`entity:` definitions, " +
   "and updated versions of existing `convention:`/`known_issue:` entries. Do NOT emit any `table:` entries.";
@@ -279,21 +279,24 @@ export async function updateContext(
                 ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
                 : "",
             };
-            const [tablesText, restText] = await Promise.all([
-              loadPrompt("context_update", { ...vars, scope: TABLES_SCOPE }).then((p) =>
-                llm(genSpan, "context_update_tables", p),
-              ),
-              loadPrompt("context_update", { ...vars, scope: REST_SCOPE }).then((p) =>
-                llm(genSpan, "context_update_knowledge", p),
-              ),
-            ]);
-            const half = (t: string) =>
-              UpdateProposalSchema.partial({ entries: true }).parse(JSON.parse(stripFences(t)));
-            const a = half(tablesText);
-            const b = half(restText);
+            // Table docs are already synthesised from measurements — storing them
+            // verbatim removes half this step's generation. The model is left with
+            // the part that genuinely needs judgement: the feature summary, the
+            // metrics its questions require, and contradictions with the store.
+            const deterministic = input.instrumentation.tableEntries ?? [];
+            const restText = await loadPrompt("context_write_knowledge", {
+              ...vars,
+              scope: REST_SCOPE,
+              table_entries: deterministic.length
+                ? deterministic.map((e) => `- ${e.entity}: ${e.definition_md}`).join("\n")
+                : "(none — emit table: entries yourself)",
+            }).then((p) => llm(genSpan, "context_update_knowledge", p));
+            const judged = UpdateProposalSchema.partial({ entries: true }).parse(
+              JSON.parse(stripFences(restText)),
+            );
             const parsed = UpdateProposalSchema.parse({
-              entries: [...(a.entries ?? []), ...(b.entries ?? [])],
-              warnings: [...(a.warnings ?? []), ...(b.warnings ?? [])],
+              entries: [...deterministic, ...(judged.entries ?? [])],
+              warnings: judged.warnings ?? [],
             });
 
             const covered = new Set(
@@ -405,7 +408,7 @@ export async function lookupContext(
       const index = all
         .map((e) => `${e.entity} — ${e.definition_md.split("\n")[0]?.slice(0, 160)}`)
         .join("\n");
-      const prompt = await loadPrompt("context_lookup", { question, index });
+      const prompt = await loadPrompt("context_retrieve_relevant", { question, index });
       const text = await llm(span, "context_lookup", prompt);
       const ids = JSON.parse(stripFences(text)) as unknown;
       if (!Array.isArray(ids)) throw new Error("retriever did not return an array");

@@ -14,6 +14,9 @@ New non-envelope fields observed: {{new_fields}}
 Instrumentation agent's reasoning (verbatim):
 {{reasoning}}
 {{feedback}}
+# ALREADY WRITTEN (synthesised from measurements — do NOT re-emit these)
+{{table_entries}}
+
 # YOUR SCOPE FOR THIS RESPONSE
 {{scope}}
 
@@ -22,10 +25,7 @@ Instrumentation agent's reasoning (verbatim):
 Write only what a future agent could not derive from the table schemas themselves.
 Precision beats volume: a reviewer approves this in under a minute.
 
-1. `table:<name>` — one per created table. AT MOST 6 lines: what the event means, its
-   event-specific columns and their meaning, the join key, and any gotcha carried over
-   from the instrumentation reasoning. Do NOT list envelope columns; do NOT restate types
-   (the schema has them).
+1. Do NOT emit `table:` entries — they are already written above.
 2. `spec:<spec_name>` — one entry, AT MOST 8 lines: what the feature is, its funnel in
    order, and the PM's questions (tightly paraphrased, as a bullet list).
 3. `metric:` / `funnel:` — ONLY for metrics the PM's questions actually require, and only

@@ -70,6 +70,7 @@ try {
         reasoning: instr.reasoning,
         newEnvelopeFields: instr.newEnvelopeFields,
         tables: instr.tables,
+        tableEntries: instr.tableEntries,
       },
     },
     trace,

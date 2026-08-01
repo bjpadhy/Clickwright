@@ -178,3 +178,62 @@ export function renderRationale(plan: TablePlan): {
       : "",
   };
 }
+
+/**
+ * Specs describe their own events ("- `otp_entered` — OTP submitted (...)"), so the
+ * table purpose is already written by the PM. Parsing beats asking a model: instant,
+ * free, and it uses the author's own words.
+ */
+export function parseEventPurposes(specMd: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const re = /^\s*[-*]\s*`([a-z][a-z0-9_]*)`\s*[—–-]\s*(.+)$/gim;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(specMd)) !== null) {
+    const [, event, desc] = m;
+    if (!event || !desc) continue;
+    const clean = desc
+      .replace(/`/g, "")
+      .replace(/\s*\([^)]*\)\s*$/, "")   // trailing column list
+      .trim();
+    if (clean.length > 3) out.set(event, clean.slice(0, 140));
+  }
+  return out;
+}
+
+/** A ready-to-store `table:<name>` context entry, built from measurements. */
+export function renderTableContextEntry(plan: TablePlan, purpose: string, specName: string): string {
+  const eventSpecific = plan.columns.filter(
+    (c) => !STANDARD_ENVELOPE.has(c.name) && c.name !== "timestamp" && c.name !== "id",
+  );
+  const lines = [
+    `**\`${plan.name}\`** — ${purpose} Created by spec \`${specName}\` (${plan.facts.rows} sample rows).`,
+    `Join key: \`${plan.orderBy[0] ?? "none"}\`; ordered by (${plan.orderBy.join(", ")}).`,
+  ];
+  if (eventSpecific.length) {
+    lines.push(
+      `Event-specific columns: ${eventSpecific.map((c) => `\`${c.name}\` (${c.comment})`).join("; ")}.`,
+    );
+  }
+  const gotchas: string[] = [];
+  if (plan.facts.nullableDefaults.length)
+    gotchas.push(
+      `empty values in ${plan.facts.nullableDefaults.join(", ")} — bucket as 'unknown', never treat as a category`,
+    );
+  if (!plan.columns.some((c) => c.name === "duplicate_id"))
+    gotchas.push("no duplicate_id/is_back_filled columns — the hygiene filters do not apply here");
+  if (!plan.columns.some((c) => c.name === "app_session_id"))
+    gotchas.push("no app_session_id — outside the sessionization model; join via the key above");
+  if (plan.columns.some((c) => /currency/.test(c.name)))
+    gotchas.push("multi-currency: never aggregate amounts without grouping by currency");
+  if (gotchas.length) lines.push(`Gotchas: ${gotchas.join("; ")}.`);
+  return lines.join(" ");
+}
+
+const STANDARD_ENVELOPE = new Set([
+  "user_id", "application_id", "app_session_id", "device", "device_type", "os",
+  "app_version", "client_lib", "geoip_country_code", "geoip_subdivision_1_code",
+  "city", "client_ip", "latitude", "longitude", "locale", "language", "funnel_type",
+  "co_travelers", "citizenship", "destination", "is_guest", "is_referral",
+  "is_enterprise", "is_guest_browse", "gclid", "fbclid", "gad_source",
+  "is_back_filled", "duplicate_id",
+]);

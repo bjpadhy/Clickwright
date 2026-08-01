@@ -6,7 +6,9 @@ Langfuse trace.
 
 React 19 + Vite + Tailwind v4, built exclusively on the
 [shadcn/ui](https://ui.shadcn.com) component library (`radix-nova` style, zinc base).
-All data is served by an in-memory mock backend — **no network calls are made.**
+
+**Instrumentation runs against the real backend.** Chat, Dashboards and
+Observability are still served by the in-memory mock.
 
 ```bash
 npm install
@@ -14,68 +16,77 @@ npm run dev      # http://localhost:5173
 npm run build
 ```
 
+The Instrumentation screen needs the backend up:
+
+```bash
+cd ../backend && npm run serve      # http://localhost:8787
+```
+
+`vite.config.ts` proxies `/api/*` there (override with `BACKEND_URL`). Without it,
+the screen shows a "backend unreachable" panel instead of failing silently.
+
 ## Screens
 
-| Screen              | Route state                | What it does                                                       |
-| ------------------- | -------------------------- | ------------------------------------------------------------------ |
-| **Chat**            | `nav: "chat"`              | Ask the Analytics Agent; plan steps stream, then an insight reveals |
-| **Instrumentation** | `nav: "instr"`, tab `run`  | Spec in → agent log → proposed DDL → approval gate → execute        |
-|                     | `nav: "instr"`, tab `hist` | The full decision record for every instrumented spec               |
-| **Observability**   | `nav: "obs"`               | Agent traces, database health, and the schema/context changelog     |
-| **Dashboards**      | `nav: "dash"`              | Insights pinned from Chat, re-run on every load                     |
+| Screen              | Route state                | Data source | What it does                                                       |
+| ------------------- | -------------------------- | ----------- | ------------------------------------------------------------------ |
+| **Chat**            | `nav: "chat"`              | mock        | Ask the Analytics Agent; plan steps stream, then an insight reveals |
+| **Instrumentation** | `nav: "instr"`, tab `run`  | **backend** | Spec in → live pipeline → proposed DDL → two approval gates → execute |
+|                     | `nav: "instr"`, tab `hist` | **backend** | The full decision record of every run, replayed from `runs_log`     |
+| **Observability**   | `nav: "obs"`               | mock        | Agent traces, database health, and the schema/context changelog     |
+| **Dashboards**      | `nav: "dash"`              | mock        | Insights pinned from Chat, re-run on every load                     |
 
-### Demo knobs
+### Demo knob
 
-Mirroring the prototype's editor props, both are read from the query string:
-
-- `?speed=instant|fast|realistic` — pacing of agent runs and chat answers (default `fast`)
-- `?autoApprove=1` — skip the human approval gate (recorded as `auto` in the trace)
+- `?speed=instant|fast|realistic` — pacing of the *mocked* chat answers (default `fast`)
 
 ## Architecture
 
 ```
 src/
 ├── api/
-│   ├── types.ts        # domain contract — the whole app depends only on this
-│   └── client.ts       # resolves the backend; swap the implementation here
+│   ├── instrumentation.ts   # the real backend: types from backend/API.md + fetch/SSE
+│   ├── types.ts             # contract for the still-mocked screens
+│   └── client.ts            # resolves the mock
 ├── mock/
-│   ├── fixtures.ts     # seed data (specs, DDL, answers, traces, changelog)
-│   └── server.ts       # MockSpecLoopServer: in-memory state + streamed progress
-├── state/console.tsx   # client-only state (active screen, filters, form input)
+│   ├── fixtures.ts          # seed data (answers, traces, changelog, conversations)
+│   └── server.ts            # MockSpecLoopServer: in-memory state + streamed progress
+├── state/
+│   ├── console.tsx          # client-only state (active screen, filters) + mock store
+│   └── instrumentation.tsx  # run stream, gates, spec catalogue, history
 ├── components/
-│   ├── ui/             # stock shadcn components — safe to `shadcn diff`
-│   ├── ui-kit/         # thin wrappers pinning shadcn to the design's metrics
-│   └── charts/         # shadcn `chart` (Recharts) presets
-└── screens/            # one folder per screen
+│   ├── ui/                  # stock shadcn components — safe to `shadcn diff`
+│   ├── ui-kit/              # thin wrappers pinning shadcn to the design's metrics
+│   └── charts/              # shadcn `chart` (Recharts) presets
+└── screens/                 # one folder per screen
 ```
 
-### Swapping in the real backend
+### How the Instrumentation screen works
 
-`SpecLoopApi` in `src/api/types.ts` is the only contract the UI knows about. It is
-deliberately shaped like a service: reads return data, commands are `async`, and
-progress arrives by mutating a store that components observe through
-`useSyncExternalStore`.
+Everything comes from `RunEvent`s. `POST /api/runs` starts a run, then an
+`EventSource` on `/api/runs/:id/events` streams its steps; the server replays the
+whole buffer on connect, so reloading the page mid-run rejoins it rather than
+losing it. `screens/instrumentation/run-model.ts` turns that event list into the
+stepper, the agent timeline, the gate proposals, the execution log and the result
+— and because `GET /api/history/:runId` returns the same event objects, the report
+view reuses the identical derivation.
 
-To go live, implement `SpecLoopApi` against HTTP/SSE and change one line:
+Two behaviours worth knowing before changing this code:
 
-```ts
-// src/api/client.ts
-export const api: SpecLoopApi = new HttpSpecLoopApi(readConfig())
-```
+- **A gate can be proposed many times.** Rejecting does not fail the run: the
+  agent regenerates and a new `approval_request` arrives for the same gate. Only
+  the latest one is live, and it is dismissed the moment `approval_result` lands.
+- **Failed attempts are the feature.** `ddl_generation_attempt_2` following a
+  `step_error` on attempt 1 is the self-healing loop, so the error text is rendered
+  verbatim under the step instead of being collapsed away.
 
-Nothing under `src/components` or `src/screens` needs to change. Two notes for
-whoever writes that client:
+### Swapping in the rest of the backend
 
-- **Streaming.** `startRun` returns immediately; the Instrumentation screen renders
-  whatever `getState().run` currently holds. Push stage/log/exec updates as they
-  arrive and call the store's listeners. `ask` behaves the same way for chat.
-- **Server vs client state.** Anything that would survive a reload (context version,
-  spec statuses, history, traces, changelog, conversations, dashboards) lives in
-  `ServerState`. Selection and filters live in `src/state/console.tsx` and should
-  stay there.
-
-`src/mock/fixtures.ts` is imported only by `src/mock/server.ts`, so the entire
-fixture set can be deleted with the mock.
+`SpecLoopApi` in `src/api/types.ts` still fronts Chat, Dashboards and
+Observability, with the mock implementing it. The contracts for those endpoints are
+frozen in `backend/API.md` under **[PLANNED]**; each one can be cut over the way
+Instrumentation was — add a client next to `src/api/instrumentation.ts`, then move
+that screen's state out of `ServerState`. `src/mock/fixtures.ts` is imported only
+by `src/mock/server.ts`, so the fixtures die with the last mocked screen.
 
 ## Design notes
 

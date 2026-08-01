@@ -5,13 +5,18 @@ import App from "@/App"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { ConsoleProvider } from "@/state/console"
+import { InstrumentationProvider } from "@/state/instrumentation"
 import "./index.css"
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <TooltipProvider delayDuration={400}>
       <ConsoleProvider>
-        <App />
+        {/* Instrumentation talks to the real backend; it nests inside the console
+            so its screens can still drive navigation. */}
+        <InstrumentationProvider>
+          <App />
+        </InstrumentationProvider>
         <Toaster
           position="bottom-right"
           offset={20}

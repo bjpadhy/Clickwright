@@ -2,18 +2,21 @@ import { Button } from "@/components/ui/button"
 import { Icon } from "@/components/ui-kit/icon"
 import { cn } from "@/lib/utils"
 import { useConsole } from "@/state/console"
+import { useInstrumentation } from "@/state/instrumentation"
 
 /**
  * "New spec" / "History" switch in the Instrumentation header. Deliberately two
  * buttons rather than a toggle group: tapping "New spec" while already on it
- * resets the run, which a toggle group would swallow as a no-op.
+ * detaches from the run on screen, which a toggle group would swallow as a
+ * no-op. The run itself keeps going — it lives on the server.
  */
 export function InstrumentationTabs() {
-  const { instrTab, setInstrTab, server } = useConsole()
+  const { instrTab, setInstrTab } = useConsole()
+  const { history, newRun, refreshHistory } = useInstrumentation()
 
   const tabs = [
     { id: "run", icon: "ti-file-plus", label: "New spec", count: "" },
-    { id: "hist", icon: "ti-history", label: "History", count: String(server.history.length) },
+    { id: "hist", icon: "ti-history", label: "History", count: String(history.length) },
   ] as const
 
   return (
@@ -25,7 +28,11 @@ export function InstrumentationTabs() {
             key={tab.id}
             variant="outline"
             aria-pressed={active}
-            onClick={() => setInstrTab(tab.id)}
+            onClick={() => {
+              if (tab.id === "run") newRun()
+              else refreshHistory()
+              setInstrTab(tab.id)
+            }}
             className={cn(
               "h-[33px] gap-1.5 rounded-lg px-[13px] text-[12.5px] font-[550] hover:border-zinc-900",
               active

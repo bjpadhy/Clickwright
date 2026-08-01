@@ -1,28 +1,20 @@
 /**
- * In-memory stand-in for the SpecLoop backend.
+ * In-memory stand-in for the parts of the backend that are not live yet: Chat,
+ * Dashboards and Observability.
  *
- * It owns everything a server would own — the context version, spec statuses,
- * run history, traces, changelog, conversations and dashboards — and streams
- * agent progress by mutating state on a timer and notifying subscribers. The
- * UI never schedules pipeline choreography itself; it subscribes and renders.
- *
- * Swapping in the real backend means writing another `SpecLoopApi`, not
- * touching a component.
+ * Instrumentation is NOT here any more — it runs against the real service (see
+ * `src/api/instrumentation.ts`). What remains of a "run" in this file is the
+ * static history and spec-status seed Observability draws its charts from.
  */
 
 import type {
   Answer,
   AnswerKey,
   ApiConfig,
-  ChangelogEntry,
   Notice,
-  RunRecord,
   Series,
   ServerState,
-  Spec,
-  SpecId,
   SpecLoopApi,
-  SpecPreview,
   Trace,
 } from "@/api/types"
 import {
@@ -33,10 +25,7 @@ import {
   INITIAL_HISTORY,
   INITIAL_STATUSES,
   LATENCY,
-  RUNNABLE_SPECS,
-  RUNS,
   SERIES,
-  SPECS,
   STATIC_CHANGELOG,
   STATIC_TRACES,
 } from "./fixtures"
@@ -46,9 +35,6 @@ const SPEED_MULTIPLIER: Record<ApiConfig["speed"], number> = {
   fast: 0.45,
   realistic: 1,
 }
-
-const HUMAN_REVIEWER = "R. Mehta"
-const AUTO_REVIEWER = "auto (demo policy)"
 
 function clone<T>(value: T): T {
   return structuredClone(value)
@@ -64,7 +50,6 @@ export class MockSpecLoopServer implements SpecLoopApi {
   private nextConversationId: number
   private nextDashboardId: number
   private nextMessageId = 10
-  private nextRunSeq = 1
   /** analytics answers only get logged to the trace list once, like the original */
   private loggedAnswers = new Set<AnswerKey>()
 
@@ -80,7 +65,6 @@ export class MockSpecLoopServer implements SpecLoopApi {
       dashboards: clone(INITIAL_DASHBOARDS),
       dashboardsRefreshing: false,
       dashboardsStamp: "14:41",
-      run: null,
     }
     this.nextConversationId =
       Math.max(0, ...this.state.conversations.map((c) => c.id)) + 1
@@ -137,18 +121,6 @@ export class MockSpecLoopServer implements SpecLoopApi {
 
   /* ── catalogue ───────────────────────────────────────────────────────── */
 
-  listSpecs(): Spec[] {
-    return RUNNABLE_SPECS.map((id) => SPECS[id])
-  }
-
-  getSpecPreview(id: SpecId): SpecPreview {
-    return { ...SPECS[id], brief: RUNS[id].brief, ndjson: RUNS[id].ndjson }
-  }
-
-  getRunRecord(id: SpecId): RunRecord {
-    return RUNS[id]
-  }
-
   getAnswer(key: AnswerKey): Answer {
     return ANSWERS[key]
   }
@@ -166,205 +138,6 @@ export class MockSpecLoopServer implements SpecLoopApi {
 
   getLatencySeries(): number[] {
     return LATENCY
-  }
-
-  /* ── instrumentation ─────────────────────────────────────────────────── */
-
-  async startRun(specId: SpecId) {
-    const current = this.state.run
-    if (current && current.stage > 0 && current.stage < 6) return
-
-    const record = RUNS[specId]
-    const runId = `run_${specId}_${this.nextRunSeq++}`
-    this.commit({
-      run: {
-        runId,
-        specId,
-        stage: 1,
-        logCount: 1,
-        execCount: 0,
-        revised: false,
-        versionFrom: "",
-        versionTo: "",
-        approvedBy: "",
-      },
-    })
-
-    const total = record.log.length
-    let i = 1
-    const tick = () => {
-      if (this.state.run?.runId !== runId) return
-      i++
-      if (i >= total) {
-        this.patchRun(runId, { logCount: total, stage: 3 })
-        if (this.config.autoApprove) {
-          this.after(() => {
-            if (this.state.run?.runId === runId && this.state.run.stage === 3) {
-              void this.approveRun()
-            }
-          }, 1100 * this.pace)
-        }
-        return
-      }
-      this.patchRun(runId, { logCount: i, stage: i >= 3 ? 2 : 1 })
-      this.after(tick, 640 * this.pace)
-    }
-    this.after(tick, 700 * this.pace)
-  }
-
-  async approveRun() {
-    const run = this.state.run
-    if (!run || run.stage !== 3) return
-    const record = RUNS[run.specId]
-    const runId = run.runId
-    const total = record.exec.length + 1
-
-    this.patchRun(runId, { stage: 4, execCount: 1 })
-
-    let i = 1
-    const tick = () => {
-      if (this.state.run?.runId !== runId) return
-      i++
-      if (i > total) {
-        this.patchRun(runId, { stage: 5 })
-        this.after(() => this.finishRun(runId), 1700 * this.pace)
-        return
-      }
-      this.patchRun(runId, { execCount: i })
-      this.after(tick, 480 * this.pace)
-    }
-    this.after(tick, 480 * this.pace)
-  }
-
-  async requestChanges(_note: string) {
-    const run = this.state.run
-    if (!run || run.stage !== 3) return
-    const runId = run.runId
-    this.patchRun(runId, { revised: true, stage: 2 })
-    this.after(() => {
-      if (this.state.run?.runId === runId) this.patchRun(runId, { stage: 3 })
-    }, 1500 * this.pace)
-  }
-
-  async resetRun() {
-    this.commit({ run: null })
-  }
-
-  private patchRun(runId: string, patch: Partial<ServerState["run"] & object>) {
-    const run = this.state.run
-    if (!run || run.runId !== runId) return
-    this.commit({ run: { ...run, ...patch } })
-  }
-
-  private finishRun(runId: string) {
-    const run = this.state.run
-    if (!run || run.runId !== runId) return
-
-    const record = RUNS[run.specId]
-    const versionFrom = this.state.contextVersion
-    const versionTo = (parseFloat(versionFrom) + 0.1).toFixed(1)
-    const approvedBy = this.config.autoApprove ? AUTO_REVIEWER : HUMAN_REVIEWER
-
-    this.commit({
-      specStatuses: { ...this.state.specStatuses, [run.specId]: "done" },
-      run: { ...run, stage: 6, versionFrom, versionTo, approvedBy },
-      contextVersion: versionTo,
-      history: [
-        {
-          specId: run.specId,
-          time: "just now",
-          version: `v${versionFrom} → v${versionTo}`,
-          approvedBy,
-        },
-        ...this.state.history,
-      ],
-      traces: [
-        this.buildContextTrace(record, versionFrom, versionTo),
-        this.buildRunTrace(record, versionFrom),
-        ...this.state.traces,
-      ],
-      changelog: [
-        {
-          id: `cl_${runId}_ctx`,
-          time: "now",
-          icon: "ti-book-2",
-          kind: "ctx",
-          title: `context v${versionTo}`,
-          desc: record.changelogContext ?? "",
-          traceId: record.contextTrace.id,
-          warn: !!record.warn,
-        },
-        {
-          id: `cl_${runId}_tbl`,
-          time: "now",
-          icon: "ti-table",
-          kind: "table",
-          title: record.changelogTable ?? "",
-          desc: `Instrumentation Agent · approved by ${approvedBy} · ${record.backfill}`,
-          traceId: record.trace.id,
-        },
-        ...this.state.changelog,
-      ] satisfies ChangelogEntry[],
-    })
-
-    this.notify(
-      `Schema live on ClickHouse · context v${versionTo} pushed to Analytics Agent`
-    )
-  }
-
-  private buildRunTrace(record: RunRecord, versionFrom: string): Trace {
-    const auto = this.config.autoApprove
-    return {
-      id: record.trace.id,
-      name: `instrumentation.run — ${record.table.replace("atlys.", "").replace("_events", "")}`,
-      agent: "instrumentation",
-      tokens: record.trace.tokens,
-      cost: record.trace.cost,
-      duration: record.trace.duration,
-      status: auto ? "auto ✓" : "human ✓",
-      time: "now",
-      meta: `context v${versionFrom} in · approval recorded in-trace · ${record.backfill}`,
-      human: `A feature spec came in. The agent studied the existing data, designed the schema, ${
-        auto ? "demo policy auto-approved it" : "a human reviewed and approved it"
-      }, and the tables went live with data.`,
-      spans: [
-        { name: `ctx.fetch v${versionFrom}`, kind: "tool", left: 0, width: 3 },
-        { name: "schema.inspect (system.columns)", kind: "db", left: 3, width: 7 },
-        { name: "spec.parse + sampling", kind: "tool", left: 10, width: 6 },
-        { name: "ddl.design (LLM)", kind: "llm", left: 16, width: 42 },
-        { name: "ddl.dryrun (staging)", kind: "db", left: 58, width: 6 },
-        { name: "human.approval — APPROVED", kind: "human", left: 64, width: 18 },
-        { name: "ch.execute 2 stmts", kind: "db", left: 82, width: 8 },
-        { name: "context.trigger", kind: "tool", left: 90, width: 4 },
-      ],
-    }
-  }
-
-  private buildContextTrace(
-    record: RunRecord,
-    versionFrom: string,
-    versionTo: string
-  ): Trace {
-    return {
-      id: record.contextTrace.id,
-      name: `context.update — v${versionFrom} → v${versionTo}`,
-      agent: "context",
-      tokens: record.contextTrace.tokens,
-      cost: record.contextTrace.cost,
-      duration: record.contextTrace.duration,
-      status: record.warn ? "flagged" : "ok",
-      time: "now",
-      meta: record.changelogContext ?? "",
-      human: `The schema just changed, so the Context Agent updated the business docs on its own${
-        record.warn ? " — and flagged a contradiction for humans to see." : "."
-      }`,
-      spans: [
-        { name: "diff.schema (system.tables)", kind: "db", left: 0, width: 18 },
-        { name: "contradiction.scan (LLM)", kind: "llm", left: 18, width: 52 },
-        { name: "context.write + version", kind: "tool", left: 70, width: 18 },
-        { name: "notify analytics agent", kind: "tool", left: 88, width: 12 },
-      ],
-    }
   }
 
   /* ── chat ────────────────────────────────────────────────────────────── */

@@ -171,7 +171,7 @@ app.get("/api/history/:runId", async (req, res) => {
   if (rows.length === 0) return res.status(404).json({ error: "unknown run" });
   res.json(
     rows.map((r) => ({
-      seq: Number(r.seq), ts: r.ts, type: r.type, name: r.name,
+      seq: Number(r.seq_text), ts: r.ts, type: r.type, name: r.name,
       payload: JSON.parse(r.payload) as unknown,
     })),
   );

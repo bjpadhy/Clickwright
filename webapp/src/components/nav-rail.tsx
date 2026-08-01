@@ -7,6 +7,7 @@ import {
 import { Icon } from "@/components/ui-kit/icon"
 import { cn } from "@/lib/utils"
 import { useConsole, type NavId } from "@/state/console"
+import { useInstrumentation } from "@/state/instrumentation"
 
 const NAV_ITEMS: { id: NavId; icon: string; label: string; short: string }[] = [
   { id: "chat", icon: "ti-message-circle", label: "Chat", short: "Chat" },
@@ -16,7 +17,8 @@ const NAV_ITEMS: { id: NavId; icon: string; label: string; short: string }[] = [
 ]
 
 export function NavRail() {
-  const { nav, goto, stage } = useConsole()
+  const { nav, goto } = useConsole()
+  const { model } = useInstrumentation()
 
   return (
     <aside className="flex w-[70px] shrink-0 flex-col items-center gap-[5px] border-r border-zinc-200 bg-white pt-3.5 pb-4">
@@ -31,8 +33,9 @@ export function NavRail() {
 
       {NAV_ITEMS.map((item) => {
         const active = nav === item.id
-        // Something is waiting on a human in Instrumentation while you're elsewhere.
-        const needsAttention = item.id === "instr" && stage === 3 && !active
+        // A gate is waiting on a human in Instrumentation while you're elsewhere.
+        const needsAttention =
+          item.id === "instr" && model.pendingGate !== null && !active
 
         return (
           <Tooltip key={item.id}>

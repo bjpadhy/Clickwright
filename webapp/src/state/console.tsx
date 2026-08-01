@@ -1,14 +1,18 @@
 /**
  * Client-side console state: which screen is open, which filters are set, what
  * is typed into a form. Everything that would survive a page reload on a real
- * deployment lives on the server (`src/api`), not here.
+ * deployment lives on the server, not here.
+ *
+ * Chat, Dashboards and Observability are still served by the in-memory mock in
+ * `src/mock`. Instrumentation is not — it runs against the real backend and owns
+ * its state in `src/state/instrumentation.tsx`.
  */
 
 import * as React from "react"
 import { toast } from "sonner"
 
 import { api } from "@/api/client"
-import type { AgentKind, AnswerKey, ServerState, SpecId } from "@/api/types"
+import type { AgentKind, AnswerKey, ServerState } from "@/api/types"
 
 export type NavId = "chat" | "instr" | "obs" | "dash"
 export type InstrTab = "run" | "hist"
@@ -32,29 +36,11 @@ interface ConsoleContextValue {
   nav: NavId
   goto: (nav: NavId) => void
 
-  /* instrumentation */
+  /* instrumentation — which of its two screens is showing */
   instrTab: InstrTab
   setInstrTab: (tab: InstrTab) => void
-  selectedHistory: SpecId
-  setSelectedHistory: (id: SpecId) => void
-  pendingSpec: SpecId | null
-  specInput: string
-  onSpecInput: (value: string) => void
-  loadSample: (id: SpecId) => void
-  clearPending: () => void
-  runPipeline: () => void
-  approve: () => void
-  changeRequestOpen: boolean
-  openChangeRequest: () => void
-  changeText: string
-  setChangeText: (value: string) => void
-  submitChangeRequest: () => void
-  viewReport: () => void
+  /** jump to Chat and ask the (still mocked) Analytics Agent about a feature */
   askAboutFeature: () => void
-  /** true while a run is mid-flight (stage 1–5) */
-  busy: boolean
-  /** 0 when nothing is running */
-  stage: number
 
   /* observability */
   obsTab: ObsTab
@@ -104,11 +90,6 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
 
   const [nav, setNav] = React.useState<NavId>("chat")
   const [instrTab, setInstrTab] = React.useState<InstrTab>("run")
-  const [selectedHistory, setSelectedHistory] = React.useState<SpecId>("wa")
-  const [pendingSpec, setPendingSpec] = React.useState<SpecId | null>(null)
-  const [specInput, setSpecInput] = React.useState("")
-  const [changeRequestOpen, setChangeRequestOpen] = React.useState(false)
-  const [changeText, setChangeText] = React.useState("")
 
   const [obsTab, setObsTab] = React.useState<ObsTab>("traces")
   const [traceFilter, setTraceFilter] = React.useState<TraceFilter>("all")
@@ -124,10 +105,6 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
   const [chatInput, setChatInput] = React.useState("")
   const [sqlOpen, setSqlOpen] = React.useState<Record<number, boolean>>({})
   const [chartMode, setChartMode] = React.useState<Record<number, "chart" | "table">>({})
-
-  const run = server.run
-  const stage = run?.stage ?? 0
-  const busy = stage > 0 && stage < 6
 
   /* server-pushed toasts */
   React.useEffect(() => api.onNotice(({ message }) => toast.success(message)), [])
@@ -153,60 +130,7 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
     [openChat, refreshDashboards]
   )
 
-  /* ── instrumentation ───────────────────────────────────────────────── */
-
-  const loadSample = React.useCallback((id: SpecId) => {
-    setPendingSpec(id)
-    setSpecInput("")
-  }, [])
-
-  // A pasted brief is only matched to a known spec when the run starts, so the
-  // textarea stays editable while you type.
-  const onSpecInput = React.useCallback((value: string) => setSpecInput(value), [])
-
-  const clearPending = React.useCallback(() => {
-    setPendingSpec(null)
-    setSpecInput("")
-  }, [])
-
-  const runPipeline = React.useCallback(() => {
-    const specId = pendingSpec ?? (specInput.trim() ? "ec" : null)
-    if (!specId) {
-      toast("Paste a spec or pick a sample first")
-      return
-    }
-    if (busy) return
-    setPendingSpec(specId)
-    setChangeRequestOpen(false)
-    void api.startRun(specId)
-  }, [busy, pendingSpec, specInput])
-
-  const approve = React.useCallback(() => {
-    setChangeRequestOpen(false)
-    void api.approveRun()
-  }, [])
-
-  const submitChangeRequest = React.useCallback(() => {
-    const note = changeText
-    setChangeRequestOpen(false)
-    setChangeText("")
-    void api.requestChanges(note)
-  }, [changeText])
-
-  const goNewSpec = React.useCallback(() => {
-    setInstrTab("run")
-    if (busy) return
-    setPendingSpec(null)
-    setSpecInput("")
-    setChangeRequestOpen(false)
-    void api.resetRun()
-  }, [busy])
-
-  const viewReport = React.useCallback(() => {
-    if (run) setSelectedHistory(run.specId)
-    setNav("instr")
-    setInstrTab("hist")
-  }, [run])
+  /* ── instrumentation → chat handoff ────────────────────────────────── */
 
   const askAboutFeature = React.useCallback(() => {
     void api.createConversation().then((id) => {
@@ -296,25 +220,8 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
     nav,
     goto,
     instrTab,
-    setInstrTab: (tab) => (tab === "run" ? goNewSpec() : setInstrTab(tab)),
-    selectedHistory,
-    setSelectedHistory,
-    pendingSpec,
-    specInput,
-    onSpecInput,
-    loadSample,
-    clearPending,
-    runPipeline,
-    approve,
-    changeRequestOpen,
-    openChangeRequest: () => setChangeRequestOpen(true),
-    changeText,
-    setChangeText,
-    submitChangeRequest,
-    viewReport,
+    setInstrTab,
     askAboutFeature,
-    busy,
-    stage,
     obsTab,
     setObsTab,
     traceFilter,

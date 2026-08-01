@@ -13,6 +13,18 @@ function client(): Anthropic {
 }
 
 /**
+ * Reasoning effort is pinned, never inherited.
+ *
+ * The Agent SDK loads the machine's ~/.claude settings by default, so whatever
+ * `effortLevel` the developer runs Claude Code at silently became the pipeline's
+ * effort too — measured at xhigh: ~5 minutes and ~10 output tokens/sec for a
+ * 2.8k-token DDL proposal, with the ~8s of process startup lost in the noise.
+ * These prompts are tightly specified and schema-validated, so medium is the
+ * right trade, and pinning it keeps runs comparable across machines.
+ */
+const EFFORT = "medium" as const;
+
+/**
  * No API key → company Claude Code plan: call through the Claude Agent SDK,
  * which authenticates with the machine's Claude Code OAuth login. Single-turn,
  * no tools — behaves like a plain completion.
@@ -31,6 +43,7 @@ async function completeViaAgentSdk(
     prompt,
     options: {
       model: env.llm.model,
+      effort: EFFORT,
       // No tools are allowed, but the CLI can split long responses across
       // assistant turns — maxTurns: 1 intermittently dies with
       // error_max_turns on big prompts (seen in trace pipeline:01_express_checkout).
@@ -135,7 +148,9 @@ export async function complete(
       const response = await client().messages.create({
         model,
         max_tokens: options.maxTokens ?? 8000,
-        temperature: options.temperature ?? 0,
+        output_config: { effort: EFFORT },
+        // `temperature` is NOT sent: on claude-sonnet-5 and every other current
+        // model a non-default sampling parameter is rejected with a 400.
         ...(options.system ? { system: options.system } : {}),
         messages: [{ role: "user", content: prompt }],
       });

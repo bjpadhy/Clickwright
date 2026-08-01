@@ -11,4 +11,14 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    proxy: {
+      // The Instrumentation screen talks to the real backend (backend/API.md).
+      // `/api/runs/:id/events` is SSE — buffering must stay off.
+      "/api": {
+        target: process.env["BACKEND_URL"] ?? "http://localhost:8787",
+        changeOrigin: true,
+      },
+    },
+  },
 })

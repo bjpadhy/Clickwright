@@ -20,7 +20,7 @@ nvm use                 # Node 20
 npm install
 npm run check-env       # ClickHouse + LLM + Langfuse must all be green
 npm run seed            # parse base_context.md into context_store (once)
-npm run serve           # http://localhost:8787
+npm run dev             # http://localhost:8787, restarts on any .ts or prompt change
 
 cd ../webapp && npm install && npm run dev    # :5173, proxies /api → :8787
 ```
@@ -35,7 +35,8 @@ Code OAuth login (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` in `backend
 |---|---|
 | `npm run check-env` | Verifies ClickHouse, LLM, Langfuse |
 | `npm run seed` | Seeds `context_store` v1 from `base_context.md` |
-| `npm run serve` | Starts the API server on :8787 |
+| `npm run dev` | API server with hot reload — restarts on `.ts` **and** `prompts/*.txt` edits |
+| `npm run serve` | API server without watching (use for demos and any long run) |
 | `npm test` | Unit tests (observe modules) |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npx tsx scripts/run-instrumentation.ts ../specs/01_express_checkout --yes` | Run a spec from the CLI (`--yes` auto-approves both gates) |
@@ -44,6 +45,21 @@ Code OAuth login (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` in `backend
 | `npx tsx scripts/apply-audit-context.ts` | Apply the base-data audit corrections |
 | `npx tsx scripts/apply-ordering-finding.ts` | Apply the event-ordering finding |
 | `npx tsx scripts/comment-tables.ts` | Project context knowledge onto base tables as ClickHouse COMMENTs |
+
+### Hot reload
+
+`npm run dev` watches both source and `prompts/*.txt`. Watching the prompts matters:
+they are cached in memory after first load, so without a restart an edited prompt has
+no effect and you debug a version of the file that is no longer on disk.
+
+Restarts are graceful — SIGTERM drains queued `runs_log` inserts, flushes Langfuse
+spans, closes open SSE streams and the ClickHouse client, with a 4s cap so a slow
+network cannot hang the reload. Without that, every reload would truncate a run's
+event history.
+
+**Use `npm run serve` for demos and long runs.** A reload during an active run
+abandons it: the shutdown logs a warning naming the run and reminding you that any
+tables it created are now undocumented (`npx tsx scripts/reset-spec.ts --orphans`).
 
 ### Prompts
 

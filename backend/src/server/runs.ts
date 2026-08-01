@@ -113,6 +113,17 @@ export class RunManager {
     return this.runs.get(id);
   }
 
+  /** Is a run mid-flight? A hot reload during one would abandon it. */
+  activeRun(): RunRecord | null {
+    return this.active;
+  }
+
+  /** Await every queued runs_log insert — call before the process exits so a
+   * restart cannot truncate a run's event history. */
+  async drain(): Promise<void> {
+    await this.writes.catch(() => {});
+  }
+
   /** Create a run from an existing spec dir, uploaded content, OR an advisor
    *  suggestion (which runs the optimizer instead of the instrumentation agent). */
   async create(input: {

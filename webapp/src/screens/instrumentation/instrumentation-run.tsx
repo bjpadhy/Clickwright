@@ -273,9 +273,13 @@ export function InstrumentationRun() {
                         ))}
                       </div>
                     ) : null}
-                    {model.result.contextWarnings.map((warning) => (
-                      <ContradictionCallout key={warning} text={warning} />
-                    ))}
+                    {/* Normally the context panel above already shows these —
+                        only surface them here if that panel isn't rendered. */}
+                    {!model.contextProposal
+                      ? model.result.contextWarnings.map((warning) => (
+                          <ContradictionCallout key={warning} text={warning} />
+                        ))
+                      : null}
                   </PanelBody>
                 </Panel>
               ) : null}
@@ -419,8 +423,7 @@ function ApprovalTrail() {
             />
             <span className="font-mono text-[11px] text-zinc-500">{approval.gate}</span>
             <span className="text-[12.5px] text-zinc-700">
-              {approval.approved ? "approved by" : "changes requested by"}{" "}
-              <b>{approval.identity || "unnamed reviewer"}</b>
+              {approval.approved ? "approved" : "changes requested"}
               {approval.feedback ? ` — "${approval.feedback}"` : ""}
             </span>
           </div>

@@ -219,10 +219,9 @@ function summarize(key: string, output: unknown): string | null {
     case "approval":
     case "update_approval": {
       if (!out) return null
-      const who = String(out["identity"] ?? "") || "unknown reviewer"
       return out["approved"] === true
-        ? `approved by ${who}`
-        : `changes requested by ${who}${out["feedback"] ? ` — "${String(out["feedback"])}"` : ""}`
+        ? "approved"
+        : `changes requested${out["feedback"] ? ` — "${String(out["feedback"])}"` : ""}`
     }
     default:
       return null
@@ -280,7 +279,12 @@ export function buildRunModel(events: RunEvent[]): RunModel {
       case "step_error": {
         if (WRAPPERS.has(event.name)) break
         const group = groups.get(key)
-        const current = group?.attempts.at(-1)
+        // Close the oldest attempt still open, not simply the last one: when a
+        // fan-out attempt fails, `Promise.all` rejects immediately but its
+        // siblings keep running, so the next attempt's step_start can arrive
+        // before the previous attempt's step_end. Closing `.at(-1)` there would
+        // strand an attempt as "running" for the rest of the run.
+        const current = group?.attempts.find((a) => a.status === "running")
         if (!group || !current) break
         current.endedAt = event.ts
         current.ms = Date.parse(event.ts) - Date.parse(current.startedAt)
@@ -291,7 +295,8 @@ export function buildRunModel(events: RunEvent[]): RunModel {
           current.status = "error"
           current.error = String(event.payload["error"] ?? "unknown error")
         }
-        group.status = current.status
+        // The group reflects its newest attempt, which may not be this one.
+        group.status = group.attempts.at(-1)!.status
         break
       }
 
@@ -354,6 +359,20 @@ export function buildRunModel(events: RunEvent[]): RunModel {
         }
         break
       }
+    }
+  }
+
+  // A terminal run has no live steps. A fan-out sibling whose step_end was
+  // dropped (or never emitted, because a failed attempt abandoned it) would
+  // otherwise spin forever under a finished pipeline — so settle the orphans
+  // against the run's own outcome rather than leaving a lying spinner.
+  if (status === "succeeded" || status === "failed") {
+    const settled = status === "succeeded" ? "done" : "error"
+    for (const group of groups.values()) {
+      for (const attempt of group.attempts) {
+        if (attempt.status === "running") attempt.status = settled
+      }
+      group.status = group.attempts.at(-1)?.status ?? group.status
     }
   }
 

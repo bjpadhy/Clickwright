@@ -35,6 +35,8 @@ export function SpecInput() {
 
   const uploadReady = !!(name.trim() && specMd.trim() && ndjson.trim())
   const ready = !!sample || uploadReady
+  /** The user has started supplying their own spec — samples no longer apply. */
+  const composing = !!(specMd.trim() || ndjson.trim())
   const ndjsonLines = ndjson.trim() ? ndjson.trim().split("\n").length : 0
   const recent = runs.slice(0, 4)
 
@@ -126,7 +128,14 @@ export function SpecInput() {
                 </FileField>
               </div>
 
-              <div className="mt-3.5 flex flex-col gap-[7px]">
+              {/* Once there's a spec or event data in the form, the samples are
+                  no longer an "or" — they'd discard what was just entered. */}
+              <div
+                className={cn(
+                  "mt-3.5 flex-col gap-[7px]",
+                  composing ? "hidden" : "flex"
+                )}
+              >
                 <div className="text-[11px] font-[650] tracking-[.06em] text-zinc-400">
                   OR START FROM A SAMPLE SPEC
                 </div>

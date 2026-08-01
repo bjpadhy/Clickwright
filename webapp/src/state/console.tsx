@@ -27,7 +27,9 @@ const subscribe = (listener: () => void) => api.subscribe(listener)
 const getSnapshot = () => api.getState()
 
 export function useServerState(): ServerState {
-  return React.useSyncExternalStore(subscribe, getSnapshot)
+  // Third arg = server snapshot. The mock store is plain in-memory state with no
+  // client-only reads, so the same getter is correct on both sides.
+  return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
 interface ConsoleContextValue {

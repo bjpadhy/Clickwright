@@ -9,11 +9,30 @@ import { cn } from "@/lib/utils"
 import { useConsole, type NavId } from "@/state/console"
 import { useInstrumentation } from "@/state/instrumentation"
 
-const NAV_ITEMS: { id: NavId; icon: string; label: string; short: string }[] = [
+const NAV_ITEMS: {
+  id: NavId
+  icon: string
+  label: string
+  short: string
+  /** Shown but not reachable yet — still served by the mock. */
+  disabled?: boolean
+}[] = [
   { id: "chat", icon: "ti-message-circle", label: "Chat", short: "Chat" },
   { id: "instr", icon: "ti-wand", label: "Instrumentation", short: "Instrument" },
-  { id: "obs", icon: "ti-activity", label: "Observability", short: "Observe" },
-  { id: "dash", icon: "ti-layout-dashboard", label: "Dashboards", short: "Boards" },
+  {
+    id: "obs",
+    icon: "ti-activity",
+    label: "Observability — coming soon",
+    short: "Observe",
+    disabled: true,
+  },
+  {
+    id: "dash",
+    icon: "ti-layout-dashboard",
+    label: "Dashboards — coming soon",
+    short: "Boards",
+    disabled: true,
+  },
 ]
 
 export function NavRail() {
@@ -39,15 +58,28 @@ export function NavRail() {
 
         return (
           <Tooltip key={item.id}>
+            {/* `asChild` on a disabled button swallows pointer events, so the
+                tooltip needs its own wrapper to stay hoverable. */}
             <TooltipTrigger asChild>
+              <span className={cn(item.disabled && "cursor-not-allowed")}>
               <Button
                 variant="ghost"
+                disabled={item.disabled}
                 aria-current={active ? "page" : undefined}
-                onClick={() => goto(item.id)}
+                aria-disabled={item.disabled || undefined}
+                onClick={() => {
+                  if (!item.disabled) goto(item.id)
+                }}
                 className={cn(
                   "relative h-auto w-14 flex-col gap-1 rounded-[11px] px-0 pt-[9px] pb-2",
-                  "hover:bg-zinc-100",
-                  active ? "bg-zinc-100 text-zinc-950" : "bg-transparent text-zinc-600"
+                  item.disabled
+                    ? "pointer-events-none bg-transparent text-zinc-300 opacity-60"
+                    : "hover:bg-zinc-100",
+                  active && !item.disabled
+                    ? "bg-zinc-100 text-zinc-950"
+                    : item.disabled
+                      ? ""
+                      : "bg-transparent text-zinc-600"
                 )}
               >
                 <Icon name={item.icon} size={20} />
@@ -58,6 +90,7 @@ export function NavRail() {
                   <span className="absolute top-1.5 right-2.5 size-2 animate-pulse-dot rounded-full border-2 border-white bg-amber-600" />
                 ) : null}
               </Button>
+              </span>
             </TooltipTrigger>
             <TooltipContent side="right">{item.label}</TooltipContent>
           </Tooltip>

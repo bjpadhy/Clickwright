@@ -17,7 +17,6 @@ import { InstrumentationTabs } from "./instrumentation-tabs"
 import {
   BackendUnreachable,
   ContextProposalBody,
-  ContradictionCallout,
   LoadedTablesTable,
   ProposedTables,
   StepTimeline,
@@ -67,7 +66,6 @@ export function InstrumentationHistory() {
     events && events.length > 1
       ? formatMs(Date.parse(events.at(-1)!.ts) - Date.parse(events[0]!.ts))
       : ""
-  const approver = model.approvals.filter((approval) => approval.approved).at(-1)
   const rows = model.result?.tables.reduce((sum, table) => sum + table.rowsLoaded, 0) ?? 0
   const ddlAttempts = model.steps.find((step) => step.key === "ddl_generation")?.attempts.length
 
@@ -80,7 +78,6 @@ export function InstrumentationHistory() {
           value: model.result?.tables.map((table) => table.name).join(", ") || "—",
         },
         { key: "ROWS LOADED", value: rows ? rows.toLocaleString() : "—" },
-        { key: "APPROVED BY", value: approver?.identity || "—" },
         { key: "PIPELINE TIME", value: duration || "—" },
         {
           key: "CONTEXT ENTRIES",
@@ -180,12 +177,6 @@ export function InstrumentationHistory() {
                 {model.traceUrl ? <TraceLink url={model.traceUrl} /> : null}
                 <span className="text-[11.5px] text-zinc-500">
                   {entry.started.slice(0, 19)}
-                  {approver ? (
-                    <>
-                      {" "}
-                      · approved by <b>{approver.identity || "unnamed reviewer"}</b>
-                    </>
-                  ) : null}
                 </span>
               </div>
 
@@ -285,8 +276,7 @@ export function InstrumentationHistory() {
                           {approval.gate}
                         </span>
                         <span className="text-[12.5px] text-zinc-700">
-                          {approval.approved ? "approved by" : "changes requested by"}{" "}
-                          <b>{approval.identity || "unnamed reviewer"}</b>
+                          {approval.approved ? "approved" : "changes requested"}
                           {approval.feedback ? ` — "${approval.feedback}"` : ""}
                         </span>
                       </div>
@@ -310,12 +300,10 @@ export function InstrumentationHistory() {
                     ) : null}
                   </PanelHeader>
                   <PanelBody className="px-4 py-3.5">
+                    {/* Warnings live inside the proposal body — the run's
+                        `contextWarnings` are the same list, so rendering both
+                        surfaced every contradiction twice. */}
                     <ContextProposalBody proposal={model.contextProposal} />
-                    {model.result?.contextWarnings.map((warning) => (
-                      <div key={warning} className="mt-2.5">
-                        <ContradictionCallout text={warning} />
-                      </div>
-                    ))}
                   </PanelBody>
                 </Panel>
               ) : null}

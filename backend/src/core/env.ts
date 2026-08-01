@@ -40,6 +40,10 @@ export const env = {
     username: optional("CLICKHOUSE_USER", "default"),
     password: process.env["CLICKHOUSE_PASSWORD"] ?? "",
     database: optional("CLICKHOUSE_DATABASE", "default"),
+    // ClickHouse Cloud keeps system.query_log per replica; clusterAllReplicas()
+    // over this cluster unions them. Measured on our service: the local table
+    // sees roughly half the queries. See src/observe/query-log.ts.
+    cluster: optional("CLICKHOUSE_CLUSTER", "default"),
   },
   langfuse: {
     publicKey: required("LANGFUSE_PUBLIC_KEY"),

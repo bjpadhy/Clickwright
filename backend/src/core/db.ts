@@ -1,5 +1,18 @@
-import { createClient, type ClickHouseClient } from "@clickhouse/client";
+import {
+  createClient,
+  type ClickHouseClient,
+  type ClickHouseSettings,
+} from "@clickhouse/client";
 import { env } from "./env.js";
+import { buildLogComment, currentQueryContext } from "./query-context.js";
+
+/**
+ * Every statement carries a log_comment naming the agent that issued it, so
+ * system.query_log can attribute work after the fact. See query-context.ts.
+ */
+function tagged(extra: ClickHouseSettings = {}): ClickHouseSettings {
+  return { ...extra, log_comment: buildLogComment(currentQueryContext()) };
+}
 
 let client: ClickHouseClient | null = null;
 
@@ -18,7 +31,11 @@ export function db(): ClickHouseClient {
 export async function query<T = Record<string, unknown>>(
   sql: string,
 ): Promise<T[]> {
-  const result = await db().query({ query: sql, format: "JSONEachRow" });
+  const result = await db().query({
+    query: sql,
+    format: "JSONEachRow",
+    clickhouse_settings: tagged(),
+  });
   return result.json<T>();
 }
 
@@ -26,7 +43,7 @@ export async function query<T = Record<string, unknown>>(
 export async function command(sql: string): Promise<void> {
   await db().command({
     query: sql,
-    clickhouse_settings: { wait_end_of_query: 1 },
+    clickhouse_settings: tagged({ wait_end_of_query: 1 }),
   });
 }
 
@@ -40,7 +57,7 @@ export async function insert(
     table,
     values: rows,
     format: "JSONEachRow",
-    clickhouse_settings: { date_time_input_format: "best_effort" },
+    clickhouse_settings: tagged({ date_time_input_format: "best_effort" }),
   });
 }
 

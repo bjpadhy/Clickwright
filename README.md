@@ -126,9 +126,11 @@ spec.md + events.ndjson
   ├─ reconcile    ┘          store conventions + the live table list
   ├─ baseline plan (code)    a correct-but-plain schema from the measurements;
   │                          also the fallback if design fails
-  ├─ design (LLM) ×N         ONE CALL PER EVENT TYPE, ALL CONCURRENT: codecs,
-  │                          Enum8 vs LowCardinality, and an ordering key shaped
-  │                          by the PM's questions (low cardinality first)
+  ├─ design (LLM) ×1         ONE call for the WHOLE schema, so shared columns get
+  │                          one type, join keys stay comparable and enum members
+  │                          match across tables — plus codecs, Enum8 vs
+  │                          LowCardinality, and ordering keys shaped by the PM's
+  │                          questions (low cardinality first)
   ├─ validate (code)         every profiled column present, none invented, one
   │                          statement, ClickHouse EXPLAIN-parses it — else retry
   │                          with the verbatim error; after 3 tries ship the baseline
@@ -184,7 +186,7 @@ effective speed lever available.
 
 | Concurrent work | Why it cannot interfere |
 |---|---|
-| Per-table DDL design (N calls) | Each table is an independent artifact with its own profile, validation, retry budget and fallback. One table failing cannot affect a sibling. Consistency comes from every call receiving identical conventions. |
+| ~~Per-table DDL design~~ | **Removed.** Tables in one spec are *not* independent — they share columns and join keys — so designing them separately produced incoherent types. It is now a single call; validation and retry are still per table within it. |
 | Per-task analytics SQL (≤4 calls) | The planner produces independent tasks by construction; each writes one read-only query. Results are collected before any of them is interpreted. |
 | Context write: feature vs conventions | Two disjoint entity sets — one may only emit `spec:`/`metric:`/`funnel:`/`entity:`, the other only revisions to existing `convention:`/`known_issue:` plus warnings. Neither reads the other's output. |
 | Context bundle + live reconciliation | Two independent reads. |

@@ -64,9 +64,14 @@ const ProposalSchema = z.object({
 });
 export type InstrumentationProposal = z.infer<typeof ProposalSchema>;
 
-const DesignSchema = z.object({
-  ddl: z.string().min(40),
-  rationale: RationaleSchema,
+const SchemaDesignSchema = z.object({
+  tables: z
+    .array(z.object({ event: z.string().min(1), ddl: z.string().min(40), rationale: RationaleSchema }))
+    .min(1),
+  schema_notes: z
+    .object({ shared_columns: z.string().default(""), join_path: z.string().default("") })
+    .partial()
+    .optional(),
 });
 
 export interface Approval {
@@ -368,96 +373,125 @@ export async function runInstrumentation(
             const purposes: Record<string, string> = {};
             for (const [event, desc] of parsed) purposes[event] = desc;
 
-            // 3. A ClickHouse engineer designs each table FROM the measured facts:
-            //    codecs, Enum8 vs LowCardinality, ordering-key order for pruning.
-            //    Code validated the arithmetic; this is the judgement that earns the
-            //    marks. Per table, concurrent, with the deterministic plan as both
-            //    the starting point and the fallback if a design is rejected.
-            const tables = await Promise.all(
-              [...plans.entries()].map(([event, plan]) =>
-                step(genSpan, `design_${event}`, { event }, async (dSpan) => {
-                  const purpose =
-                    purposes[event]?.slice(0, 140) ?? `${event} events for this feature`;
-                  const baseline = renderCreateTable(plan, purpose);
-                  const expected = new Set(plan.columns.map((c) => c.name));
-                  let designFeedback = feedback;
-                  let lastDdl = "";
+            // 3. ONE call designs the WHOLE schema. Per-table calls could not reason
+            //    across tables — shared column types, join-key compatibility,
+            //    consistent enum members — and each re-sent the conventions, so a
+            //    5-event spec paid 5x the input for a less coherent result.
+            const events = [...plans.keys()];
+            const expected = new Map(
+              [...plans.entries()].map(([e, p]) => [e, new Set(p.columns.map((c) => c.name))]),
+            );
+            const baselineText = [...plans.entries()]
+              .map(([e, p]) => renderCreateTable(p, purposes[e] ?? `${e} events`))
+              .join("\n\n");
 
-                  for (let tryN = 1; tryN <= MAX_TABLE_TRIES; tryN++) {
-                    try {
-                      const prompt = await loadPrompt("instrument_design_table", {
-                        event,
-                        profile: eventProfiles.get(event) ?? "",
-                        baseline,
-                        spec,
-                        conventions: reconNotes
-                          ? `${bundle.markdown}\n\n## Live-schema warnings\n${reconNotes}`
-                          : bundle.markdown,
-                        feedback: designFeedback
-                          ? `\n<feedback>\nYour previous design was rejected: ${designFeedback}\n</feedback>\n`
-                          : "",
-                      });
-                      const text = await llm(dSpan, `design_${event}`, prompt);
-                      const design = DesignSchema.parse(JSON.parse(stripFences(text)));
-                      // a trailing semicolon is idiomatic, not an error — strip it,
-                      // then reject only a genuine second statement
-                      const ddl = design.ddl.trim().replace(/;+\s*$/, "");
-                      lastDdl = ddl;
+            let designFeedback = feedback;
+            let designed: Array<{
+              name: string; event: string; purpose: string; ddl: string;
+              rationale: z.infer<typeof RationaleSchema>;
+            }> | null = null;
 
-                      if (!/^create\s+table\s/i.test(ddl))
-                        throw new Error("must be a single CREATE TABLE statement");
-                      // a ';' inside a quoted COMMENT is legal SQL — strip string
-                      // literals before looking for a genuine second statement
-                      if (ddl.replace(/'(?:[^']|'')*'/g, "''").includes(";"))
-                        throw new Error("only one statement allowed (found a second statement)");
-                      if (!new RegExp(`create\\s+table\\s+\`?${event}\`?[\\s(]`, "i").test(ddl))
-                        throw new Error(`the table must be named ${event}`);
-                      // every measured field must survive, and nothing invented.
-                      // Parse the column list for real: a line-anchored backtick
-                      // regex misses a single-line DDL or unbackticked names, which
-                      // would silently reject every design and fall back to baseline.
-                      const declared = new Set(parseDeclaredColumns(ddl));
-                      const dropped = [...expected].filter((c) => !declared.has(c));
-                      if (dropped.length)
-                        throw new Error(`these measured columns are missing: ${dropped.join(", ")}`);
-                      const invented = [...declared].filter((c) => !expected.has(c));
-                      if (invented.length)
-                        throw new Error(`these columns are not in the profile: ${invented.join(", ")}`);
-                      await command(`EXPLAIN AST ${ddl}`); // ClickHouse must parse it
+            for (let tryN = 1; tryN <= MAX_TABLE_TRIES && !designed; tryN++) {
+              // each attempt is its own span, so a rejection and its reason are
+              // visible in Langfuse rather than buried in a log line
+              designed = await step(
+                genSpan,
+                `schema_design_attempt_${tryN}`,
+                { events, feedback: designFeedback },
+                async (dSpan) => {
+                  const prompt = await loadPrompt("instrument_design_schema", {
+                    profiles: events.map((e) => eventProfiles.get(e) ?? "").join("\n\n"),
+                    baseline: baselineText,
+                    spec,
+                    conventions: reconNotes
+                      ? `${bundle.markdown}\n\n## Live-schema warnings\n${reconNotes}`
+                      : bundle.markdown,
+                    feedback: designFeedback
+                      ? `\n<feedback>\nYour previous design was rejected. Fix exactly these and keep everything else:\n${designFeedback}\n</feedback>\n`
+                      : "",
+                  });
+                  const text = await llm(dSpan, "schema_design", prompt);
+                  const parsed = SchemaDesignSchema.parse(JSON.parse(stripFences(text)));
 
-                      return { name: event, event, purpose, ddl, rationale: design.rationale };
-                    } catch (error) {
-                      designFeedback = error instanceof Error ? error.message : String(error);
-                      emitRunEvent({
-                        type: "log",
-                        name: "design_rejected",
-                        payload: {
-                          event,
-                          attempt: tryN,
-                          reason: designFeedback.slice(0, 300),
-                          // the offending SQL, or a rejection is undiagnosable
-                          ddl: lastDdl.slice(0, 1200),
-                        },
-                      });
+                  const problems: string[] = [];
+                  const out: typeof designed = [];
+                  for (const event of events) {
+                    const entry = parsed.tables.find((t) => t.event === event);
+                    if (!entry) {
+                      problems.push(`${event}: no table was produced for this event`);
+                      continue;
                     }
+                    const ddl = entry.ddl.trim().replace(/;+\s*$/, "");
+                    const want = expected.get(event)!;
+                    if (!/^create\s+table\s/i.test(ddl)) {
+                      problems.push(`${event}: must be a single CREATE TABLE statement`);
+                      continue;
+                    }
+                    if (ddl.replace(/'(?:[^']|'')*'/g, "''").includes(";")) {
+                      problems.push(`${event}: contains more than one statement`);
+                      continue;
+                    }
+                    if (!new RegExp(`create\\s+table\\s+\`?${event}\`?[\\s(]`, "i").test(ddl)) {
+                      problems.push(`${event}: the table must be named ${event}`);
+                      continue;
+                    }
+                    const declared = new Set(parseDeclaredColumns(ddl));
+                    const dropped = [...want].filter((c) => !declared.has(c));
+                    const invented = [...declared].filter((c) => !want.has(c));
+                    if (dropped.length) problems.push(`${event}: missing measured columns ${dropped.join(", ")}`);
+                    if (invented.length) problems.push(`${event}: columns not in the profile: ${invented.join(", ")}`);
+                    if (dropped.length || invented.length) continue;
+                    try {
+                      await command(`EXPLAIN AST ${ddl}`);
+                    } catch (error) {
+                      problems.push(
+                        `${event}: ClickHouse rejected it — ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
+                      );
+                      continue;
+                    }
+                    out.push({
+                      name: event,
+                      event,
+                      purpose: purposes[event]?.slice(0, 140) ?? `${event} events for this feature`,
+                      ddl,
+                      rationale: entry.rationale,
+                    });
                   }
 
-                  // every design attempt failed — ship the deterministic schema
+                  if (problems.length > 0) {
+                    designFeedback = problems.join("\n");
+                    // ERROR level puts the reason in the trace, so the next attempt's
+                    // input and this rejection sit side by side in Langfuse
+                    throw new Error(`schema rejected (${problems.length} problem(s)):\n${designFeedback}`);
+                  }
                   emitRunEvent({
                     type: "log",
-                    name: "design_fallback",
-                    payload: { event, note: "using the deterministic baseline schema" },
+                    name: "schema_designed",
+                    payload: {
+                      tables: out.length,
+                      sharedColumns: parsed.schema_notes?.shared_columns ?? "",
+                      joinPath: parsed.schema_notes?.join_path ?? "",
+                    },
                   });
-                  return {
-                    name: event,
-                    event,
-                    purpose,
-                    ddl: baseline,
-                    rationale: renderRationale(plan),
-                  };
-                }),
-              ),
-            );
+                  return out;
+                },
+              ).catch(() => null);
+            }
+
+            const tables =
+              designed ??
+              // every attempt failed — ship the deterministic schema rather than nothing
+              (() => {
+                emitRunEvent({
+                  type: "log",
+                  name: "schema_fallback",
+                  payload: { note: "using the deterministic baseline schema", reason: designFeedback.slice(0, 300) },
+                });
+                return [...plans.entries()].map(([event, plan]) => {
+                  const purpose = purposes[event]?.slice(0, 140) ?? `${event} events`;
+                  return { name: event, event, purpose, ddl: renderCreateTable(plan, purpose), rationale: renderRationale(plan) };
+                });
+              })();
 
             // 3. Dry-run every statement — cheap, and proves the synthesis.
             await step(genSpan, "dry_run", { tables: tables.map((t) => t.name) }, async () => {
@@ -509,8 +543,8 @@ export async function runInstrumentation(
               created.push(table.name);
               emitRunEvent({
                 type: "log",
-                name: "ddl_statement",
-                payload: { statement: `CREATE TABLE ${table.name}`, ok: true, ms: Date.now() - t0 },
+                name: "table_created",
+                payload: { table: table.name, ok: true, ms: Date.now() - t0 },
               });
             }
             for (const table of proposal.tables) {
@@ -523,8 +557,14 @@ export async function runInstrumentation(
               const loadedCount = await rowCount(table.name);
               emitRunEvent({
                 type: "log",
-                name: "data_load",
-                payload: { table: table.name, rows: loadedCount, ok: loadedCount === records.length, ms: Date.now() - t0 },
+                name: "rows_loaded",
+                payload: {
+                  table: table.name,
+                  rows: loadedCount,
+                  expected: records.length,
+                  ok: loadedCount === records.length,
+                  ms: Date.now() - t0,
+                },
               });
               if (loadedCount !== records.length) {
                 throw new Error(
@@ -539,6 +579,15 @@ export async function runInstrumentation(
                 rowsLoaded: loadedCount,
               });
             }
+            emitRunEvent({
+              type: "log",
+              name: "execution_complete",
+              payload: {
+                tables: results.length,
+                rows: results.reduce((sum, r) => sum + r.rowsLoaded, 0),
+                verified: results.every((r) => r.rowsLoaded === r.rowsInFile),
+              },
+            });
             return results;
           },
         );

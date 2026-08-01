@@ -41,6 +41,27 @@ async function describeTable(table: string | null): Promise<string> {
 
 /** "optimization" gates an advisor-suggested schema change; its proposal shape is
  *  OptimizationProposal, not DdlProposal — the UI must branch on the gate name. */
+/**
+ * Step names are implementation detail; the UI wants phases. Several steps and all
+ * their LLM progress ticks collapse into one line, so "Executing on ClickHouse"
+ * shows table results only and never a stream of thinking ticks.
+ */
+const RUN_PHASES: Array<[RegExp, string]> = [
+  [/^profile$/, "Profiling the events"],
+  [/^(context_load|schema_reconciliation)$/, "Reading the knowledge store"],
+  [/^(ddl_generation_attempt|schema_design_attempt|schema_design)/, "Designing the schema"],
+  [/^dry_run/, "Validating the schema"],
+  [/^(approval_attempt|update_approval_attempt)/, "Waiting for your approval"],
+  [/^ddl_execution_attempt/, "Creating tables and loading data"],
+  [/^(context_update|update_generation_attempt)/, "Updating the knowledge store"],
+  [/^(instrumentation|optimization)$/, ""],
+];
+
+export function runPhaseOf(stepName: string): string {
+  for (const [re, label] of RUN_PHASES) if (re.test(stepName)) return label;
+  return "";
+}
+
 export type Gate = "ddl" | "context" | "optimization";
 export type RunKind = "spec" | "optimization";
 
@@ -53,6 +74,8 @@ export interface ApprovalDecision {
 export interface StoredEvent extends RunEvent {
   seq: number;
   ts: string;
+  /** Reader-facing grouping; "" means plumbing the UI should not surface. */
+  phase: string;
 }
 
 export interface RunRecord {
@@ -70,6 +93,8 @@ export interface RunRecord {
   specDir: string;
   /** Set only when kind === "optimization". */
   suggestionId: string | null;
+  /** Most recent step, used to attribute progress ticks to a phase. */
+  currentStep?: string;
   /** Wall-clock of the whole run: set when execution starts, not when queued. */
   startedAt: string | null;
   finishedAt: string | null;
@@ -220,10 +245,20 @@ export class RunManager {
   }
 
   private push(run: RunRecord, event: RunEvent): void {
+    // A step_start tells us which phase we are in; everything after it — including
+    // the LLM progress ticks, which carry no step name of their own — belongs to
+    // that phase until the next step begins.
+    if (event.type === "step_start") run.currentStep = event.name;
+    const phase =
+      event.type === "status" || event.type.startsWith("approval_")
+        ? runPhaseOf(run.currentStep ?? "")
+        : runPhaseOf(event.type === "log" ? (run.currentStep ?? "") : event.name);
+
     const stored: StoredEvent = {
       ...event,
       seq: run.events.length,
       ts: new Date().toISOString(),
+      phase,
     };
     run.events.push(stored);
     // buffer the durable write, then fan out — a broken SSE socket must never

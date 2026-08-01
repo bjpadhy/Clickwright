@@ -197,10 +197,24 @@ seven event types (they are named events, so plain `onmessage` will NOT fire).
 | `step_error` | step name | `{ error: string, elapsedMs }` — verbatim failure, feeds the retry |
 | `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ durationMs, tables: LoadedTable[], contextEntries: {entity, version}[], contextWarnings: string[], traceUrl }`; `failed` → `{ durationMs, error, resetHint }` |
 | `approval_request` | `"ddl"` \| `"context"` | `{ proposal: DdlProposal \| ContextProposal }` — ContextProposal may carry `warnings: string[]` (the "contradiction surfaced" chips) |
-| `log` | `"ddl_statement"` \| `"data_load"` | `{ statement?, table?, rows?, ok, ms }` — per-statement execution progress |
+| `log` | see below | per-step detail; attributed to the current `phase` |
 | `approval_result` | gate | `{ approved: boolean, feedback: string, identity: string }` |
 
 `LoadedTable = { name, event, purpose, rowsInFile, rowsLoaded }`.
+
+**Every run event carries a `phase`** — render that, not `name`. An empty phase means
+plumbing to skip. LLM progress ticks are attributed to the step that is running, so
+"Designing the schema" shows elapsed time while "Creating tables and loading data"
+shows table results only, never thinking ticks.
+
+Phases in order: *Profiling the events · Reading the knowledge store · Designing the
+schema · Validating the schema · Waiting for your approval · Creating tables and
+loading data · Updating the knowledge store*.
+
+`log` event names: `llm_start` / `llm_progress` / `llm_done` (elapsed time during a
+generation) · `schema_designed` `{ tables, sharedColumns, joinPath }` · `table_created`
+`{ table, ok, ms }` · `rows_loaded` `{ table, rows, expected, ok, ms }` ·
+`execution_complete` `{ tables, rows, verified }` · `schema_fallback` `{ note, reason }`.
 
 **Timing.** Show `durationMs` from the run (or the terminal `status` event) as the
 elapsed time — it is measured from the start of execution to the terminal state and

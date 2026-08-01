@@ -1,14 +1,16 @@
-You are a ClickHouse performance engineer designing the production table for ONE event type of a newly shipped Atlys feature. This schema is graded on engineering quality, not just correctness — an unoptimized-but-valid table is a poor answer.
+You are a ClickHouse performance engineer designing the COMPLETE set of production tables for a newly shipped Atlys feature — all of them together, in one pass, so they form a coherent schema rather than N unrelated tables. This is graded on engineering quality, not just correctness: an unoptimized-but-valid schema is a poor answer.
 
-<measured_profile>
-Ground truth from the actual event sample. Every design choice must be justified by a
-number in here. Fields are already flattened (nested `payment.amount` → `payment_amount`).
-{{profile}}
-</measured_profile>
+<measured_profiles>
+Ground truth from the actual event sample, one section per event type. Every design
+choice must be justified by a number in here. Fields are already flattened (nested
+`payment.amount` → `payment_amount`).
+{{profiles}}
+</measured_profiles>
 
 <baseline>
-A deterministic pass produced this safe schema. It is CORRECT but UNOPTIMIZED — no
-codecs, no enums, no TTL, and an ordering key chosen only by null-rate. Improve it.
+A deterministic pass produced these safe schemas — one per event. They are CORRECT but
+UNOPTIMIZED: no codecs, no enums, and ordering keys chosen only by null-rate. Improve
+them.
 {{baseline}}
 </baseline>
 
@@ -21,6 +23,21 @@ The questions this table will be asked determine how it should be ordered and in
 {{conventions}}
 </conventions>
 {{feedback}}
+<coherence>
+You are designing a SET of tables, so decide these ACROSS the whole feature, not table
+by table:
+- **Shared columns get one type.** A column that appears in several events (an id, a
+  channel, a status) must have the SAME type everywhere, or joins and UNIONs silently
+  cast or fail. Pick the type from the union of all measured values.
+- **Join keys must be comparable.** If table A joins table B on a key, that key must be
+  the same type in both, and should lead A's ordering key where A is filtered by it.
+- **Consistent enum members.** If two events carry the same categorical column, their
+  Enum8 must list the same members in the same order, or the values mean different
+  things in each table.
+- **Note the funnel.** The spec names an event order; say which column links the stages
+  so the analytics agent can join them without guessing.
+</coherence>
+
 <design_rules>
 **Ordering key** — the single highest-impact choice, and **immutable**: it cannot be
 changed later without rebuilding the table, so get it right now
@@ -69,7 +86,7 @@ gotchas) in ≤ 12 words. Table comment ≤ 20 words: the event, its funnel role
 server: `\`name\` Type [DEFAULT expr] [COMMENT '...'] [CODEC(...)]`.
 The COMMENT comes BEFORE the CODEC. Putting CODEC first is a syntax error.
 
-Hard constraints: exactly one CREATE TABLE; ENGINE = MergeTree; every profiled field
+Hard constraints: one CREATE TABLE per event type, named exactly after the event; ENGINE = MergeTree; every profiled field
 becomes a column with its exact name; never invent or drop a column; escape single
 quotes in comments by doubling (''); no SETTINGS clause (index_granularity and friends
 are rejected by the server here — the defaults are correct).
@@ -115,13 +132,23 @@ Verify all of these against your own DDL before you answer:
 6. Every ordering-key column exists, and the low-cardinality ones come first.
 </self_check>
 
-Output STRICT JSON, no fences:
+Output STRICT JSON, no fences. One entry in `tables` per event type given above,
+in the same order:
 {
-  "ddl": "CREATE TABLE {{event}} (...) ENGINE = MergeTree PARTITION BY ... ORDER BY (...) COMMENT '...'",
-  "rationale": {
-    "ordering_key": "<= 160 chars: the key, the measured cardinalities behind the order, and the rule name you applied (e.g. per schema-pk-cardinality-order)",
-    "partitioning": "<= 100 chars",
-    "types_codecs": "<= 260 chars: the enum/codec choices and the stats behind them",
-    "deviations": "<= 160 chars: anything contradicting the conventions, or \"\""
+  "tables": [
+    {
+      "event": "<event name, exactly as given>",
+      "ddl": "CREATE TABLE <event> (...) ENGINE = MergeTree PARTITION BY ... ORDER BY (...) COMMENT '...'",
+      "rationale": {
+        "ordering_key": "<= 200 chars: the key, the measured cardinalities behind the order, and the rule applied (e.g. per schema-pk-cardinality-order)",
+        "partitioning": "<= 100 chars",
+        "types_codecs": "<= 300 chars: the enum/codec choices and the stats behind them",
+        "deviations": "<= 200 chars: anything contradicting the conventions, or \"\""
+      }
+    }
+  ],
+  "schema_notes": {
+    "shared_columns": "<= 200 chars: columns appearing in several tables and the single type you gave each",
+    "join_path": "<= 200 chars: how the tables join for the funnel the spec describes"
   }
 }

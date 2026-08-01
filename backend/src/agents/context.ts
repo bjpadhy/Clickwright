@@ -321,9 +321,19 @@ export async function updateContext(
                   ),
                 );
 
+            // The conventions half exists to catch contradictions between the new
+            // spec and existing conventions. When instrumentation flagged no
+            // deviations AND no new envelope fields appeared, there is nothing to
+            // contradict — skip the call entirely (~50% wall-clock saving).
+            const hasDeviations = vars.reasoning !== "(no deviations flagged)";
+            const hasNewFields = input.instrumentation.newEnvelopeFields.length > 0;
+            const needsConventionReview = hasDeviations || hasNewFields;
+
             const [feature, conventions] = await Promise.all([
               half(FEATURE_SCOPE, "context_write_feature"),
-              half(CONVENTION_SCOPE, "context_write_conventions"),
+              needsConventionReview
+                ? half(CONVENTION_SCOPE, "context_write_conventions")
+                : Promise.resolve({ entries: [] as z.infer<typeof UpdateProposalSchema>["entries"], warnings: [] as string[] }),
             ]);
             const parsed = UpdateProposalSchema.parse({
               entries: [
@@ -374,10 +384,9 @@ export async function updateContext(
       }
 
       // 3. code owns the bookkeeping: versions, run_id, timestamps, insert
-      const versions = await query<{ entity: string; v: string }>(
-        `SELECT entity, max(version) AS v FROM context_store GROUP BY entity`,
-      );
-      const maxVersion = new Map(versions.map((r) => [r.entity, Number(r.v)]));
+      // current.entries already contains every entity's latest version (fetched
+      // via getContext({ include: ["*"] }) above) — no need for another round-trip.
+      const maxVersion = new Map(current.entries.map((e) => [e.entity, e.version]));
       const now = new Date().toISOString().replace("T", " ").replace("Z", "");
 
       const rows = proposal.entries.map((e) => {

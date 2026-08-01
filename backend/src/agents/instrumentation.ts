@@ -147,6 +147,70 @@ export function flattenRow(
   return out;
 }
 
+/**
+ * Column names declared by a CREATE TABLE, however it is formatted. Splits the
+ * top-level column list on depth-zero commas (so Enum8('a' = 1, 'b' = 2) and
+ * CODEC(Delta(8), ZSTD(1)) stay intact) and takes each item's leading identifier.
+ * INDEX / CONSTRAINT / PROJECTION clauses are skipped.
+ */
+export function parseDeclaredColumns(ddl: string): string[] {
+  const open = ddl.indexOf("(");
+  if (open === -1) return [];
+  let depth = 0;
+  let end = -1;
+  for (let i = open; i < ddl.length; i++) {
+    const ch = ddl[i];
+    if (ch === "'") {
+      // skip a string literal, honouring '' escapes
+      i++;
+      while (i < ddl.length && !(ddl[i] === "'" && ddl[i + 1] !== "'")) {
+        if (ddl[i] === "'" && ddl[i + 1] === "'") i++;
+        i++;
+      }
+      continue;
+    }
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end === -1) return [];
+
+  const body = ddl.slice(open + 1, end);
+  const items: string[] = [];
+  let buf = "";
+  depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]!;
+    if (ch === "'") {
+      buf += ch;
+      i++;
+      while (i < body.length && !(body[i] === "'" && body[i + 1] !== "'")) {
+        if (body[i] === "'" && body[i + 1] === "'") { buf += body[i]; i++; }
+        buf += body[i];
+        i++;
+      }
+      buf += body[i] ?? "";
+      continue;
+    }
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (ch === "," && depth === 0) { items.push(buf); buf = ""; continue; }
+    buf += ch;
+  }
+  if (buf.trim()) items.push(buf);
+
+  const out: string[] = [];
+  for (const raw of items) {
+    const item = raw.trim();
+    if (!item || /^(index|constraint|projection|primary\s+key)\b/i.test(item)) continue;
+    const m = /^`?([a-z_][a-z0-9_]*)`?\s/i.exec(item);
+    if (m?.[1]) out.push(m[1]);
+  }
+  return out;
+}
+
 function groupByEvent(
   rows: Record<string, unknown>[],
 ): Map<string, Record<string, unknown>[]> {
@@ -326,7 +390,9 @@ export async function runInstrumentation(
                         profile: eventProfiles.get(event) ?? "",
                         baseline,
                         spec,
-                        conventions: bundle.markdown,
+                        conventions: reconNotes
+                          ? `${bundle.markdown}\n\n## Live-schema warnings\n${reconNotes}`
+                          : bundle.markdown,
                         feedback: designFeedback
                           ? `\n<feedback>\nYour previous design was rejected: ${designFeedback}\n</feedback>\n`
                           : "",
@@ -346,10 +412,11 @@ export async function runInstrumentation(
                         throw new Error("only one statement allowed (found a second statement)");
                       if (!new RegExp(`create\\s+table\\s+\`?${event}\`?[\\s(]`, "i").test(ddl))
                         throw new Error(`the table must be named ${event}`);
-                      // every measured field must survive, and nothing invented
-                      const declared = new Set(
-                        [...ddl.matchAll(/^\s*\`([a-z0-9_]+)\`\s+/gim)].map((m) => m[1]!),
-                      );
+                      // every measured field must survive, and nothing invented.
+                      // Parse the column list for real: a line-anchored backtick
+                      // regex misses a single-line DDL or unbackticked names, which
+                      // would silently reject every design and fall back to baseline.
+                      const declared = new Set(parseDeclaredColumns(ddl));
                       const dropped = [...expected].filter((c) => !declared.has(c));
                       if (dropped.length)
                         throw new Error(`these measured columns are missing: ${dropped.join(", ")}`);
@@ -487,6 +554,17 @@ export async function runInstrumentation(
           attempts: attempt,
           tableEntries: loaded.map((t) => {
             const plan = tablePlans.get(t.event);
+            const executed = proposal.tables.find((x) => x.name === t.name);
+            // Document the schema that RAN, not the baseline: the designer is told
+            // to reorder the key for pruning, so the baseline's join key and
+            // ordering would be wrong in the store the analytics agent reads.
+            if (plan && executed) {
+              const orderBy = /ORDER BY \(([^)]+)\)/i.exec(executed.ddl)?.[1];
+              if (orderBy) {
+                const cols = orderBy.split(",").map((c) => c.trim().replace(/`/g, ""));
+                plan.orderBy = cols;
+              }
+            }
             return {
               entity: `table:${t.name}`,
               definition_md: plan

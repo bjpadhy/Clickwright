@@ -48,8 +48,14 @@ export function chooseType(f: FieldProfile): { type: string; note?: string } {
   if (f.inferredType === "number") {
     const max = f.numericRange?.max ?? 0;
     const min = f.numericRange?.min ?? 0;
+    // sampleValues holds only the first 5 distinct values, so "no dot seen" is
+    // weak evidence. Treat a wide-ranging, high-cardinality numeric as possibly
+    // fractional: a too-wide column is harmless, a truncated one loses data.
+    const looksContinuous = f.distinctCount > 50 && (f.numericRange?.max ?? 0) > 100;
     const fractional =
-      f.sampleValues.some((v) => v.includes(".")) || MONEY_RE.test(f.field);
+      f.sampleValues.some((v) => v.includes(".")) ||
+      MONEY_RE.test(f.field) ||
+      looksContinuous;
     if (fractional) {
       return MONEY_RE.test(f.field)
         ? { type: "Float64", note: `${f.field}: monetary, Float64` }

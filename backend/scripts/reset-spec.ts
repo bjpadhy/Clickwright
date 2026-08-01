@@ -53,15 +53,22 @@ const BASE_TABLES = new Set([
   "search_typed", "landing_page_scrolled", "auth_completed", "pay_now_clicked",
 ]);
 if (args.includes("--all-specs") || args.includes("--orphans")) {
-  const live = await query<{ name: string }>(
-    `SELECT name FROM system.tables WHERE database = currentDatabase() AND NOT is_temporary`,
+  // engine matters: an approved optimization creates a MaterializedView that no
+  // spec documents, so a name-only sweep would silently destroy it
+  const live = await query<{ name: string; engine: string }>(
+    `SELECT name, engine FROM system.tables
+     WHERE database = currentDatabase() AND NOT is_temporary`,
   );
   const documented = new Set(
     (await query<{ e: string }>(`SELECT DISTINCT entity AS e FROM context_store WHERE entity LIKE 'table:%'`))
       .map((r) => r.e.slice("table:".length)),
   );
-  for (const { name } of live) {
+  for (const { name, engine } of live) {
     if (BASE_TABLES.has(name) || PRODUCT_TABLES.has(name) || name.startsWith(".inner")) continue;
+    if (/View/i.test(engine)) {
+      console.log(`• skipped ${name} — ${engine}, created by an optimization run`);
+      continue;
+    }
     if (documented.has(name)) continue;
     await command(`DROP TABLE IF EXISTS ${name}`);
     console.log(`✓ dropped orphan table ${name} (created by a failed run, undocumented)`);

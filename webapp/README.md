@@ -1,11 +1,14 @@
 # Clickwright — webapp
 
-Frontend for the Clickwright pipeline (design incoming).
+React + Vite + TypeScript + Tailwind. Frontend for the Clickwright pipeline.
 
-Planned screens:
-- **Run view** — spec upload, live pipeline stepper, DDL + context approval gates, trap strip
-- **Chat** — the Analytics Agent: PM questions in, cited answers out
-- **Runs history** — all runs, compare mode, Langfuse deep links
-- **Context browser** — versioned knowledge store with per-entity diffs
+Screens: **Run view** (spec upload, live stepper, approval gates) · **Chat**
+(Analytics Agent, cited answers) · **History** (runs, compare, trace links) ·
+**Context browser** (versioned knowledge store).
 
-Talks to `../backend` (thin HTTP/SSE server around the agents — to be added there).
+```bash
+npm install
+npm run dev        # http://localhost:5173, proxies /api → localhost:8787
+```
+
+Talks to `../backend` via its HTTP/SSE server.

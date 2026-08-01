@@ -1,0 +1,180 @@
+/**
+ * Deterministic DDL synthesis — the type rules are arithmetic on measured stats,
+ * so code does them: instant, free, and correct by construction. No LLM, no
+ * retries, no quote-escaping bugs, no hallucinated columns.
+ *
+ * The LLM's remaining job (one small call per spec) is the human-facing prose:
+ * purposes and rationale. If that call fails, the schema is still valid — only
+ * the wording degrades.
+ */
+import type { FieldProfile, NdjsonProfile } from "./profiler.js";
+
+const IDENTIFIER_RE =
+  /(^|_)(id|ids|uuid|guid|token|hash|key)$|^(user_id|application_id|app_session_id|share_id|group_id|client_ip)$/i;
+
+const MONEY_RE = /(amount|value|price|revenue|fee|discount|total|balance)/i;
+const LOW_CARDINALITY_MAX = 1000;
+
+export interface ColumnPlan {
+  name: string;
+  type: string;
+  comment: string;
+}
+
+export interface TablePlan {
+  name: string;
+  event: string;
+  columns: ColumnPlan[];
+  orderBy: string[];
+  partitionBy: string;
+  /** Facts the rationale is built from — no interpretation, just measurements. */
+  facts: {
+    rows: number;
+    orderByReason: string;
+    lowCardinality: string[];
+    nullableDefaults: string[];
+    notable: string[];
+  };
+}
+
+function isIdentifier(field: string): boolean {
+  return IDENTIFIER_RE.test(field);
+}
+
+/** Pick the narrowest correct ClickHouse type from the measured profile. */
+export function chooseType(f: FieldProfile): { type: string; note?: string } {
+  if (f.inferredType === "timestamp") return { type: "DateTime64(3)" };
+  if (f.inferredType === "boolean") return { type: "UInt8", note: `${f.field}: boolean as 0/1` };
+  if (f.inferredType === "number") {
+    const max = f.numericRange?.max ?? 0;
+    const min = f.numericRange?.min ?? 0;
+    const fractional =
+      f.sampleValues.some((v) => v.includes(".")) || MONEY_RE.test(f.field);
+    if (fractional) {
+      return MONEY_RE.test(f.field)
+        ? { type: "Float64", note: `${f.field}: monetary, Float64` }
+        : { type: "Float64" };
+    }
+    if (min >= 0 && max < 256) return { type: "UInt8", note: `${f.field}: max ${max} → UInt8` };
+    if (min >= 0 && max < 65536) return { type: "UInt16", note: `${f.field}: max ${max} → UInt16` };
+    if (min >= 0 && max < 4294967296) return { type: "UInt32", note: `${f.field}: max ${max} → UInt32` };
+    return { type: "Int64" };
+  }
+  if (f.inferredType === "json") return { type: "String" }; // already flattened; leftovers as text
+  // strings
+  if (!isIdentifier(f.field) && f.distinctCount < LOW_CARDINALITY_MAX) {
+    const base = "LowCardinality(String)";
+    return {
+      type: f.nullRate > 0 ? `${base} DEFAULT ''` : base,
+      note: `${f.field}: ${f.distinctCount} distinct → LowCardinality`,
+    };
+  }
+  return { type: f.nullRate > 0 ? "String DEFAULT ''" : "String" };
+}
+
+function columnComment(f: FieldProfile, type: string): string {
+  const bits: string[] = [];
+  if (f.inferredType === "timestamp") bits.push("event time, ms precision");
+  else if (f.inferredType === "boolean") bits.push("boolean 0/1");
+  else if (type.startsWith("LowCardinality"))
+    bits.push(`${f.distinctCount} distinct values`);
+  else if (f.numericRange)
+    bits.push(`range ${f.numericRange.min}–${f.numericRange.max}`);
+  else if (isIdentifier(f.field)) bits.push("identifier, high cardinality");
+  if (f.nullRate > 0)
+    bits.push(`${(f.nullRate * 100).toFixed(1)}% empty — bucket as 'unknown' at query time`);
+  if (/currency/i.test(f.field)) bits.push("never aggregate values across currencies");
+  return bits.join("; ") || "measured from the spec sample";
+}
+
+/** Ordering key: the join key that is actually always present, then time. */
+function chooseOrderBy(profile: NdjsonProfile): { orderBy: string[]; reason: string } {
+  const by = new Map(profile.fields.map((f) => [f.field, f]));
+  const hasTs = by.has("timestamp");
+  const candidates = ["application_id", "share_id", "group_id", "user_id"];
+  for (const c of candidates) {
+    const f = by.get(c);
+    if (f && f.nullRate === 0) {
+      return {
+        orderBy: hasTs ? [c, "timestamp"] : [c],
+        reason: `${c} present on 100% of rows (${profile.totalRows}/${profile.totalRows}) so it leads, then timestamp`,
+      };
+    }
+  }
+  // no reliable join key — fall back to any id-ish field, else time only
+  const anyId = profile.fields.find((f) => isIdentifier(f.field) && f.nullRate === 0);
+  if (anyId)
+    return {
+      orderBy: hasTs ? [anyId.field, "timestamp"] : [anyId.field],
+      reason: `no join key is always present; ${anyId.field} (0% null) leads instead`,
+    };
+  return { orderBy: hasTs ? ["timestamp"] : [], reason: "no always-present key; ordered by time only" };
+}
+
+export function planTable(event: string, profile: NdjsonProfile): TablePlan {
+  const columns: ColumnPlan[] = [];
+  const lowCardinality: string[] = [];
+  const nullableDefaults: string[] = [];
+  const notable: string[] = [];
+
+  for (const f of profile.fields) {
+    const { type, note } = chooseType(f);
+    columns.push({ name: f.field, type, comment: columnComment(f, type) });
+    if (type.startsWith("LowCardinality")) lowCardinality.push(f.field);
+    if (type.includes("DEFAULT ''")) nullableDefaults.push(f.field);
+    if (note) notable.push(note);
+  }
+
+  const { orderBy, reason } = chooseOrderBy(profile);
+  const hasTs = profile.fields.some((f) => f.field === "timestamp");
+
+  return {
+    name: event,
+    event,
+    columns,
+    orderBy,
+    partitionBy: hasTs ? "toYYYYMM(timestamp)" : "",
+    facts: { rows: profile.totalRows, orderByReason: reason, lowCardinality, nullableDefaults, notable },
+  };
+}
+
+const q = (s: string) => `'${s.replaceAll("'", "''")}'`;
+
+export function renderCreateTable(plan: TablePlan, purpose: string): string {
+  const cols = plan.columns
+    .map((c) => `  \`${c.name}\` ${c.type} COMMENT ${q(c.comment)}`)
+    .join(",\n");
+  const parts = [
+    `CREATE TABLE ${plan.name} (\n${cols}\n) ENGINE = MergeTree`,
+    plan.partitionBy ? `PARTITION BY ${plan.partitionBy}` : "",
+    plan.orderBy.length ? `ORDER BY (${plan.orderBy.join(", ")})` : "ORDER BY tuple()",
+    `COMMENT ${q(purpose)}`,
+  ].filter(Boolean);
+  return parts.join("\n");
+}
+
+/** Rationale assembled from measurements — no model needed, always accurate. */
+export function renderRationale(plan: TablePlan): {
+  ordering_key: string;
+  partitioning: string;
+  types_codecs: string;
+  deviations: string;
+} {
+  const lc = plan.facts.lowCardinality;
+  const types = [
+    plan.facts.notable.slice(0, 3).join("; "),
+    lc.length ? `LowCardinality: ${lc.slice(0, 5).join(", ")}${lc.length > 5 ? ` +${lc.length - 5}` : ""}` : "",
+  ]
+    .filter(Boolean)
+    .join(". ");
+  return {
+    ordering_key: plan.facts.orderByReason,
+    partitioning: plan.partitionBy
+      ? `${plan.partitionBy} — monthly parts stay merge-friendly`
+      : "no timestamp column, so unpartitioned",
+    types_codecs: types.slice(0, 258),
+    deviations: plan.facts.nullableDefaults.length
+      ? `empty values present in ${plan.facts.nullableDefaults.slice(0, 4).join(", ")} — String DEFAULT '' per hygiene convention`
+      : "",
+  };
+}

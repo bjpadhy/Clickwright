@@ -16,7 +16,8 @@ import { z } from "zod";
 import { command, insert, query, rowCount } from "../core/db.js";
 import { step, scoreRun, emitRunEvent, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
-import { profileRecords, profileSummary } from "../core/profiler.js";
+import { profileRecords, profileSummary, type NdjsonProfile } from "../core/profiler.js";
+import { planTable, renderCreateTable, renderRationale } from "../core/ddl.js";
 import { getContext, reconcileWithLive } from "./context.js";
 
 // ── types ────────────────────────────────────────────────────────
@@ -57,6 +58,8 @@ const ProposalSchema = z.object({
     .min(1),
 });
 export type InstrumentationProposal = z.infer<typeof ProposalSchema>;
+
+const PurposesSchema = z.object({ purposes: z.record(z.string(), z.string()) });
 
 export interface Approval {
   approved: boolean;
@@ -177,6 +180,7 @@ export async function runInstrumentation(
     const groups = groupByEvent(rows);
     const eventProfiles = new Map<string, string>();
     const eventNewFields = new Map<string, string[]>();
+    const eventProfileData = new Map<string, NdjsonProfile>();
     const { profileText, newFields } = await step(
       span,
       "profile",
@@ -187,6 +191,7 @@ export async function runInstrumentation(
         for (const [event, records] of groups) {
           const flat = records.map(flattenRow);
           const p = profileRecords(flat, event);
+          eventProfileData.set(event, p);
           const section = `### event: ${event} (${records.length} rows)\n${profileSummary(p)}`;
           sections.push(section);
           eventProfiles.set(event, section);
@@ -251,55 +256,69 @@ export async function runInstrumentation(
         proposal = await step(
           span,
           `ddl_generation_attempt_${attempt}`,
-          { feedback, events: [...groups.keys()], mode: "parallel_per_event" },
+          { feedback, events: [...groups.keys()], mode: "deterministic+purposes" },
           async (genSpan) => {
-            const events = [...groups.keys()];
-            const tables = await Promise.all(
-              events.map((event) =>
-                step(
-                  genSpan,
-                  `ddl_table_${event}`,
-                  { event },
-                  async (tSpan) => {
-                    let tableFeedback = feedback;
-                    let lastError = "";
-                    for (let tryN = 1; tryN <= MAX_TABLE_TRIES; tryN++) {
-                      try {
-                        const prompt = await loadPrompt("ddl_table", {
-                          context: bundle.markdown,
-                          live_tables: recon.liveTables.join(", "),
-                          reconciliation_notes: reconNotes,
-                          spec,
-                          event,
-                          sibling_events: events.filter((e) => e !== event).join(", ") || "(none)",
-                          profile: eventProfiles.get(event) ?? "",
-                          new_fields: (eventNewFields.get(event) ?? []).join(", ") || "(none)",
-                          feedback: tableFeedback
-                            ? `\n# Feedback on your previous attempt — fix this\n${tableFeedback}\n`
-                            : "",
-                        });
-                        const text = await llm(tSpan, `ddl_${event}`, prompt);
-                        const parsed = TableProposalSchema.parse(JSON.parse(stripFences(text)));
-                        const t = parsed.table;
-                        if (t.event !== event)
-                          throw new Error(`table.event must be "${event}", got "${t.event}"`);
-                        if (liveNames.has(t.name))
-                          throw new Error(`table ${t.name} already exists — pick another name`);
-                        if (!/^\s*create\s+table\s/i.test(t.ddl))
-                          throw new Error("ddl must be a single CREATE TABLE statement");
-                        // dry-run this table alone: ClickHouse parses it before a human sees it
-                        await command(`EXPLAIN AST ${t.ddl}`);
-                        return { ...t, rationale: parsed.rationale };
-                      } catch (error) {
-                        lastError = error instanceof Error ? error.message : String(error);
-                        tableFeedback = `Your previous output for ${event} was rejected: ${lastError}`;
-                      }
-                    }
-                    throw new Error(`table ${event} failed ${MAX_TABLE_TRIES} tries: ${lastError}`);
-                  },
-                ),
-              ),
-            );
+            // 1. Schemas are SYNTHESISED IN CODE from the measured profile: type
+            //    choice, LowCardinality, ordering key and partitioning are all
+            //    arithmetic on stats, so there is nothing for a model to get
+            //    wrong — and it costs no tokens and no time.
+            const plans = await step(genSpan, "ddl_synthesis", {}, async () => {
+              const out = new Map<string, ReturnType<typeof planTable>>();
+              for (const [event] of groups) {
+                const profile = eventProfileData.get(event);
+                if (!profile) throw new Error(`no profile for ${event}`);
+                const plan = planTable(event, profile);
+                if (liveNames.has(plan.name))
+                  throw new Error(`table ${plan.name} already exists`);
+                out.set(event, plan);
+              }
+              return out;
+            }).then((m) => m as Map<string, ReturnType<typeof planTable>>);
+
+            // 2. ONE small call for the human-facing purposes (short output).
+            //    If it fails we still ship: purposes fall back to the spec name.
+            let purposes: Record<string, string> = {};
+            try {
+              const tablesDesc = [...plans.values()]
+                .map(
+                  (p) =>
+                    `- ${p.name} (${p.facts.rows} rows): ${p.columns.map((c) => c.name).join(", ")}`,
+                )
+                .join("\n");
+              const prompt = await loadPrompt("table_purposes", {
+                spec,
+                tables: tablesDesc,
+                feedback: feedback ? `\n# Reviewer feedback to honour\n${feedback}\n` : "",
+              });
+              const text = await llm(genSpan, "table_purposes", prompt);
+              purposes = PurposesSchema.parse(JSON.parse(stripFences(text))).purposes;
+            } catch {
+              emitRunEvent({
+                type: "log",
+                name: "purposes_fallback",
+                payload: { note: "purpose text unavailable; schema unaffected" },
+              });
+            }
+
+            const tables = [...plans.values()].map((plan) => {
+              const purpose =
+                purposes[plan.name]?.slice(0, 140) ??
+                `${plan.name} events captured for this feature`;
+              return {
+                name: plan.name,
+                event: plan.event,
+                purpose,
+                ddl: renderCreateTable(plan, purpose),
+                rationale: renderRationale(plan),
+              };
+            });
+
+            // 3. Dry-run every statement — cheap, and proves the synthesis.
+            await step(genSpan, "dry_run", { tables: tables.map((t) => t.name) }, async () => {
+              for (const t of tables) await command(`EXPLAIN AST ${t.ddl}`);
+              return { passed: tables.length };
+            });
+
             return ProposalSchema.parse({
               reasoning: tables
                 .map(

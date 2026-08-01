@@ -1,0 +1,12 @@
+The schemas below were derived deterministically from measured event data. Your only job: write the one-line purpose of each table — what the event means and its role in this feature's funnel. You are NOT designing schemas.
+
+# The feature spec
+{{spec}}
+
+# Tables (name, row count, columns)
+{{tables}}
+{{feedback}}
+# Output — STRICT JSON only, no fences. Each purpose <= 90 characters.
+{ "purposes": { "<table_name>": "what it holds and its funnel role", "...": "..." } }
+
+One key per table listed above, exactly those names. No extra keys, no prose.

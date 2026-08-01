@@ -78,6 +78,9 @@ export class RunManager {
   private runs = new Map<string, RunRecord>();
   private queue: RunRecord[] = [];
   private active: RunRecord | null = null;
+  /** Serial chain of runs_log inserts. Awaited before a run is considered done,
+   * so a completed run can never be missing its final "succeeded" event. */
+  private writes: Promise<unknown> = Promise.resolve();
 
   async init(): Promise<void> {
     await command(`
@@ -182,7 +185,8 @@ export class RunManager {
     run.events.push(stored);
     // durable write FIRST, then fan out — a broken SSE socket must never lose
     // history or starve other subscribers
-    insert("runs_log", [
+    this.writes = this.writes.then(() =>
+      insert("runs_log", [
       {
         run_id: run.id,
         spec: run.spec,
@@ -192,7 +196,8 @@ export class RunManager {
         name: stored.name,
         payload: JSON.stringify(stored.payload),
       },
-    ]).catch(() => {});
+      ]).catch(() => {}),
+    );
     for (const sub of run.subscribers) {
       try {
         sub(stored);
@@ -277,6 +282,7 @@ export class RunManager {
       this.status(run, "failed", { error: message });
     } finally {
       setRunSink(null);
+      await this.writes.catch(() => {}); // every event is durable before we finish
       await flushTraces().catch(() => {});
     }
   }
@@ -350,6 +356,7 @@ export class RunManager {
       this.status(run, "failed", { error: message });
     } finally {
       setRunSink(null);
+      await this.writes.catch(() => {}); // every event is durable before we finish
       await flushTraces().catch(() => {});
     }
   }

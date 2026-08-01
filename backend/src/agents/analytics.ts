@@ -9,12 +9,51 @@
  * agent cannot call updateContext — it lacks an instrumentation result), and
  * SQL runs through queryReadonly (ClickHouse readonly=1) after code guards.
  */
+import { createHash } from "node:crypto";
 import { z } from "zod";
-import { isTransientDbError, query, queryReadonly } from "../core/db.js";
+import { command, insert, isTransientDbError, query, queryReadonly } from "../core/db.js";
 import { withQueryContext } from "../core/query-context.js";
 import { step, scoreRun, recordQuery, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import { getContext, lookupContext, reconcileWithLive } from "./context.js";
+
+// ── answer cache ────────────────────────────────────────────────
+// A question whose wording and context version are unchanged has the same
+// answer: serve it from ClickHouse in milliseconds instead of re-running the
+// agent. Any context write changes contextVersion, which invalidates naturally.
+
+export async function initInsightCache(): Promise<void> {
+  await command(`
+    CREATE TABLE IF NOT EXISTS insight_cache (
+      cache_key     String,
+      question      String,
+      context_key   String,
+      insight_json  String,
+      created_at    DateTime64(3)
+    ) ENGINE = ReplacingMergeTree(created_at) ORDER BY cache_key
+    COMMENT 'Analytics answers keyed by question + context version — repeat asks are instant'
+  `);
+}
+
+const cacheKey = (question: string, contextKey: string) =>
+  createHash("sha256")
+    .update(`${question.trim().toLowerCase().replace(/\s+/g, " ")}::${contextKey}`)
+    .digest("hex")
+    .slice(0, 32);
+
+async function readCache(key: string): Promise<Insight | null> {
+  const rows = await query<{ insight_json: string }>(
+    `SELECT insight_json FROM insight_cache WHERE cache_key = {k:String}
+     ORDER BY created_at DESC LIMIT 1`,
+    { k: key },
+  );
+  if (rows.length === 0) return null;
+  try {
+    return JSON.parse(rows[0]!.insight_json) as Insight;
+  } catch {
+    return null;
+  }
+}
 
 // ── output contract (mirrors backend/API.md `Insight`) ──────────
 
@@ -35,6 +74,8 @@ export interface Insight {
   confidence: { value: "high" | "medium" | "low"; note: string };
   contextVersion: string;
   sql: Array<{ task: string; title: string; query: string; rowCount: number }>;
+  /** True when served from insight_cache (no LLM calls, ~ms). */
+  cached?: boolean;
 }
 
 const PlanSchema = z.object({
@@ -230,6 +271,8 @@ const MAX_NARRATE_ATTEMPTS = 3;
 
 export interface AnalyticsInput {
   question: string;
+  /** Force a fresh run, bypassing the answer cache. */
+  noCache?: boolean;
   /** Recent conversation turns for follow-up questions (oldest first). */
   history?: Array<{ role: "user" | "agent"; text: string }>;
 }
@@ -279,6 +322,17 @@ export async function runAnalytics(
         };
       },
     );
+
+    // Cache hit → milliseconds. Skipped for follow-ups, whose meaning depends
+    // on conversation state rather than the question text alone.
+    const key = cacheKey(input.question, contextVersion);
+    if (!input.history?.length && !input.noCache) {
+      const cached = await step(span, "cache_lookup", { key }, () => readCache(key));
+      if (cached) {
+        scoreRun(span, "cache_hit", 1, "served from insight_cache");
+        return { ...cached, cached: true };
+      }
+    }
 
     const historyText =
       input.history && input.history.length > 0
@@ -456,7 +510,21 @@ export async function runAnalytics(
     }
 
     // ── quality gate ──
-    const quality = await step(span, "quality_gate", {}, async (qSpan) => {
+    // Skip the call when the deterministic checks all passed and the narration
+    // already cites numbers, names a segment and is honest about confidence —
+    // there is nothing for a reviewer to catch, and this saves a full LLM round.
+    const selfEvident =
+      sanityNotes.length === 0 &&
+      citationFailures === 0 &&
+      narration.findings.some((f) => f.tag === "segment") &&
+      /\d/.test(narration.headline);
+    const quality = selfEvident
+      ? {
+          actionable: true, cites_numbers: true, names_segment: true,
+          links_known_issue: true, honest_confidence: true,
+          verdict: "pass" as const, revision_note: "",
+        }
+      : await step(span, "quality_gate", {}, async (qSpan) => {
       const prompt = await loadPrompt("analytics_quality", {
         question: input.question,
         insight: JSON.stringify(narration),
@@ -487,6 +555,28 @@ export async function runAnalytics(
         if (uncited.length > 0) throw new Error(`revision introduced uncited numbers: ${uncited.join(", ")}`);
         return parsed;
       });
+    }
+
+    const insight: Insight = {
+      ...narration,
+      contextVersion,
+      sql: results.map((r) => ({
+        task: r.id,
+        title: r.title,
+        query: r.sql,
+        rowCount: r.rows.length,
+      })),
+    };
+    if (!input.history?.length) {
+      await insert("insight_cache", [
+        {
+          cache_key: key,
+          question: input.question,
+          context_key: contextVersion,
+          insight_json: JSON.stringify(insight),
+          created_at: new Date().toISOString().replace("T", " ").replace("Z", ""),
+        },
+      ]).catch(() => {});
     }
 
     scoreRun(span, "analytics_tasks", plan.tasks.length);

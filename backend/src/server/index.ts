@@ -158,7 +158,9 @@ app.get("/api/history", async (_req, res) => {
   }>(`
     SELECT run_id, any(spec) AS spec,
            toString(min(ts)) AS started, toString(max(ts)) AS finished,
-           argMax(name, seq * (type = 'status')) AS last_status,
+           -- non-status rows must weigh LESS than any status row, otherwise ties
+           -- make argMax return a step name (e.g. "profile") as the status
+           argMax(name, if(type = 'status', toInt64(seq) + 1, -1)) AS last_status,
            toString(count()) AS events
     FROM runs_log GROUP BY run_id ORDER BY started DESC
   `);
@@ -274,6 +276,7 @@ const PORT = Number(process.env["PORT"] ?? 8787);
 await manager.init();
 await initChatTables();
 await initDashboardTables();
+await initInsightCache();
 app.listen(PORT, () => {
   console.log(`Clickwright backend listening on http://localhost:${PORT}`);
 });

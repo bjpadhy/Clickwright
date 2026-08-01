@@ -19,13 +19,9 @@ const NAV_ITEMS: {
 }[] = [
   { id: "chat", icon: "ti-message-circle", label: "Chat", short: "Chat" },
   { id: "instr", icon: "ti-wand", label: "Instrumentation", short: "Instrument" },
-  {
-    id: "obs",
-    icon: "ti-activity",
-    label: "Observability — coming soon",
-    short: "Observe",
-    disabled: true,
-  },
+  // Database health and Changelog read the real /api/observe/* endpoints.
+  // Agent activity is still mock — see the note in traces-tab.tsx.
+  { id: "obs", icon: "ti-activity", label: "Observability", short: "Observe" },
   {
     id: "dash",
     icon: "ti-layout-dashboard",

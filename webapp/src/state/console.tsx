@@ -94,7 +94,9 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
   const [nav, setNav] = React.useState<NavId>("chat")
   const [instrTab, setInstrTab] = React.useState<InstrTab>("run")
 
-  const [obsTab, setObsTab] = React.useState<ObsTab>("traces")
+  // Database health is the real one; Agent activity is still mock, so it is a
+  // poor thing to land on.
+  const [obsTab, setObsTab] = React.useState<ObsTab>("stack")
   const [traceFilter, setTraceFilter] = React.useState<TraceFilter>("all")
   const [openTrace, setOpenTrace] = React.useState<string | null>(null)
   const [activityMetric, setActivityMetric] = React.useState<ActivityMetric>("traces")

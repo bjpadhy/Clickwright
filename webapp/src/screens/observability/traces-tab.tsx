@@ -22,6 +22,7 @@ import { Panel } from "@/components/ui-kit/panel"
 import { cn } from "@/lib/utils"
 import { useConsole, type ActivityMetric, type ChartView, type TraceFilter } from "@/state/console"
 import { StatCards } from "./stat-cards"
+import { UnavailableNote } from "./states"
 
 const AGENT_STYLE: Record<AgentKind, { background: string; color: string }> = {
   instrumentation: { background: "#e6f4f1", color: "#1a6e64" },
@@ -87,6 +88,14 @@ export function TracesTab() {
 
   return (
     <>
+      {/* The other two tabs read the real backend; this one does not yet, and
+          unlabelled fake numbers on an observability screen are a trap. */}
+      <UnavailableNote>
+        <strong>Sample data.</strong> This tab is still served by the in-memory
+        mock — the traces, costs and spans below are illustrative. Database
+        health and Changelog read the live backend.
+      </UnavailableNote>
+
       <StatCards stats={stats} />
 
       <Panel className="px-[18px] py-4">

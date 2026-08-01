@@ -158,8 +158,17 @@ async function tableSchemas(): Promise<Map<string, string>> {
 /** Only the tables this step needs — a SQL prompt paying for 13 schemas when it
  * touches 2 is pure waste, and the noise hurts accuracy as well as cost. */
 function schemaSubset(all: Map<string, string>, tables: string[]): string {
-  const picked = tables.map((t) => all.get(t)).filter(Boolean);
-  return (picked.length ? picked : [...all.values()]).join("\n");
+  const picked = tables.map((t) => all.get(t)).filter(Boolean) as string[];
+  const lines = picked.length ? picked : [...all.values()];
+  // Whether the hygiene columns exist is a FACT we already have. Stating it per
+  // table beats asking the model to infer it — it filtered duplicate_id on a
+  // table that lacks the column when left to a general rule.
+  return lines
+    .map((line) => {
+      const has = /\bduplicate_id\b/.test(line);
+      return `${line}\n    → hygiene: ${has ? "HAS duplicate_id + is_back_filled — you MUST filter both" : "NO duplicate_id / is_back_filled columns — do NOT reference them, the query will fail"}`;
+    })
+    .join("\n");
 }
 
 // ── SQL guards (deterministic — prompts are not a security boundary) ──
@@ -457,6 +466,24 @@ export async function runAnalytics(
           `### ${r.id} — ${r.title} (${r.rows.length} rows${r.flags.length ? `; flags: ${r.flags.join("; ")}` : ""})\nSQL: ${r.sql}\nrows: ${JSON.stringify(r.rows.slice(0, 24))}${r.rows.length > 24 ? `\n(+${r.rows.length - 24} more rows not shown — do not infer beyond what is listed)` : ""}`,
       )
       .join("\n\n");
+    // What the queries ACTUALLY did, read off the executed SQL. The citation
+    // checker guards numbers; without this the narrator would assert methodology
+    // (e.g. "hygiene filters applied") that may not be true of the query that ran.
+    const methodNotes = kept
+      .map((r) => {
+        const bits: string[] = [];
+        bits.push(
+          /duplicate_id/i.test(r.sql)
+            ? "hygiene filters applied (duplicate_id / is_back_filled)"
+            : "no hygiene filters — those columns do not exist on these tables",
+        );
+        if (/if\s*\(\s*os\s+IS\s+NULL|multiIf\s*\(\s*\(?\s*os\s+IS\s+NULL/i.test(r.sql))
+          bits.push("empty/NULL os bucketed as 'unknown'");
+        if (/group by[\s\S]*currency/i.test(r.sql)) bits.push("grouped by currency");
+        return `${r.id}: ${bits.join("; ")}`;
+      })
+      .join("\n");
+
     const pool = [
       ...numericPool(kept),
       // numbers the agent was shown in the gate notes are citable too
@@ -482,6 +509,7 @@ export async function runAnalytics(
               plan: plan.approach,
               results: resultsText || "(all tasks failed — say so honestly)",
               sanity: sanityNotes.join("\n") || "(clean)",
+              method: methodNotes || "(no queries succeeded)",
               lookup: lookup.markdown || "(nothing relevant retrieved)",
               context_version: contextVersion,
               history: input.history?.length ? `\n# Conversation so far\n${historyText}\n` : "",
@@ -558,6 +586,7 @@ export async function runAnalytics(
           plan: plan.approach,
           results: resultsText || "(all tasks failed)",
           sanity: sanityNotes.join("\n") || "(clean)",
+          method: methodNotes || "(no queries succeeded)",
           lookup: lookup.markdown || "(nothing relevant retrieved)",
           context_version: contextVersion,
           history: "",

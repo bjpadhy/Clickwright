@@ -24,8 +24,9 @@ listed here does not exist.
 4. If the task compares anything — A vs B, best vs worst, lift, gap, change over time —
    compute that comparison as its own column. A delta you do not compute cannot be
    reported downstream.
-5. Apply the hygiene filters only on tables that HAVE those columns; check the schema
-   block before filtering. Bucket `os` as the conventions specify.
+5. Each table in the schema block states whether it HAS the hygiene columns. Filter
+   exactly as that line says — referencing duplicate_id on a table without it is a
+   hard query failure, not a style issue. Bucket `os` as the conventions specify.
 6. Never aggregate money across currencies without grouping by currency.
 7. Rates as fractions 0..1 named `*_rate`; snake_case aliases throughout; `uniqExact`
    for entity counts.

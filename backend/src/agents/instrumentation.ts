@@ -79,6 +79,9 @@ export type ApprovalCallback = (
 
 export const autoApprove: ApprovalCallback = async () => ({ approved: true });
 
+/** Errors that retrying cannot fix — surfaced immediately instead of burning attempts. */
+export class FatalInstrumentationError extends Error {}
+
 export interface LoadedTable {
   name: string;
   event: string;
@@ -277,7 +280,12 @@ export async function runInstrumentation(
                 if (!profile) throw new Error(`no profile for ${event}`);
                 const plan = planTable(event, profile);
                 if (liveNames.has(plan.name))
-                  throw new Error(`table ${plan.name} already exists`);
+                  // Synthesis is deterministic: retrying produces the identical
+                  // plan, so a collision is terminal. Say what to do about it.
+                  throw new FatalInstrumentationError(
+                    `table \`${plan.name}\` already exists — this spec appears to be instrumented already. ` +
+                      `Reset it first: npx tsx scripts/reset-spec.ts ${specName}`,
+                  );
                 out.set(event, plan);
                 tablePlans.set(event, plan);
               }
@@ -347,6 +355,7 @@ export async function runInstrumentation(
           },
         );
       } catch (error) {
+        if (error instanceof FatalInstrumentationError) throw error;
         feedback = `Your output was rejected before execution: ${error instanceof Error ? error.message : String(error)}`;
         continue;
       }

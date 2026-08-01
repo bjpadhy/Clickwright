@@ -52,8 +52,9 @@ const STEP_LABEL: Record<string, string> = {
   profile: "Profile the event sample",
   context_load: "Load business context",
   schema_reconciliation: "Reconcile context against live schema",
-  ddl_generation: "Design tables (LLM)",
+  ddl_generation: "Design the schema",
   ddl_synthesis: "Synthesise baseline schemas from the profile",
+  schema_design: "Design every table in one LLM call",
   dry_run: "Dry-run every statement on ClickHouse",
   approval: "Human approval — DDL",
   ddl_execution: "Execute DDL + load rows",
@@ -68,17 +69,18 @@ const WRAPPERS = new Set(["instrumentation", "context_update"])
  * The event stream is flat — a `step_start` carries a name and nothing else — so
  * the tree the agent actually runs is rebuilt here from those names.
  *
- * `design_<event>` steps are the per-event generations that fan out inside one
- * `ddl_generation` attempt — one LLM call per table, all in flight at once. They
- * nest under their parent instead of sitting beside it, or a six-event spec
- * renders seven identical spinners stacked in the timeline.
+ * The steps below run inside the `ddl_generation` span and nest under it. The
+ * agent designs the whole schema in one `schema_design_attempt_M` call now, but
+ * runs recorded before that change fan out one `design_<event>` per event type,
+ * concurrently — history replays those, so both still nest.
  */
-const FANOUT_PREFIX = "design_"
 const FANOUT_PARENT = "ddl_generation"
+/** Legacy: the per-event generations, before the schema became one call. */
+const FANOUT_PREFIX = "design_"
 
-/** The other steps that run inside the `ddl_generation` span, in agent order. */
 const CHILD_OF: Record<string, string> = {
   ddl_synthesis: FANOUT_PARENT,
+  schema_design: FANOUT_PARENT,
   dry_run: FANOUT_PARENT,
 }
 
@@ -88,12 +90,52 @@ function parentKey(key: string): string | null {
 }
 
 /**
- * `log` names that are execution progress. Everything else on the `log` channel
- * is either an `llm_*` tick (every 3s, for every call in the run) or a per-table
- * design note — neither is a statement running on ClickHouse, and routing them
+ * The `log` channel carries three unrelated things, and only one of them is
+ * execution: statements landing on ClickHouse. The others are `llm_*` progress
+ * ticks (every 3s, for every call in the run) and design notes — routing those
  * here is what opened the execution panel during schema design.
+ *
+ * Returns `null` for a name that is not execution progress.
  */
-const EXEC_LOG = new Set(["ddl_statement", "data_load"])
+function execLine(
+  name: string,
+  p: Record<string, unknown>
+): { text: string; ok: boolean } | null {
+  const table = String(p["table"] ?? "")
+  const rows = Number(p["rows"] ?? 0)
+
+  switch (name) {
+    case "table_created":
+      return { text: `CREATE TABLE ${table}`, ok: p["ok"] !== false }
+    case "rows_loaded": {
+      // The mismatch is the whole point of counting — say both numbers when the
+      // table disagrees with the file.
+      const expected = typeof p["expected"] === "number" ? p["expected"] : null
+      const short =
+        expected !== null && expected !== rows
+          ? ` of ${expected.toLocaleString()} in the file`
+          : ""
+      return {
+        text: `${table} ← ${rows.toLocaleString()} rows${short}`,
+        ok: p["ok"] !== false,
+      }
+    }
+    case "execution_complete":
+      return {
+        text:
+          `${Number(p["tables"] ?? 0)} table(s) live · ${rows.toLocaleString()} rows · ` +
+          (p["verified"] === true ? "counts match the file" : "ROW COUNTS DO NOT MATCH"),
+        ok: p["verified"] === true,
+      }
+    // ── runs recorded before the execution log was renamed ──
+    case "ddl_statement":
+      return { text: String(p["statement"] ?? name), ok: p["ok"] !== false }
+    case "data_load":
+      return { text: `${table} ← ${rows.toLocaleString()} rows`, ok: p["ok"] !== false }
+    default:
+      return null
+  }
+}
 
 const GATE_PHASE: Record<Gate, PhaseId> = { ddl: "approval", context: "context" }
 
@@ -230,6 +272,11 @@ function summarize(key: string, output: unknown): string | null {
       const tables = count(out?.["tables"])
       return tables === null ? null : `${tables} table(s) proposed`
     }
+    case "schema_design": {
+      // one call designs every table, so the output is the table list itself
+      const tables = count(output)
+      return tables === null ? null : `${tables} table(s) designed`
+    }
     case "dry_run": {
       const passed = out?.["passed"]
       return typeof passed === "number" ? `${passed} statement(s) parsed` : null
@@ -359,25 +406,30 @@ export function buildRunModel(events: RunEvent[]): RunModel {
       case "log": {
         const p = event.payload
 
-        if (EXEC_LOG.has(event.name)) {
-          const text =
-            event.name === "data_load"
-              ? `${String(p["table"] ?? "")} ← ${Number(p["rows"] ?? 0).toLocaleString()} rows`
-              : String(p["statement"] ?? event.name)
+        const line = execLine(event.name, p)
+        if (line) {
           execLog.push({
             ts: event.ts,
             kind: event.name,
-            text,
-            ok: p["ok"] !== false,
+            text: line.text,
+            ok: line.ok,
             ms: typeof p["ms"] === "number" ? p["ms"] : null,
           })
           break
         }
 
-        // A design the agent rejected is retried inside the same step — there is
-        // no second step_start to mark it — so the rejection is recorded as an
-        // attempt of that step. The reason went to the model verbatim, and the
-        // timeline already knows how to render that as the self-healing loop.
+        // Every design attempt failed and the deterministic baseline shipped —
+        // the run carries on, so the recovery has to be said out loud.
+        if (event.name === "schema_fallback") {
+          const group = groups.get("schema_design") ?? groups.get(FANOUT_PARENT)
+          if (group) group.fallback = true
+          break
+        }
+
+        // Legacy per-event designs retried inside a single step, with no second
+        // step_start to mark the retry, so the rejection is recorded as an
+        // attempt of that step. (The agent now gives each attempt its own span,
+        // which the step_start/step_error path above already handles.)
         if (event.name === "design_rejected" || event.name === "design_fallback") {
           const group = groups.get(`${FANOUT_PREFIX}${String(p["event"] ?? "")}`)
           if (!group) break

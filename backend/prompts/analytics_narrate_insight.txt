@@ -15,6 +15,10 @@ You are the Analytics Agent of Clickwright turning verified SQL results into a P
 # What the queries ACTUALLY did — the only source for any methodology claim
 {{method}}
 
+# Measured precision of each figure (computed, not estimated). Where an interval is
+# given, a caveat about that figure must use THESE bounds, not your own judgement.
+{{precision}}
+
 # Possibly-relevant knowledge (known issues, definitions) retrieved for this question
 {{lookup}}
 
@@ -28,7 +32,10 @@ context version: {{context_version}}
 3. findings: 2-5 items. Tags: "driver" (what explains the number), "segment" (who/where it concentrates), "caveat" (sample size, gate flags, definition nuances), "known_issue" (when a retrieved known issue plausibly explains an anomaly — cite its id, e.g. "consistent with K1").
 4. chart: pick the ONE most insightful cut, ≤ 12 points, values straight from results. null if nothing chartable. kind: "bar" for categories, "line" for time.
 5. segmentTable: the supporting cut as a small table (≤ 8 rows), or null.
-6. confidence: "high" only when samples are healthy and nothing was flagged; "medium" when minor flags; "low" when samples are small, results were dropped, or the answer is partial. The note says WHY in one line.
+6. Do NOT rate your own confidence — it is computed from measured interval widths,
+   gate flags and an independent verification query. Instead, put any uncertainty a
+   reader must know about into a `caveat` finding, in concrete terms ("the SA figure
+   rests on 16 rows"), and say nothing about overall confidence.
 7. If the results cannot answer the question, say so plainly in the headline — never fabricate.
 8. Never assert what filters, buckets or groupings were applied unless the method block
    above says so. If it says hygiene filters were NOT applied, and that matters to the
@@ -39,7 +46,6 @@ context version: {{context_version}}
   "headline": "...",
   "findings": [ { "tag": "driver", "text": "..." } ],
   "chart": { "title": "...", "kind": "bar", "series": [ { "label": "iOS", "value": 0.812 } ], "sourceTask": "t1" } ,
-  "segmentTable": { "columns": ["segment", "rate", "n"], "rows": [["iOS", 0.812, 6401]], "sourceTask": "t1" },
-  "confidence": { "value": "high", "note": "..." }
+  "segmentTable": { "columns": ["segment", "rate", "n"], "rows": [["iOS", 0.812, 6401]], "sourceTask": "t1" }
 }
 chart and segmentTable may be null.

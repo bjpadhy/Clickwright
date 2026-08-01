@@ -1,0 +1,230 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* Self-hosted equivalents of the fonts the prototype pulled from Google Fonts:
+   Geist 400/500/600/700 + Geist Mono 400/500/600. Same static instances, so
+   weights like 550/650 resolve exactly as they did in the original. */
+@import "@fontsource/geist/latin-400.css";
+@import "@fontsource/geist/latin-500.css";
+@import "@fontsource/geist/latin-600.css";
+@import "@fontsource/geist/latin-700.css";
+@import "@fontsource/geist-mono/latin-400.css";
+@import "@fontsource/geist-mono/latin-500.css";
+@import "@fontsource/geist-mono/latin-600.css";
+@import "@tabler/icons-webfont/dist/tabler-icons.min.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, monospace;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@theme {
+    /* ── Palette ───────────────────────────────────────────────────────────
+       Pinned to the exact hex values the design uses. Tailwind v4 ships these
+       ramps in oklch, which round-trips a shade or two off; pinning keeps
+       every `bg-zinc-100` / `border-zinc-200` byte-identical to the source. */
+    --color-zinc-50: #fafafa;
+    --color-zinc-100: #f4f4f5;
+    --color-zinc-200: #e4e4e7;
+    --color-zinc-300: #d4d4d8;
+    --color-zinc-400: #a1a1aa;
+    --color-zinc-500: #71717a;
+    --color-zinc-600: #52525b;
+    --color-zinc-700: #3f3f46;
+    --color-zinc-800: #27272a;
+    --color-zinc-900: #18181b;
+    --color-zinc-950: #09090b;
+
+    --color-green-50: #f0fdf4;
+    --color-green-200: #bbf7d0;
+    --color-green-400: #4ade80;
+    --color-green-500: #22c55e;
+    --color-green-600: #16a34a;
+    --color-green-800: #166534;
+    --color-green-900: #14532d;
+
+    --color-amber-50: #fffbeb;
+    --color-amber-200: #fde68a;
+    --color-amber-600: #d97706;
+    --color-amber-800: #92400e;
+    --color-amber-900: #78350f;
+
+    --color-orange-50: #fff7ed;
+    --color-orange-200: #fed7aa;
+    --color-orange-800: #9a3412;
+
+    --color-indigo-50: #eef2ff;
+    --color-indigo-200: #c7d2fe;
+    --color-indigo-800: #3730a3;
+
+    --color-red-50: #fef2f2;
+    --color-red-600: #dc2626;
+
+    --color-gray-500: #6b7280;
+    --color-slate-400: #94a3b8;
+
+    /* Brand accents */
+    --color-teal: #2a9d90; /* clickhouse / db spans / accent */
+    --color-coral: #e76e50; /* llm spans / "hot" data points */
+    --color-sand: #e8c468; /* human spans / starred */
+    --color-navy: #274754; /* funnel head / context chips */
+    --color-code: #0a0a0a; /* code surfaces */
+
+    /* Soft diff-row tints (no Tailwind equivalent) */
+    --color-diff-add: #f7fdf9;
+    --color-diff-mod: #fffdf5;
+
+    /* ── Motion (ported verbatim from the prototype) ────────────────────── */
+    --animate-spin-fast: spin-fast 0.8s linear infinite;
+    --animate-pulse-dot: pulse-soft 1.6s infinite;
+    --animate-pulse-step: pulse-soft 1.4s infinite;
+    --animate-fade-up-xs: fade-up 0.25s ease both;
+    --animate-fade-up-sm: fade-up 0.3s ease both;
+    --animate-fade-up: fade-up 0.35s ease both;
+    --animate-fade-up-lg: fade-up 0.4s ease both;
+
+    @keyframes spin-fast {
+        to {
+            transform: rotate(360deg);
+        }
+    }
+    @keyframes pulse-soft {
+        0%,
+        100% {
+            opacity: 1;
+        }
+        50% {
+            opacity: 0.35;
+        }
+    }
+    @keyframes fade-up {
+        from {
+            opacity: 0;
+            transform: translateY(5px);
+        }
+        to {
+            opacity: 1;
+            transform: none;
+        }
+    }
+}
+
+:root {
+    --background: #fafafa;
+    --foreground: #09090b;
+    --card: #ffffff;
+    --card-foreground: #09090b;
+    --popover: #ffffff;
+    --popover-foreground: #09090b;
+    --primary: #18181b;
+    --primary-foreground: #ffffff;
+    --secondary: #f4f4f5;
+    --secondary-foreground: #18181b;
+    --muted: #f4f4f5;
+    --muted-foreground: #71717a;
+    --accent: #f4f4f5;
+    --accent-foreground: #09090b;
+    --destructive: #dc2626;
+    --border: #e4e4e7;
+    --input: #e4e4e7;
+    --ring: #a1a1aa;
+    --chart-1: #2a9d90;
+    --chart-2: #e76e50;
+    --chart-3: #274754;
+    --chart-4: #e8c468;
+    --chart-5: #94a3b8;
+    --radius: 0.625rem;
+    --sidebar: #ffffff;
+    --sidebar-foreground: #09090b;
+    --sidebar-primary: #18181b;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #f4f4f5;
+    --sidebar-accent-foreground: #09090b;
+    --sidebar-border: #e4e4e7;
+    --sidebar-ring: #a1a1aa;
+}
+
+@layer base {
+    * {
+        @apply border-border outline-ring/50;
+    }
+    html {
+        @apply font-sans;
+    }
+    body {
+        @apply bg-background text-foreground antialiased;
+        margin: 0;
+    }
+    a {
+        @apply text-zinc-900 no-underline;
+    }
+    a:hover {
+        @apply text-teal;
+    }
+    ::selection {
+        @apply bg-teal text-white;
+    }
+    input,
+    textarea {
+        font-family: inherit;
+    }
+    ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+    }
+    ::-webkit-scrollbar-thumb {
+        @apply bg-zinc-200;
+        border-radius: 8px;
+        border: 3px solid #fafafa;
+    }
+    ::-webkit-scrollbar-track {
+        background: transparent;
+    }
+}
+
+@utility scroll-y {
+    min-height: 0;
+    overflow-y: auto;
+}

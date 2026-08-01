@@ -19,6 +19,9 @@
  *   POST/GET/DELETE /api/dashboards       saved charts; GET :id/run re-executes the SQL
  *   GET  /api/context                     latest version of every entity
  *   GET  /api/context/:entity/history     full version history for one entity
+ *   GET  /api/observe/clickhouse          database health (system tables)
+ *   GET  /api/observe/changelog           schema + context change stream
+ *   GET  /api/observe/changelog/export    the same, as a markdown download
  */
 import express from "express";
 import { readdir, readFile } from "node:fs/promises";
@@ -34,11 +37,14 @@ import {
 } from "./dashboards.js";
 import { query } from "../core/db.js";
 import { env } from "../core/env.js";
+import { observeRouter } from "../observe/routes.js";
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 
 const manager = new RunManager();
+
+app.use("/api/observe", observeRouter(manager));
 
 app.get("/api/health", async (_req, res) => {
   try {

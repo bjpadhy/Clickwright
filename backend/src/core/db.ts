@@ -1,5 +1,18 @@
-import { createClient, type ClickHouseClient } from "@clickhouse/client";
+import {
+  createClient,
+  type ClickHouseClient,
+  type ClickHouseSettings,
+} from "@clickhouse/client";
 import { env } from "./env.js";
+import { buildLogComment, currentQueryContext } from "./query-context.js";
+
+/**
+ * Every statement carries a log_comment naming the agent that issued it, so
+ * system.query_log can attribute work after the fact. See query-context.ts.
+ */
+function tagged(extra: ClickHouseSettings = {}): ClickHouseSettings {
+  return { ...extra, log_comment: buildLogComment(currentQueryContext()) };
+}
 
 let client: ClickHouseClient | null = null;
 
@@ -24,6 +37,9 @@ export async function query<T = Record<string, unknown>>(
     const result = await db().query({
       query: sql,
       format: "JSONEachRow",
+      // Re-evaluated per attempt so a retry is tagged with the context that is
+      // actually current, not the one captured when the first attempt started.
+      clickhouse_settings: tagged(),
       ...(params ? { query_params: params } : {}),
     });
     return result.json<T>();
@@ -70,7 +86,10 @@ export async function queryReadonly<T = Record<string, unknown>>(
     const result = await db().query({
       query: sql,
       format: "JSONEachRow",
-      clickhouse_settings: { readonly: "1", max_execution_time: 30 },
+      // readonly=1 and log_comment coexist — verified against the live service.
+      // The analytics agent runs the most interesting queries in the system; if
+      // they were untagged they would show as unattributed on the Observe screen.
+      clickhouse_settings: tagged({ readonly: "1", max_execution_time: 30 }),
     });
     return result.json<T>();
   });
@@ -80,7 +99,7 @@ export async function queryReadonly<T = Record<string, unknown>>(
 export async function command(sql: string): Promise<void> {
   await db().command({
     query: sql,
-    clickhouse_settings: { wait_end_of_query: 1 },
+    clickhouse_settings: tagged({ wait_end_of_query: 1 }),
   });
 }
 
@@ -94,7 +113,7 @@ export async function insert(
     table,
     values: rows,
     format: "JSONEachRow",
-    clickhouse_settings: { date_time_input_format: "best_effort" },
+    clickhouse_settings: tagged({ date_time_input_format: "best_effort" }),
   });
 }
 

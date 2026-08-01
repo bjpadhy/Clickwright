@@ -11,6 +11,7 @@
  */
 import { z } from "zod";
 import { isTransientDbError, query, queryReadonly } from "../core/db.js";
+import { withQueryContext } from "../core/query-context.js";
 import { step, scoreRun, recordQuery, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import { getContext, lookupContext, reconcileWithLive } from "./context.js";
@@ -247,7 +248,11 @@ export async function runAnalytics(
     ((parent: Ctx, name: string, prompt: string) =>
       complete(parent, name, prompt, { maxTokens: 8000 }));
 
-  return step(opts.trace, "analytics", { question: input.question }, async (span) => {
+  // Self-attributing: tagging here rather than at the call site means every
+  // query this agent runs is labelled "analytics" in system.query_log (and so on
+  // the Observe screen) no matter which route ends up invoking it.
+  return withQueryContext({ agent: "analytics" }, () =>
+   step(opts.trace, "analytics", { question: input.question }, async (span) => {
     // ── context (read-only) ──
     const { bundle, liveTables, schemas, contextVersion } = await step(
       span,
@@ -500,5 +505,6 @@ export async function runAnalytics(
         rowCount: r.rows.length,
       })),
     };
-  });
+   }),
+  );
 }

@@ -10,6 +10,7 @@
     "seed": "tsx scripts/seed-context.ts",
     "check-env": "tsx scripts/check-env.ts",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "serve": "tsx src/server/index.ts"
   },
   "repository": {

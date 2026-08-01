@@ -316,12 +316,28 @@ are what keeps the UI honest during the wait.
 | `failed` | `{ error, traceUrl }` | answer could not be produced |
 | `done` | `{}` | stream closed (always fires, success or failure) |
 
+**Concurrency in the stream.** `task_<id>` children run at the same time, so their
+`sql_attempt_N` events interleave — group children by their `task_<id>` parent rather
+than assuming sequential arrival. The same applies to `design_<event>` inside an
+instrumentation run.
+
+**Honest-failure semantics.** An agent that cannot answer returns the normal shape with
+the gap stated inside it, never an invented value:
+- a task the SQL writer declared impossible is dropped, with the reason in the sanity
+  notes and reflected in a `caveat` finding;
+- a question that cannot be answered at all yields a headline saying so, `chart: null`,
+  `segmentTable: null`, `sql: []`, and `confidence: "low"`;
+- a chart or table whose source task was dropped is removed rather than shown.
+Render these as first-class outcomes — they are correct answers, not errors.
+
 Step names, in order:
 
 ```
 analytics                  (wrapper)
   context_load             knowledge + schemas + contextVersion
   cache_lookup             only when this is not a follow-up; a hit ends the run here
+                           (keyed by question + a digest of every entity version, so
+                           any context write invalidates it)
   plan                     → ≤4 tasks
   task_<id>                ONE PER TASK, RUN CONCURRENTLY — events interleave, so
     sql_attempt_N          group children by their task_<id> parent

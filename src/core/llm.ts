@@ -25,7 +25,10 @@ async function completeViaAgentSdk(
     prompt,
     options: {
       model: env.llm.model,
-      maxTurns: 1,
+      // No tools are allowed, but the CLI can split long responses across
+      // assistant turns — maxTurns: 1 intermittently dies with
+      // error_max_turns on big prompts (seen in trace pipeline:01_express_checkout).
+      maxTurns: 8,
       allowedTools: [],
       ...(options.system ? { customSystemPrompt: options.system } : {}),
     },

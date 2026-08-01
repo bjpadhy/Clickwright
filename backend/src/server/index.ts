@@ -35,6 +35,7 @@ import {
 import {
   initDashboardTables, saveDashboard, listDashboards, runDashboard, deleteDashboard,
 } from "./dashboards.js";
+import { initInsightCache } from "../agents/analytics.js";
 import { query } from "../core/db.js";
 import { env } from "../core/env.js";
 import { observeRouter } from "../observe/routes.js";

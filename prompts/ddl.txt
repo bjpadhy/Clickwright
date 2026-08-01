@@ -30,6 +30,7 @@ Fields NOT part of the standard platform envelope (event-specific or new): {{new
 4. ENGINE = MergeTree. ORDER BY starts with the join key — application_id if it is present and non-empty for this event, else user_id — then timestamp. PARTITION BY toYYYYMM(timestamp).
 5. Base tables use second-precision DateTime; your DateTime64(3) still joins cleanly — note it in reasoning, do not "fix" it.
 6. Each DDL statement must be a single CREATE TABLE. No DROP, ALTER, or other statements.
+7. Self-documenting schema: give every column a COMMENT '...' (meaning, units, gotchas — e.g. hygiene flags, currency denominations, null semantics), and end the CREATE TABLE with a table-level COMMENT stating the event, its role in the feature, and which spec created it. Match the style of the existing base tables' comments.
 
 # Output
 STRICT JSON only — no prose outside the JSON, no markdown fences:

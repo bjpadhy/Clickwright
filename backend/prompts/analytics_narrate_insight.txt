@@ -42,6 +42,7 @@ context version: {{context_version}}
 1d. A figure labelled "about" or "approx" is approximate — say "about 412 cities",
    never "412 cities". Where a profile reports a mean across rows, that is the mean
    of the rows, not of the underlying population; say so or leave it out.
+1e. Write every figure the way a person writes it: `19.0%`, `1,033 users`, `₹2,400`. Never paste a raw float (`0.19047619047619047`) and never show your arithmetic in the prose (`0.19047 * 100`, `46/199`). The checker already accepts a 0..1 rate written as a percentage and already re-derives differences and ratios itself, so proving your working in the sentence is never required and always reads as a machine wrote it.
 2. The headline answers the question in one sentence with the single most important number.
 3. findings: 2-5 items. Tags: "driver" (what explains the number), "segment" (who/where it concentrates), "caveat" (sample size, gate flags, definition nuances), "known_issue" (when a retrieved known issue plausibly explains an anomaly — cite its id, e.g. "consistent with K1").
 4. chart: pick the ONE most insightful cut, ≤ 12 points, values straight from results. null if nothing chartable. kind: "bar" for categories, "line" for time.

@@ -61,6 +61,100 @@ export function classifyMetric(column: string, value: number, sql: string): Metr
   return "unknown";
 }
 
+const normalize = (s: string) => s.replace(/`/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+
+/**
+ * The SELECT-list expression that produced `alias`, e.g. for
+ * `uniqExactIf(x) / uniqExact(y) AS attach_rate` returns the text before `AS`.
+ * Scans back from the alias to the enclosing depth-0 comma or opening paren, so
+ * commas inside function calls do not split the item.
+ */
+function selectItemFor(alias: string, sql: string): string | null {
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`\\bas\\s+\`?${escaped}\`?\\b`, "gi");
+  let match: RegExpExecArray | null;
+  let last = -1;
+  while ((match = re.exec(sql)) !== null) last = match.index;
+  if (last < 0) return null;
+
+  let depth = 0;
+  let i = last - 1;
+  for (; i >= 0; i--) {
+    const ch = sql[i];
+    if (ch === ")") depth++;
+    else if (ch === "(") {
+      if (depth === 0) break;
+      depth--;
+    } else if (ch === "," && depth === 0) break;
+  }
+  const item = sql.slice(i + 1, last).trim();
+  return item.length > 0 ? item : null;
+}
+
+/** The divisor of the outermost division in an expression, if it is a division. */
+function divisorOf(expression: string): string | null {
+  let depth = 0;
+  for (let i = expression.length - 1; i >= 0; i--) {
+    const ch = expression[i];
+    if (ch === ")") depth++;
+    else if (ch === "(") depth--;
+    else if (ch === "/" && depth === 0) {
+      const divisor = expression.slice(i + 1).trim();
+      return divisor.length > 0 ? divisor : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * The denominator read from the SQL that defined the rate. This is not an
+ * inference: `a / b AS rate` states what it divided by, so we resolve `b`.
+ *
+ * It exists because the naming convention alone cannot express a funnel. A rate
+ * between two different stages — `currency_selected_n / offer_shown_n AS
+ * offer_to_currency_rate` — has no shared base with either count, so demanding
+ * `offer_to_currency_n` asks for a column no sensible query would write, and
+ * every such rate came back "not computable".
+ *
+ * Two resolvable forms: the divisor is a column of the result, or it is an
+ * expression that appears again in the same SELECT under its own alias.
+ */
+function denominatorFromSql(
+  rateColumn: string,
+  row: Record<string, unknown>,
+  sql: string,
+): number | null {
+  const item = selectItemFor(rateColumn, sql);
+  if (!item) return null;
+  const divisor = divisorOf(item);
+  if (!divisor) return null;
+
+  const positive = (v: unknown): number | null => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  // the divisor is itself one of the returned columns
+  const bare = divisor.replace(/`/g, "").trim();
+  const column = /^[a-z_][a-z0-9_]*$/i.test(bare) ? bare : bare.split(".").pop() ?? "";
+  if (column && column in row) {
+    const value = positive(row[column]);
+    if (value !== null) return value;
+  }
+
+  // the divisor is an expression that some other column also selects
+  const target = normalize(divisor);
+  for (const [candidate, value] of Object.entries(row)) {
+    if (candidate === rateColumn) continue;
+    const candidateItem = selectItemFor(candidate, sql);
+    if (candidateItem && normalize(candidateItem) === target) {
+      const resolved = positive(value);
+      if (resolved !== null) return resolved;
+    }
+  }
+  return null;
+}
+
 /**
  * The denominator for a rate column, taken from the SAME row by naming
  * convention (`x_rate` → `x_n` / `x_denominator` / `x_total`, else a bare `n`).
@@ -136,7 +230,8 @@ export function precisionForRow(
     if (kind === "count" || kind === "unknown") continue;
 
     if (kind === "proportion") {
-      const n = findDenominator(column, row);
+      // what the query divided by, before what the column is called
+      const n = denominatorFromSql(column, row, sql) ?? findDenominator(column, row);
       if (n === null) {
         out.push({
           column,

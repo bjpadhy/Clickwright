@@ -278,17 +278,26 @@ text diffs with `change_note` + `source_spec` as annotation.
 ## [LIVE] Chat — the Analytics Agent as a conversation
 
 ```
-POST /api/conversations                 { title? }              → 201 { id }
-GET  /api/conversations                 → [{ id, title, starred, updatedAt, preview, messages }]
-GET  /api/conversations/:id             → { id, messages: ChatMessage[] }
-POST /api/conversations/:id/star        { starred: boolean }    → { ok: true }
-POST /api/conversations/:id/messages    { question: string }    → SSE (below)
-GET  /api/suggestions                   → [{ spec, question }]  // chips, from stored PM questions
+POST   /api/conversations               { title? }              → 201 { id }
+GET    /api/conversations               → [{ id, title, starred, updatedAt, preview, messages }]
+GET    /api/conversations/:id           → { id, messages: ChatMessage[] } · 404 if unknown/deleted
+POST   /api/conversations/:id/star      { starred: boolean }    → { ok: true }
+DELETE /api/conversations/:id           → { ok: true } · 404 if unknown/already deleted
+POST   /api/conversations/:id/messages  { question: string }    → SSE (below)
+GET    /api/suggestions                 → [{ spec, question }]  // chips, from stored PM questions
 ```
 
 Conversations and every answer persist in ClickHouse (`conversations`, `messages`),
 so `GET /api/conversations/:id` re-renders past insight cards with no recompute.
 The conversation is auto-titled from its first question.
+
+**Delete is irreversible and has two halves.** The `conversations` row is
+tombstoned (`deleted = 1` on a new ReplacingMergeTree version) so the list read
+is immediate and deterministic; the `messages` rows are physically removed by a
+mutation, so a deleted conversation's questions and answers are really gone —
+not merely hidden. Every other conversation route treats a tombstoned id as
+unknown (404). `insight_cache` is NOT touched: it is keyed by question text and
+context version, not by conversation, and it holds no conversation reference.
 
 ### SSE stream of `POST /api/conversations/:id/messages`
 

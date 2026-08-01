@@ -1,10 +1,11 @@
 /**
- * The real Clickwright backend, as specified in `backend/API.md`.
+ * Instrumentation runs and the context store, as specified in `backend/API.md`.
  *
- * Only the Instrumentation screen talks to this today — Chat, Dashboards and
- * Observability are still served by the in-memory mock in `src/mock`. Paths are
- * relative: `vite.config.ts` proxies `/api/*` to `http://localhost:8787`.
+ * Chat talks to the same backend through `src/api/chat.ts`; Dashboards and
+ * Observability are still served by the in-memory mock in `src/mock`.
  */
+
+import { post, request } from "./http"
 
 /* ── runs ──────────────────────────────────────────────────────────────── */
 
@@ -166,31 +167,6 @@ export interface ApprovalDecision {
 export type CreateRunInput =
   | { specDir: string }
   | { name: string; specMd: string; ndjson: string }
-
-/* ── transport ─────────────────────────────────────────────────────────── */
-
-/** Errors are `{ error: string }` with a 4xx/5xx status. */
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, {
-    ...init,
-    headers: init?.body ? { "Content-Type": "application/json" } : undefined,
-  })
-  const text = await response.text()
-  const body = text ? (JSON.parse(text) as unknown) : null
-
-  if (!response.ok) {
-    const error =
-      body && typeof body === "object" && "error" in body
-        ? String((body as { error: unknown }).error)
-        : `${response.status} ${response.statusText}`
-    throw new Error(error)
-  }
-  return body as T
-}
-
-function post<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, { method: "POST", body: JSON.stringify(body) })
-}
 
 export const backend = {
   health: () => request<Health>("/health"),

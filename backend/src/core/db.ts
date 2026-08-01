@@ -96,10 +96,14 @@ export async function queryReadonly<T = Record<string, unknown>>(
 }
 
 /** Run a statement with no result set — DDL, INSERT ... SELECT, etc. */
-export async function command(sql: string): Promise<void> {
+export async function command(
+  sql: string,
+  params?: Record<string, unknown>,
+): Promise<void> {
   await db().command({
     query: sql,
     clickhouse_settings: tagged({ wait_end_of_query: 1 }),
+    ...(params ? { query_params: params } : {}),
   });
 }
 

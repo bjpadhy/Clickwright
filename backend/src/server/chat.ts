@@ -38,11 +38,16 @@ export async function initChatTables(): Promise<void> {
       conv_id    String,
       title      String,
       starred    UInt8 DEFAULT 0,
+      deleted    UInt8 DEFAULT 0,
       created_at DateTime64(3),
       updated_at DateTime64(3)
     ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY conv_id
     COMMENT 'Clickwright chat conversations (sidebar)'
   `);
+  // Databases created before delete shipped predate the column.
+  await command(
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS deleted UInt8 DEFAULT 0 AFTER starred`,
+  );
   await command(`
     CREATE TABLE IF NOT EXISTS messages (
       conv_id      String,
@@ -63,9 +68,37 @@ export async function createConversation(title?: string): Promise<string> {
   const id = `conv_${Date.now().toString(36)}_${randomUUID().slice(0, 6)}`;
   const ts = now();
   await insert("conversations", [
-    { conv_id: id, title: title ?? "New conversation", starred: 0, created_at: ts, updated_at: ts },
+    {
+      conv_id: id,
+      title: title ?? "New conversation",
+      starred: 0,
+      deleted: 0,
+      created_at: ts,
+      updated_at: ts,
+    },
   ]);
   return id;
+}
+
+/** Latest version of one conversation, or null when unknown or deleted. */
+async function loadConversation(
+  convId: string,
+): Promise<{ title: string; starred: number; created_at: string } | null> {
+  const rows = await query<{
+    title: string;
+    starred: number;
+    deleted: number;
+    created_at: string;
+  }>(
+    `SELECT title, toUInt8(starred) AS starred, toUInt8(deleted) AS deleted,
+            toString(created_at) AS created_at
+     FROM conversations WHERE conv_id = {conv:String}
+     ORDER BY updated_at DESC LIMIT 1`,
+    { conv: convId },
+  );
+  const row = rows[0];
+  if (!row || row.deleted) return null;
+  return { title: row.title, starred: row.starred, created_at: row.created_at };
 }
 
 export async function listConversations(): Promise<unknown[]> {
@@ -85,12 +118,14 @@ export async function listConversations(): Promise<unknown[]> {
            coalesce(s.messages, toUInt32(0)) AS messages
     FROM conversations AS c FINAL
     LEFT JOIN stats AS s ON s.conv_id = c.conv_id
+    WHERE c.deleted = 0
     ORDER BY c.updated_at DESC
     LIMIT 100
   `);
 }
 
 export async function getConversation(convId: string): Promise<unknown> {
+  if (!(await loadConversation(convId))) throw new Error("unknown conversation");
   const messages = await query<ChatMessageRow>(
     `SELECT conv_id, toUInt32(seq) AS seq, role, question, insight_json, trace_url, toString(ts) AS ts
      FROM messages WHERE conv_id = {conv:String} ORDER BY seq ASC`,
@@ -112,21 +147,49 @@ export async function getConversation(convId: string): Promise<unknown> {
 }
 
 export async function setStarred(convId: string, starred: boolean): Promise<void> {
-  const rows = await query<{ title: string; created_at: string }>(
-    `SELECT title, toString(created_at) AS created_at FROM conversations
-     WHERE conv_id = {conv:String} ORDER BY updated_at DESC LIMIT 1`,
-    { conv: convId },
-  );
-  if (rows.length === 0) throw new Error("unknown conversation");
+  const current = await loadConversation(convId);
+  if (!current) throw new Error("unknown conversation");
   await insert("conversations", [
     {
       conv_id: convId,
-      title: rows[0]!.title,
+      title: current.title,
       starred: starred ? 1 : 0,
-      created_at: rows[0]!.created_at,
+      // Carried, not defaulted: a new version with deleted = 0 would resurrect
+      // a conversation the user had deleted.
+      deleted: 0,
+      created_at: current.created_at,
       updated_at: now(),
     },
   ]);
+}
+
+/**
+ * Delete a conversation.
+ *
+ * The row is tombstoned rather than mutated away — same pattern as `dashboards`
+ * — because ReplacingMergeTree gives the sidebar an immediate, deterministic
+ * read, whereas an `ALTER … DELETE` is an async mutation the next list call
+ * could race. The turns themselves ARE physically removed: hiding a
+ * conversation while its questions and answers stayed queryable would not be a
+ * delete. That mutation is small (one conversation's rows) and is applied in
+ * the background; nothing reads those rows once the conversation is hidden.
+ */
+export async function deleteConversation(convId: string): Promise<void> {
+  const current = await loadConversation(convId);
+  if (!current) throw new Error("unknown conversation");
+  await insert("conversations", [
+    {
+      conv_id: convId,
+      title: current.title,
+      starred: current.starred,
+      deleted: 1,
+      created_at: current.created_at,
+      updated_at: now(),
+    },
+  ]);
+  await command(`ALTER TABLE messages DELETE WHERE conv_id = {conv:String}`, {
+    conv: convId,
+  });
 }
 
 /**
@@ -273,18 +336,23 @@ export async function streamAnswer(
         ts: now(),
       },
     ]);
-    // title the conversation from its first question
+    // Title the conversation from its first question. Re-read first: a new
+    // version written blind would undo a star — or resurrect a conversation
+    // deleted while this answer was being written.
     if (nextSeq === 0) {
-      const created = now();
-      await insert("conversations", [
-        {
-          conv_id: convId,
-          title: question.slice(0, 70),
-          starred: 0,
-          created_at: created,
-          updated_at: created,
-        },
-      ]);
+      const current = await loadConversation(convId);
+      if (current) {
+        await insert("conversations", [
+          {
+            conv_id: convId,
+            title: question.slice(0, 70),
+            starred: current.starred,
+            deleted: 0,
+            created_at: current.created_at,
+            updated_at: now(),
+          },
+        ]);
+      }
     }
     endRun(trace, { headline: insight.headline, confidence: insight.confidence.value });
     send("insight", { insight, traceUrl: url });

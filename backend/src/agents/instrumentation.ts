@@ -21,11 +21,13 @@ import { getContext, reconcileWithLive } from "./context.js";
 
 // ── types ────────────────────────────────────────────────────────
 
+/** Hard caps — a verbose rationale is rejected and regenerated, so the FE panel
+ * always renders 1-2 tight statements per field. */
 const RationaleSchema = z.object({
-  ordering_key: z.string(),
-  partitioning: z.string(),
-  types_codecs: z.string(),
-  deviations: z.string().default(""),
+  ordering_key: z.string().max(200, "ordering_key must be <= 200 chars — one statement"),
+  partitioning: z.string().max(160, "partitioning must be <= 160 chars"),
+  types_codecs: z.string().max(260, "types_codecs must be <= 260 chars — only non-obvious calls"),
+  deviations: z.string().max(240, "deviations must be <= 240 chars").default(""),
 });
 
 /** One concurrent call designs one table. */
@@ -33,7 +35,7 @@ const TableProposalSchema = z.object({
   table: z.object({
     name: z.string().regex(/^[a-z][a-z0-9_]*$/),
     event: z.string().min(1),
-    purpose: z.string().min(1),
+    purpose: z.string().min(1).max(140, "purpose must be <= 140 chars"),
     ddl: z.string().min(1),
   }),
   rationale: RationaleSchema,
@@ -198,7 +200,15 @@ export async function runInstrumentation(
 
     // ── context via the Context Agent only ──
     const bundle = await step(span, "context_load", {}, async () => {
-      const b = await getContext({ include: ["table"] });
+      // DDL needs the RULES and the list of existing table names — not metric
+      // definitions, known issues, or full column docs. Each parallel per-table
+      // call pays for this bundle, so keeping it small matters 5x over.
+      const b = await getContext({
+        core: ["convention", "join_map"],
+        include: ["table"],
+        brief: ["table"],
+        require: ["convention:envelope", "convention:data_hygiene", "join_map:core"],
+      });
       const byCat = new Map<string, number>();
       for (const e of b.entries) {
         const cat = e.entity.split(":")[0] ?? "";

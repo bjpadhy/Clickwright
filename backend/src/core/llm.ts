@@ -95,7 +95,15 @@ export type CompleteOptions = {
   system?: string;
   maxTokens?: number;
   temperature?: number;
+  /** Set false to skip the shared system prompt (prompts/system.txt). */
+  useSystemPrompt?: boolean;
 };
+
+let systemPrompt: string | null = null;
+async function sharedSystem(): Promise<string> {
+  systemPrompt ??= await readFile(path.join(PROMPT_DIR, "system.txt"), "utf8");
+  return systemPrompt;
+}
 
 /**
  * Single entry point for every LLM call, so model config and tracing stay in one place.
@@ -108,6 +116,9 @@ export async function complete(
   options: CompleteOptions = {},
 ): Promise<string> {
   const model = env.llm.model;
+  if (options.useSystemPrompt !== false && !options.system) {
+    options = { ...options, system: await sharedSystem() };
+  }
   const generation = parent.generation({
     name,
     model,

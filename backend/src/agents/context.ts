@@ -72,6 +72,21 @@ export interface GetContextOptions {
   include?: string[];
   /** Free-text lookup: pulls entries whose entity or text matches any term (>2 chars). */
   topic?: string;
+  /** Categories collapsed to one line per entity (name + first sentence) instead of
+   * full text. Big token saving when a caller only needs to know something exists. */
+  brief?: string[];
+  /** Core categories to include; defaults to all of them. Narrow it when a caller
+   * genuinely needs only some rules (e.g. DDL needs conventions, not metrics guides). */
+  core?: string[];
+  /** Entities/categories the caller REQUIRES. Throws if the store cannot supply
+   * them — a silent empty bundle is how prompts start hallucinating. */
+  require?: string[];
+}
+
+function firstSentence(md: string): string {
+  const text = md.replace(/\n+/g, " ").replace(/\*\*/g, "").trim();
+  const m = /^(.{0,220}?[.;])\s/.exec(text);
+  return (m?.[1] ?? text.slice(0, 220)).trim();
 }
 
 export async function getContext(
@@ -79,9 +94,10 @@ export async function getContext(
 ): Promise<ContextBundle> {
   const all = await latestEntries();
   const selected = new Map<string, ContextEntry>();
+  const coreWanted = opts.core ?? CORE_PREFIXES;
 
   for (const e of all) {
-    if (CORE_PREFIXES.includes(category(e.entity))) selected.set(e.entity, e);
+    if (coreWanted.includes(category(e.entity))) selected.set(e.entity, e);
   }
 
   for (const inc of opts.include ?? []) {
@@ -106,12 +122,34 @@ export async function getContext(
   }
 
   const entries = [...selected.values()];
+
+  // Verify the bundle actually contains what the caller depends on. Failing loudly
+  // here beats handing a prompt an empty section and getting invented answers.
+  const missing = (opts.require ?? []).filter((req) =>
+    req.includes(":")
+      ? !entries.some((e) => e.entity === req)
+      : !entries.some((e) => category(e.entity) === req),
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `context bundle is missing required knowledge: ${missing.join(", ")} — refusing to build a prompt without it`,
+    );
+  }
+
+  const brief = new Set(opts.brief ?? []);
   const parts: string[] = [];
   for (const [cat, heading] of CATEGORY_HEADINGS) {
     const group = entries
       .filter((e) => category(e.entity) === cat)
       .sort((a, b) => a.entity.localeCompare(b.entity));
     if (group.length === 0) continue;
+    if (brief.has(cat)) {
+      parts.push(
+        `## ${heading} (names + one-line summaries)\n` +
+          group.map((e) => `- ${e.entity} v${e.version}: ${firstSentence(e.definition_md)}`).join("\n"),
+      );
+      continue;
+    }
     parts.push(`## ${heading}`);
     for (const e of group) {
       const src = e.version > 1 ? `, updated by ${e.source_spec}` : "";
@@ -138,13 +176,14 @@ const UpdateProposalSchema = z.object({
           .regex(
             /^(table|spec|metric|funnel|entity|convention|known_issue):[a-z0-9_]+$/i,
           ),
-        definition_md: z.string().min(20),
-        change_note: z.string().min(5),
+        definition_md: z.string().min(20).max(1800, "definition_md must be <= 1800 chars — be precise, not exhaustive"),
+        change_note: z.string().min(5).max(200, "change_note must be one clause <= 200 chars"),
       }),
     )
-    .min(1),
-  /** One-liners where new findings contradict existing context — the UI's "contradiction surfaced" chip. */
-  warnings: z.array(z.string()).optional(),
+    .min(1)
+    .max(16, "at most 16 entries per spec — emit only what genuinely changed"),
+  /** Real contradictions only — the UI's "contradiction surfaced" chip. */
+  warnings: z.array(z.string().max(300)).max(3, "at most 3 warnings — only genuine contradictions").optional(),
 });
 export type ContextUpdateProposal = z.infer<typeof UpdateProposalSchema>;
 
@@ -202,7 +241,14 @@ export async function updateContext(
       complete(p, n, prompt, { maxTokens: 8000 }));
 
   return step(trace, "context_update", { spec: input.specName }, async (span) => {
-    const current = await getContext({ include: ["*"] });
+    // The updater must know what already exists (to avoid duplicates) but only
+    // needs FULL text of the entries it might revise — conventions and known
+    // issues. Everything else goes in as one-liners.
+    const current = await getContext({
+      include: ["*"],
+      brief: ["table", "metric", "funnel", "entity", "spec", "overview", "guide"],
+      require: ["convention:envelope", "convention:data_hygiene"],
+    });
     const existingEntities = new Set(current.entries.map((e) => e.entity));
     const createdTables = new Set(input.instrumentation.tables.map((t) => t.name));
 

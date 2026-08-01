@@ -209,8 +209,10 @@ export interface ContextUpdateInput {
     reasoning: string;
     newEnvelopeFields: string[];
     tables: { name: string; event: string; purpose: string; rowsLoaded: number }[];
-    /** Code-synthesised `table:*` entries — stored verbatim, no model needed. */
-    tableEntries?: Array<{ entity: string; definition_md: string; change_note: string }>;
+    /** Code-synthesised `table:*` entries — stored verbatim, no model needed.
+     * REQUIRED: the validator demands one entry per created table, so a caller
+     * that omits these would fail at runtime after minutes of work. */
+    tableEntries: Array<{ entity: string; definition_md: string; change_note: string }>;
   };
 }
 
@@ -283,7 +285,7 @@ export async function updateContext(
             // verbatim removes half this step's generation. The model is left with
             // the part that genuinely needs judgement: the feature summary, the
             // metrics its questions require, and contradictions with the store.
-            const deterministic = input.instrumentation.tableEntries ?? [];
+            const deterministic = input.instrumentation.tableEntries;
             const restText = await loadPrompt("context_write_knowledge", {
               ...vars,
               scope: REST_SCOPE,

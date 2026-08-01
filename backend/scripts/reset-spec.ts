@@ -39,6 +39,36 @@ if (args.includes("--all-specs")) {
   }
 }
 
+// Never drop the application's own storage, whatever the context store says.
+const PRODUCT_TABLES = new Set([
+  "context_store", "runs_log", "conversations", "messages", "dashboards",
+  "insight_cache", "optimization_suggestions", "schema_changelog", "trace_summaries",
+]);
+
+// A run that created tables but failed before writing context leaves ORPHANS:
+// real tables with no table:* entry, so the loop above cannot see them. Sweep any
+// table that is neither provided base data nor application storage.
+const BASE_TABLES = new Set([
+  "destination_card_clicked", "application_started", "document_uploaded", "purchase_completed",
+  "search_typed", "landing_page_scrolled", "auth_completed", "pay_now_clicked",
+]);
+if (args.includes("--all-specs") || args.includes("--orphans")) {
+  const live = await query<{ name: string }>(
+    `SELECT name FROM system.tables WHERE database = currentDatabase() AND NOT is_temporary`,
+  );
+  const documented = new Set(
+    (await query<{ e: string }>(`SELECT DISTINCT entity AS e FROM context_store WHERE entity LIKE 'table:%'`))
+      .map((r) => r.e.slice("table:".length)),
+  );
+  for (const { name } of live) {
+    if (BASE_TABLES.has(name) || PRODUCT_TABLES.has(name) || name.startsWith(".inner")) continue;
+    if (documented.has(name)) continue;
+    await command(`DROP TABLE IF EXISTS ${name}`);
+    console.log(`✓ dropped orphan table ${name} (created by a failed run, undocumented)`);
+  }
+}
+
+
 if (specs.length === 0) {
   console.log("nothing to reset — no spec-run rows in context_store");
   await closeDb();
@@ -53,12 +83,6 @@ const tableRows = await query<{ entity: string }>(`
 `);
 const tables = tableRows.map((r) => r.entity.slice("table:".length));
 
-// Belt and braces: even if a product table somehow appeared as a table:* entry,
-// never drop the application's own storage.
-const PRODUCT_TABLES = new Set([
-  "context_store", "runs_log", "conversations", "messages", "dashboards",
-  "optimization_suggestions", "schema_changelog", "trace_summaries",
-]);
 for (const t of tables) {
   if (PRODUCT_TABLES.has(t)) {
     console.log(`• skipped ${t} — product table, never reset`);

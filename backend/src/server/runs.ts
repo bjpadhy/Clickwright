@@ -326,6 +326,9 @@ export class RunManager {
               reasoning: instr.reasoning,
               newEnvelopeFields: instr.newEnvelopeFields,
               tables: instr.tables,
+              // code-synthesised table:* entries — stored verbatim, and the
+              // updateContext validator requires one per created table
+              tableEntries: instr.tableEntries,
             },
           },
           trace,
@@ -353,7 +356,13 @@ export class RunManager {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       endRun(trace, { status: "failed", error: message }, { spec: run.spec, runId: run.id });
-      this.status(run, "failed", { error: message });
+      this.status(run, "failed", {
+        error: message,
+        // A failure after the tables were created leaves them in place but
+        // undocumented; the UI should offer a reset rather than a bare retry,
+        // which would only hit a name collision.
+        resetHint: `npx tsx scripts/reset-spec.ts ${run.spec} (or --orphans)`,
+      });
     } finally {
       setRunSink(null);
       await this.writes.catch(() => {}); // every event is durable before we finish

@@ -366,10 +366,21 @@ export async function streamAnswer(
       } catch {
         /* a malformed stored answer must not break the next question */
       }
+      // Carry the SQL context forward so the planner can reuse the same tables,
+      // columns and approach rather than re-planning from scratch and drifting.
+      const sqlContext = (insight?.sql ?? [])
+        .filter((s) => !s.task.endsWith("_profile") && !s.task.endsWith("_top") && !s.task.endsWith("_bottom"))
+        .map((s) => {
+          const tables = [...s.query.matchAll(/\bfrom\s+([a-z_][a-z0-9_]*)/gi)]
+            .map((m) => m[1]!).filter((t) => !/^select$/.test(t));
+          return `${s.task}: ${s.title} (tables: ${[...new Set(tables)].join(", ")})`;
+        })
+        .join("; ");
       return {
         role: "agent" as const,
         text: insight?.headline ?? "",
         figures: insight ? establishedFigures(insight) : "",
+        sqlContext,
       };
     });
 

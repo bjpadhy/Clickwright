@@ -15,7 +15,7 @@ import { command, insert, isTransientDbError, query, queryReadonly } from "../co
 import { withQueryContext } from "../core/query-context.js";
 import { step, scoreRun, recordQuery, emitRunEvent, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
-import { getContext, lookupContext, reconcileWithLive } from "./context.js";
+import { getContext, lookupContext } from "./context.js";
 import { precisionForRow, deriveConfidence, type Precision } from "../core/precision.js";
 import {
   digestFlags,
@@ -664,7 +664,7 @@ export interface AnalyticsInput {
   /** Force a fresh run, bypassing the answer cache. */
   noCache?: boolean;
   /** Recent conversation turns for follow-up questions (oldest first). */
-  history?: Array<{ role: "user" | "agent"; text: string; figures?: string }>;
+  history?: Array<{ role: "user" | "agent"; text: string; figures?: string; sqlContext?: string }>;
 }
 
 export interface RunAnalyticsOptions {
@@ -692,7 +692,7 @@ export async function runAnalytics(
       "context_load",
       {},
       async () => {
-        const [b, sqlRules, recon, schemas] = await Promise.all([
+        const [b, sqlRules, schemas] = await Promise.all([
           // metrics/conventions/known-issues in full (they define correctness);
           // table docs brief because `schemas` already gives exact columns.
           getContext({
@@ -703,7 +703,6 @@ export async function runAnalytics(
           // SQL generation needs the RULES only — not metrics, known issues or
           // spec summaries. Those belong to planning and narration.
           getContext({ core: ["convention"], require: ["convention:data_hygiene"] }),
-          reconcileWithLive(),
           tableSchemas(),
         ]);
         // A digest over every (entity, version) pair — the entity count and the
@@ -717,7 +716,6 @@ export async function runAnalytics(
         return {
           bundle: b,
           sqlRules,
-          liveTables: recon.liveTables,
           schemas,
           contextVersion: `${b.entries.length} entities · max v${maxV}`,
           contextKey: versionDigest,
@@ -740,7 +738,12 @@ export async function runAnalytics(
       input.history && input.history.length > 0
         ? input.history
             .slice(-6)
-            .map((h) => `${h.role}: ${h.text}${h.figures ? `\n    already reported: ${h.figures}` : ""}`)
+            .map((h) => {
+              let line = `${h.role}: ${h.text}`;
+              if (h.figures) line += `\n    already reported: ${h.figures}`;
+              if (h.sqlContext) line += `\n    prior approach: ${h.sqlContext}`;
+              return line;
+            })
             .join("\n")
         : "(none)";
 
@@ -893,46 +896,43 @@ export async function runAnalytics(
         ).catch(() => null)
       : Promise.resolve(null);
 
-    // ── knowledge lookup for the "why" ──
+    // ── knowledge lookup + precision — independent, run concurrently ──
+    // lookupContext uses an LLM call; precision is pure math. Neither depends
+    // on the other, and both feed into narration — so overlapping them shaves
+    // the lookup's wall clock off the critical path.
     const lookupDigest = kept
       .map((r) => `${r.title}: ${JSON.stringify(r.rows.slice(0, 3))}`)
       .join("\n")
       .slice(0, 1500);
-    const lookup = await lookupContext(span, `${input.question}\n${lookupDigest}`, opts.llm);
-
-    // ── computed precision, replacing the model's self-assessment ──
-    const { precision, headlinePrecision } = await step(span, "precision", {}, async () => {
-      // What the answer's main claims rest on: the listed rows and, when the result
-      // was profiled, the whole-population figure.
-      const headline: Precision[] = [];
-      // The extreme rows. Real, and worth reporting — but by construction they
-      // include the smallest segments in the result, so letting them decide overall
-      // confidence would mark every large answer "low" because some tail row has n=2.
-      const tails: Precision[] = [];
-      for (const r of kept) {
-        for (const row of r.rows.slice(0, NARRATION_ROWS)) {
-          headline.push(...precisionForRow(row as Record<string, unknown>, r.semanticSql));
+    const [lookup, { precision, headlinePrecision }] = await Promise.all([
+      lookupContext(span, `${input.question}\n${lookupDigest}`, opts.llm),
+      step(span, "precision", {}, async () => {
+        // What the answer's main claims rest on: the listed rows and, when the result
+        // was profiled, the whole-population figure.
+        const headline: Precision[] = [];
+        // The extreme rows. Real, and worth reporting — but by construction they
+        // include the smallest segments in the result, so letting them decide overall
+        // confidence would mark every large answer "low" because some tail row has n=2.
+        const tails: Precision[] = [];
+        for (const r of kept) {
+          for (const row of r.rows.slice(0, NARRATION_ROWS)) {
+            headline.push(...precisionForRow(row as Record<string, unknown>, r.semanticSql));
+          }
+          if (!r.digest) continue;
+          headline.push(...precisionForRow(populationRow(r.digest), r.digest.sql));
+          for (const row of [
+            ...(r.digest.extremes?.top ?? []),
+            ...(r.digest.extremes?.bottom ?? []),
+          ]) {
+            tails.push(...precisionForRow(row, r.semanticSql));
+          }
         }
-        if (!r.digest) continue;
-        // Only the population figures earn an interval: a min, a max or a median
-        // across result rows describes how segments spread, not the uncertainty of
-        // an estimate, and Wilson would put confident bounds on the wrong quantity.
-        headline.push(...precisionForRow(populationRow(r.digest), r.digest.sql));
-        // Extremes carry their own denominators, so the worst segment arrives with
-        // the honestly wide interval its sample size deserves — which is what lets
-        // the narration caveat it instead of quoting it as a finding.
-        for (const row of [
-          ...(r.digest.extremes?.top ?? []),
-          ...(r.digest.extremes?.bottom ?? []),
-        ]) {
-          tails.push(...precisionForRow(row, r.semanticSql));
-        }
-      }
-      return {
-        precision: widestPerColumn([...headline, ...tails]),
-        headlinePrecision: widestPerColumn(headline),
-      };
-    });
+        return {
+          precision: widestPerColumn([...headline, ...tails]),
+          headlinePrecision: widestPerColumn(headline),
+        };
+      }),
+    ]);
 
     const precisionText =
       precision.length === 0
@@ -1121,7 +1121,7 @@ export async function runAnalytics(
           precision: precisionText,
           lookup: lookup.markdown || "(nothing relevant retrieved)",
           context_version: contextVersion,
-          history: "",
+          history: input.history?.length ? `\n# Conversation so far\n${historyText}\n` : "",
           feedback: `\n# Quality reviewer's instruction — apply it\n${quality.revision_note}\n`,
         });
         const text = await llm(rSpan, "narrate", prompt);

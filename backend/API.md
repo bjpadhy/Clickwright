@@ -292,20 +292,38 @@ The conversation is auto-titled from its first question.
 
 ### SSE stream of `POST /api/conversations/:id/messages`
 
-Named events (use `addEventListener`, not `onmessage`). A question takes ~1-3 min:
+Named events (use `addEventListener`, not `onmessage`).
+
+**Timing:** a repeat question (same wording, unchanged context) returns from
+`insight_cache` in **milliseconds** with `insight.cached === true` and no step
+events at all. A fresh question takes ~1.5–2.5 min, so the progress events below
+are what keeps the UI honest during the wait.
 
 | event | data | meaning |
 |---|---|---|
 | `start` | `{ traceUrl, convId }` | trace link available immediately |
 | `step_start` / `step_end` / `step_error` | `{ name, payload }` | agent steps — same shapes as run events; drive the "how I got this" panel |
+| `log` | `{ call, elapsedMs?, promptChars?, outputChars? }` | **progress ticks** — `llm_start`, then `llm_progress` every 3s with `elapsedMs`, then `llm_done`. Render as "writing SQL… 14s" per in-flight call |
 | `insight` | `{ insight: Insight, traceUrl }` | the finished card |
 | `failed` | `{ error, traceUrl }` | answer could not be produced |
-| `done` | `{}` | stream closed |
+| `done` | `{}` | stream closed (always fires, success or failure) |
 
-Step names: `analytics` (wrapper) → `context_load`, `plan`, `task_<id>` →
-`sql_attempt_N` (per task, run CONCURRENTLY — events from different tasks
-interleave; group by the `task_<id>` parent), `sanity_gate`, `context_lookup`,
-`narrate_attempt_N`, `quality_gate`, optional `narrate_revision`.
+Step names, in order:
+
+```
+analytics                  (wrapper)
+  context_load             knowledge + schemas + contextVersion
+  cache_lookup             only when this is not a follow-up; a hit ends the run here
+  plan                     → ≤4 tasks
+  task_<id>                ONE PER TASK, RUN CONCURRENTLY — events interleave, so
+    sql_attempt_N          group children by their task_<id> parent
+  sanity_gate              what was dropped/flagged and why
+  context_lookup           known issues that might explain an anomaly
+  narrate_attempt_N        N>1 means the citation check rejected a number
+  quality_gate             SKIPPED entirely when the code checks already pass —
+                           its absence means the answer was clean, not that it failed
+  narrate_revision         only when the quality gate asked for one
+```
 
 ```ts
 export interface Insight {
@@ -317,6 +335,7 @@ export interface Insight {
   confidence: { value: "high" | "medium" | "low"; note: string };  // capped by code when gates flag
   contextVersion: string;                            // e.g. "44 entities · max v2" — the badge
   sql: Array<{ task: string; title: string; query: string; rowCount: number }>;
+  cached?: boolean;                                  // true ⇒ served from insight_cache, no LLM ran
 }
 export interface ChatMessage {
   role: "user" | "agent";
@@ -331,6 +350,17 @@ export interface ChatMessage {
 either appears in one of the attached `sql` results or is a code-verified
 difference/ratio of two such numbers. SQL runs read-only (`readonly=1`), so chat
 can never mutate data, and the agent cannot write context.
+
+**Known gap — value formatting.** `chart.series[].value` and `segmentTable.rows`
+currently carry whatever the SQL produced: a rate may arrive as `0.83` or as `83`
+depending on the query. Until an explicit `format` hint lands, infer from the
+column/label name (`*_rate` ⇒ fraction, `*_pp` ⇒ percentage points, `*_ms` ⇒
+duration) and render defensively. This is the next planned change to this contract.
+
+**Untested surface.** These endpoints typecheck and their shapes are frozen, but
+`POST /api/conversations/:id/messages` has not yet been exercised end-to-end, and
+`insight_cache` is created on server start (it does not exist until `npm run serve`
+has run once). Treat the SSE field names as reliable and the timing as indicative.
 
 ## [LIVE] Dashboards (Boards)
 

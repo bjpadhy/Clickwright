@@ -17,19 +17,35 @@ Instrumentation agent's reasoning (verbatim):
 # YOUR SCOPE FOR THIS RESPONSE
 {{scope}}
 
-# Task — propose entries
-1. One `table:<name>` entry per created table: purpose, key event-specific columns and their meanings, the join keys, and any gotchas (carry them over from the reasoning — e.g. id format deviations, empty-string quirks, currency traps). Match the style and depth of the existing table entries.
-2. One `spec:<spec_name>` entry: 5–8 lines distilling the feature — what it is, its event funnel in order, the PM's questions verbatim or tightly paraphrased, and anything analytics must know to answer them.
-3. If the feature introduces a new metric or funnel worth defining, add `metric:*` or `funnel:*` entries with exact computable definitions (which tables, which filters, which denominator).
-4. If what was built contradicts or extends an EXISTING entry (a convention, the envelope, a base-table doc), propose an updated version of that entry: the FULL replacement text (never drop still-true information), with a change_note saying exactly what changed and why.
-5. Do not rewrite entries nothing new was learned about. Fewer, better entries.
+# Task — propose the MINIMUM set of entries that makes the store current
 
-Every entry requires a change_note — for new entries, one line on why it exists.
+Write only what a future agent could not derive from the table schemas themselves.
+Precision beats volume: a reviewer approves this in under a minute.
 
-If anything the instrumentation learned CONTRADICTS the existing context (a documented
-column that doesn't exist, a convention the new tables violate, a definition proven wrong),
-also emit a one-line warning per contradiction in a top-level "warnings" array. Omit the
-array when there are none — never fabricate a contradiction.
+1. `table:<name>` — one per created table. AT MOST 6 lines: what the event means, its
+   event-specific columns and their meaning, the join key, and any gotcha carried over
+   from the instrumentation reasoning. Do NOT list envelope columns; do NOT restate types
+   (the schema has them).
+2. `spec:<spec_name>` — one entry, AT MOST 8 lines: what the feature is, its funnel in
+   order, and the PM's questions (tightly paraphrased, as a bullet list).
+3. `metric:` / `funnel:` — ONLY for metrics the PM's questions actually require, and only
+   when the definition is not already in the store. Each must be exactly computable:
+   name the tables, the numerator, the denominator, and the filters. Skip anything vague.
+4. Revise an EXISTING entry ONLY when this spec proves something about it that is not
+   already written there. Emit the FULL replacement text (never drop still-true content).
+   If an existing entry already covers the finding, do not re-emit it.
+5. Never invent an entity you were not given evidence for. Never emit an entry whose
+   content is "no change" or a restatement.
+
+Every entry needs a change_note: ONE clause (<= 140 chars) stating what is new and why.
+
+# warnings — real contradictions only, AT MOST 3
+Emit a warning ONLY when the measured reality contradicts a specific existing entry.
+Each warning must name that entity and the concrete conflict, in one sentence, e.g.
+"convention:sessionization claims every table carries app_session_id, but these 5 tables have none."
+Do NOT warn about things the store already documents as exceptions. Do NOT warn about
+absences that are merely expected (a feature not having a column it never emits).
+Omit the array entirely when there is nothing genuinely contradictory.
 
 # Output — STRICT JSON only, no prose outside it, no markdown fences
 {

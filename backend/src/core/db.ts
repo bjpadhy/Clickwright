@@ -33,29 +33,66 @@ export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: Record<string, unknown>,
 ): Promise<T[]> {
-  const result = await db().query({
-    query: sql,
-    format: "JSONEachRow",
-    clickhouse_settings: tagged(),
-    ...(params ? { query_params: params } : {}),
+  return withTransientRetry(async () => {
+    const result = await db().query({
+      query: sql,
+      format: "JSONEachRow",
+      // Re-evaluated per attempt so a retry is tagged with the context that is
+      // actually current, not the one captured when the first attempt started.
+      clickhouse_settings: tagged(),
+      ...(params ? { query_params: params } : {}),
+    });
+    return result.json<T>();
   });
-  return result.json<T>();
+}
+
+/** Transient infrastructure failures (socket drops, TLS resets, timeouts) are
+ * NOT the model's fault — retry the same statement instead of regenerating it. */
+export function isTransientDbError(error: unknown): boolean {
+  const m = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    m.includes("socket") ||
+    m.includes("tls") ||
+    m.includes("econnreset") ||
+    m.includes("etimedout") ||
+    m.includes("enotfound") ||
+    m.includes("eai_again") ||
+    m.includes("socket hang up") ||
+    m.includes("network")
+  );
+}
+
+async function withTransientRetry<T>(fn: () => Promise<T>, tries = 3): Promise<T> {
+  let lastError: unknown;
+  for (let i = 1; i <= tries; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientDbError(error) || i === tries) throw error;
+      await new Promise((r) => setTimeout(r, 400 * i * i));
+    }
+  }
+  throw lastError;
 }
 
 /** Read-only SELECT with a hard server-side guard: the analytics/chat path
- * physically cannot mutate anything, regardless of what SQL reaches it. */
+ * physically cannot mutate anything, regardless of what SQL reaches it.
+ * Transient network failures are retried transparently. */
 export async function queryReadonly<T = Record<string, unknown>>(
   sql: string,
 ): Promise<T[]> {
-  const result = await db().query({
-    query: sql,
-    format: "JSONEachRow",
-    // readonly=1 and log_comment coexist — verified against the live service.
-    // The analytics agent runs the most interesting queries in the system; if
-    // they were untagged they would show as unattributed on the Observe screen.
-    clickhouse_settings: tagged({ readonly: "1", max_execution_time: 30 }),
+  return withTransientRetry(async () => {
+    const result = await db().query({
+      query: sql,
+      format: "JSONEachRow",
+      // readonly=1 and log_comment coexist — verified against the live service.
+      // The analytics agent runs the most interesting queries in the system; if
+      // they were untagged they would show as unattributed on the Observe screen.
+      clickhouse_settings: tagged({ readonly: "1", max_execution_time: 30 }),
+    });
+    return result.json<T>();
   });
-  return result.json<T>();
 }
 
 /** Run a statement with no result set — DDL, INSERT ... SELECT, etc. */

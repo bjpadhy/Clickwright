@@ -10,7 +10,7 @@
  * SQL runs through queryReadonly (ClickHouse readonly=1) after code guards.
  */
 import { z } from "zod";
-import { query, queryReadonly } from "../core/db.js";
+import { isTransientDbError, query, queryReadonly } from "../core/db.js";
 import { withQueryContext } from "../core/query-context.js";
 import { step, scoreRun, recordQuery, type Ctx } from "../core/tracing.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
@@ -260,7 +260,13 @@ export async function runAnalytics(
       {},
       async () => {
         const [b, recon, schemas] = await Promise.all([
-          getContext({ include: ["*"] }),
+          // metrics/conventions/known-issues in full (they define correctness);
+          // table docs brief because `schemas` already gives exact columns.
+          getContext({
+            include: ["*"],
+            brief: ["table", "spec", "overview", "entity"],
+            require: ["convention:data_hygiene", "metric"],
+          }),
           reconcileWithLive(),
           tableSchemas(),
         ]);
@@ -339,6 +345,11 @@ export async function runAnalytics(
                 },
               );
             } catch (error) {
+              if (isTransientDbError(error)) {
+                // infrastructure, not the SQL — keep the statement, back off, retry
+                await new Promise((r) => setTimeout(r, 1000 * attempt));
+                continue;
+              }
               feedback = `Your SQL failed: ${error instanceof Error ? error.message : String(error)}`;
             }
           }

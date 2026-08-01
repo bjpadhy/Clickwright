@@ -28,21 +28,22 @@ Fields here that are NOT part of the standard platform envelope: {{new_fields}}
    - strings with measured distinct < 1000 → LowCardinality(String), EXCEPT identifiers (user_id, application_id, session/share ids, uuid-like) which stay String
    - fields with any null/empty rate → String DEFAULT '' (bucket empties at query time); Nullable only for numerics with no sensible default
 4. ORDER BY starts with the join key — `application_id` when this event's profile shows it always present, else `user_id` (or the event's own entity id when neither exists) — then `timestamp`. PARTITION BY toYYYYMM(timestamp).
-5. Every column gets a short COMMENT (meaning + gotchas: units, currency, hygiene, null semantics). End with a table-level COMMENT: what the event is, its role in the feature, which spec created it. Keep comments tight — one clause each, no prose.
+5. Every column gets a COMMENT of AT MOST 12 words — meaning plus the one gotcha that matters (units, currency, null semantics). No full sentences, no repetition of the column name. End with a table-level COMMENT of at most 20 words: the event, its funnel role, the spec that created it.
 6. Exactly ONE `CREATE TABLE` statement. No DROP/ALTER/anything else. Escape single quotes inside comments by doubling them ('').
 
-# Output — STRICT JSON only, no fences
+# Output — STRICT JSON only, no fences. Terse: the rationale fields have hard
+# character limits and are rejected if you write paragraphs.
 {
   "table": {
     "name": "{{event}}",
     "event": "{{event}}",
-    "purpose": "one line: what this table holds and its role in the feature funnel",
+    "purpose": "<= 90 chars: what this table holds and its funnel role",
     "ddl": "CREATE TABLE {{event}} (...) ENGINE = MergeTree PARTITION BY toYYYYMM(timestamp) ORDER BY (...) COMMENT '...'"
   },
   "rationale": {
-    "ordering_key": "why this ORDER BY, citing the measured presence/cardinality that drove it",
-    "partitioning": "why this partitioning",
-    "types_codecs": "the notable type decisions and the measured stats behind them",
-    "deviations": "anything contradicting documented conventions, or '' if none"
+    "ordering_key": "<= 120 chars. One statement, cite the stat. e.g. \"application_id 0% null (1650/1650) so it leads, then timestamp.\"",
+    "partitioning": "<= 100 chars. e.g. \"toYYYYMM(timestamp) — 6 months of data, merge-friendly parts.\"",
+    "types_codecs": "<= 160 chars. Only the non-obvious calls. e.g. \"device_type/currency LowCardinality (<15 distinct); amounts Float64 (money); otp_attempts UInt8 (max 3).\"",
+    "deviations": "<= 140 chars, or \"\" if none. e.g. \"id is 32-char hex, not UUID — stored String.\""
   }
 }

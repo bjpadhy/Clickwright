@@ -23,23 +23,6 @@ const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
 const MAX_DISTINCT_TRACK = 5000;
 const SAMPLE_SIZE = 5;
 
-function inferType(
-  values: unknown[]
-): FieldProfile["inferredType"] {
-  const nonNull = values.filter((v) => v !== null && v !== undefined && v !== "");
-  if (nonNull.length === 0) return "string";
-  if (nonNull.every((v) => typeof v === "boolean")) return "boolean";
-  if (nonNull.every((v) => typeof v === "number")) return "number";
-  if (
-    nonNull.every(
-      (v) => typeof v === "string" && TIMESTAMP_RE.test(v as string)
-    )
-  )
-    return "timestamp";
-  if (nonNull.every((v) => typeof v === "object" && v !== null)) return "json";
-  return "string";
-}
-
 /**
  * Per-field running state. Everything a FieldProfile reports is a count, an
  * extreme, or a capped set, so none of it needs the values kept around — which

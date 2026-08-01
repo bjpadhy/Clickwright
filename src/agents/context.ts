@@ -10,7 +10,8 @@
  * run: the latest-version snapshot is cached in-process; updateContext() must
  * call invalidateContextCache() after writing.
  */
-import { query } from "../core/db.js";
+import { z } from "zod";
+import { query, insert } from "../core/db.js";
 import { env } from "../core/env.js";
 import { complete, loadPrompt, stripFences } from "../core/llm.js";
 import type { Ctx } from "../core/tracing.js";
@@ -119,6 +120,178 @@ export async function getContext(
   }
 
   return { markdown: parts.join("\n\n"), entries };
+}
+
+// ── write side: updateContext (pipeline step ②) ──────────────────
+// ONLY callable from the instrumentation flow — enforced structurally: it
+// requires the instrumentation result as input, which only the pipeline has.
+// Analytics reads context (getContext/lookupContext); it never writes.
+// LLM proposes entry content; code enforces completeness, namespaces, and all
+// bookkeeping (versions, run_id, timestamps). Human approval gates the write.
+
+const UpdateProposalSchema = z.object({
+  entries: z
+    .array(
+      z.object({
+        entity: z
+          .string()
+          .regex(
+            /^(table|spec|metric|funnel|entity|convention|known_issue):[a-z0-9_]+$/i,
+          ),
+        definition_md: z.string().min(20),
+        change_note: z.string().min(5),
+      }),
+    )
+    .min(1),
+});
+export type ContextUpdateProposal = z.infer<typeof UpdateProposalSchema>;
+
+export interface ContextApproval {
+  approved: boolean;
+  feedback?: string;
+}
+export type ContextApprovalCallback = (
+  proposal: ContextUpdateProposal,
+  attempt: number,
+) => Promise<ContextApproval>;
+export const autoApproveContext: ContextApprovalCallback = async () => ({
+  approved: true,
+});
+
+export interface ContextUpdateInput {
+  specName: string; // e.g. "01_express_checkout"
+  specText: string;
+  runId: string;
+  instrumentation: {
+    reasoning: string;
+    newEnvelopeFields: string[];
+    tables: { name: string; event: string; purpose: string; rowsLoaded: number }[];
+  };
+}
+
+const MAX_UPDATE_ATTEMPTS = 5;
+
+export async function updateContext(
+  input: ContextUpdateInput,
+  trace: Ctx,
+  opts: {
+    approve?: ContextApprovalCallback;
+    llm?: (parent: Ctx, name: string, prompt: string) => Promise<string>;
+  } = {},
+): Promise<ContextEntry[]> {
+  const approve = opts.approve ?? autoApproveContext;
+  const llm =
+    opts.llm ??
+    ((p: Ctx, n: string, prompt: string) =>
+      complete(p, n, prompt, { maxTokens: 8000 }));
+
+  return step(trace, "context_update", { spec: input.specName }, async (span) => {
+    const current = await getContext({ include: ["*"] });
+    const existingEntities = new Set(current.entries.map((e) => e.entity));
+    const createdTables = new Set(input.instrumentation.tables.map((t) => t.name));
+
+    const tablesSummary = input.instrumentation.tables
+      .map((t) => `- ${t.name} (event: ${t.event}, ${t.rowsLoaded} rows loaded): ${t.purpose}`)
+      .join("\n");
+
+    let feedback = "";
+    for (let attempt = 1; attempt <= MAX_UPDATE_ATTEMPTS; attempt++) {
+      // 1. generate + validate
+      let proposal: ContextUpdateProposal;
+      try {
+        proposal = await step(
+          span,
+          `update_generation_attempt_${attempt}`,
+          { feedback },
+          async (genSpan) => {
+            const prompt = await loadPrompt("context_update", {
+              context: current.markdown,
+              spec: input.specText,
+              tables_summary: tablesSummary,
+              new_fields: input.instrumentation.newEnvelopeFields.join(", ") || "(none)",
+              reasoning: input.instrumentation.reasoning,
+              feedback: feedback
+                ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
+                : "",
+            });
+            const text = await llm(genSpan, "context_update", prompt);
+            const parsed = UpdateProposalSchema.parse(JSON.parse(stripFences(text)));
+
+            const covered = new Set(
+              parsed.entries
+                .filter((e) => e.entity.startsWith("table:"))
+                .map((e) => e.entity.slice("table:".length)),
+            );
+            const missing = [...createdTables].filter((t) => !covered.has(t));
+            if (missing.length)
+              throw new Error(`Missing table entries for created tables: ${missing.join(", ")}`);
+
+            const phantom = parsed.entries.filter(
+              (e) =>
+                e.entity.startsWith("table:") &&
+                !createdTables.has(e.entity.slice("table:".length)) &&
+                !existingEntities.has(e.entity),
+            );
+            if (phantom.length)
+              throw new Error(
+                `table: entries must reference created or already-documented tables; offending: ${phantom.map((e) => e.entity).join(", ")}`,
+              );
+            return parsed;
+          },
+        );
+      } catch (error) {
+        feedback = `Your output was rejected: ${error instanceof Error ? error.message : String(error)}`;
+        continue;
+      }
+
+      // 2. human approval gate — reject feedback goes back to the LLM, traced
+      const approval = await step(
+        span,
+        `update_approval_attempt_${attempt}`,
+        { entities: proposal.entries.map((e) => e.entity) },
+        () => approve(proposal, attempt),
+      );
+      if (!approval.approved) {
+        feedback = `A human reviewer rejected the proposal: ${approval.feedback ?? "no reason given"}`;
+        continue;
+      }
+
+      // 3. code owns the bookkeeping: versions, run_id, timestamps, insert
+      const versions = await query<{ entity: string; v: string }>(
+        `SELECT entity, max(version) AS v FROM context_store GROUP BY entity`,
+      );
+      const maxVersion = new Map(versions.map((r) => [r.entity, Number(r.v)]));
+      const now = new Date().toISOString().replace("T", " ").replace("Z", "");
+
+      const rows = proposal.entries.map((e) => {
+        const version = (maxVersion.get(e.entity) ?? 0) + 1;
+        return {
+          entry_id: `${e.entity}:v${version}`,
+          entity: e.entity,
+          definition_md: e.definition_md,
+          version,
+          updated_at: now,
+          source_spec: input.specName,
+          change_note: e.change_note,
+          run_id: input.runId,
+        };
+      });
+      await insert("context_store", rows);
+      invalidateContextCache();
+
+      return rows.map((r) => ({
+        entity: r.entity,
+        definition_md: r.definition_md,
+        version: r.version,
+        source_spec: r.source_spec,
+        change_note: r.change_note,
+      }));
+    }
+
+    throw new Error(
+      `updateContext gave up after ${MAX_UPDATE_ATTEMPTS} attempts. Last feedback: ${feedback}`,
+    );
+  });
 }
 
 // ── smart lookup (LLM-as-retriever) ──────────────────────────────

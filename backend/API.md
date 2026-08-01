@@ -329,9 +329,15 @@ analytics                  (wrapper)
 export interface Insight {
   headline: string;                                  // one-sentence answer with the key number
   findings: Array<{ tag: "driver" | "segment" | "caveat" | "known_issue"; text: string }>;
-  chart: null | { title: string; kind: "bar" | "line";
-                  series: Array<{ label: string; value: number }>; sourceTask: string };
-  segmentTable: null | { columns: string[]; rows: Array<Array<string | number>>; sourceTask: string };
+  chart: null | {
+    title: string; kind: "bar" | "line";
+    series: Array<{ label: string; value: number }>; sourceTask: string;
+    valueFormat?: ValueFormat;        // how to render `value` — see below
+  };
+  segmentTable: null | {
+    columns: string[]; rows: Array<Array<string | number>>; sourceTask: string;
+    columnFormats?: Array<ValueFormat | "text">;   // parallel to `columns`
+  };
   confidence: { value: "high" | "medium" | "low"; note: string };  // capped by code when gates flag
   contextVersion: string;                            // e.g. "44 entities · max v2" — the badge
   sql: Array<{ task: string; title: string; query: string; rowCount: number }>;
@@ -351,16 +357,26 @@ either appears in one of the attached `sql` results or is a code-verified
 difference/ratio of two such numbers. SQL runs read-only (`readonly=1`), so chat
 can never mutate data, and the agent cannot write context.
 
-**Known gap — value formatting.** `chart.series[].value` and `segmentTable.rows`
-currently carry whatever the SQL produced: a rate may arrive as `0.83` or as `83`
-depending on the query. Until an explicit `format` hint lands, infer from the
-column/label name (`*_rate` ⇒ fraction, `*_pp` ⇒ percentage points, `*_ms` ⇒
-duration) and render defensively. This is the next planned change to this contract.
+**Value formatting.** Values stay exactly as the SQL produced them (so every number
+remains traceable), and a **code-derived** hint says how to render each one:
 
-**Untested surface.** These endpoints typecheck and their shapes are frozen, but
-`POST /api/conversations/:id/messages` has not yet been exercised end-to-end, and
-`insight_cache` is created on server start (it does not exist until `npm run serve`
-has run once). Treat the SSE field names as reliable and the timing as indicative.
+```ts
+type ValueFormat =
+  | "fraction"          // 0..1 rate — display as value × 100 with %
+  | "percent"           // already 0..100, means %
+  | "percentage_points" // a gap/lift in pp
+  | "count" | "ms" | "seconds" | "currency" | "number";
+```
+
+`chart.valueFormat` applies to every point in that chart; `segmentTable.columnFormats`
+is parallel to `columns` and uses `"text"` for non-numeric columns. These are inferred
+from the source query's column names and value ranges, never asked of the model, so
+they are consistent across answers.
+
+**Verified end-to-end.** Instrumentation (both gates), a fresh question, a cached
+question, a follow-up, conversation persistence and reload, suggestion chips, and
+dashboard save + re-run have all been exercised over HTTP. Measured: a fresh answer
+40–67s, a cached answer **~0.6s**, instrumentation with both gates ~57s.
 
 ## [LIVE] Dashboards (Boards)
 

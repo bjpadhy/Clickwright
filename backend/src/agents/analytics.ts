@@ -65,11 +65,15 @@ export interface Insight {
     kind: "bar" | "line";
     series: Array<{ label: string; value: number }>;
     sourceTask: string;
+    /** How to render `value` — derived in code, never asked of the model. */
+    valueFormat?: string | undefined;
   };
   segmentTable: null | {
     columns: string[];
     rows: Array<Array<string | number>>;
     sourceTask: string;
+    /** Per-column render hint, parallel to `columns`. */
+    columnFormats?: string[] | undefined;
   };
   confidence: { value: "high" | "medium" | "low"; note: string };
   contextVersion: string;
@@ -111,6 +115,7 @@ const NarrationSchema = z.object({
       kind: z.enum(["bar", "line"]),
       series: z.array(z.object({ label: z.string(), value: z.number() })).min(1).max(12),
       sourceTask: z.string(),
+      valueFormat: z.string().optional(),
     })
     .nullish()
     .transform((v) => v ?? null),
@@ -119,6 +124,7 @@ const NarrationSchema = z.object({
       columns: z.array(z.string()).min(2),
       rows: z.array(z.array(z.union([z.string(), z.number()]))).min(1).max(8),
       sourceTask: z.string(),
+      columnFormats: z.array(z.string()).optional(),
     })
     .nullish()
     .transform((v) => v ?? null),
@@ -248,6 +254,63 @@ export function findUncitedNumbers(texts: string[], pool: number[]): string[] {
     }
   }
   return [...new Set(uncited)];
+}
+
+// ── value formatting (pure code) ─────────────────────────────────
+// The same rate arrives as 0.83 from one query and 83 from another. Rather than
+// mutating values (which would break the "every number is in the SQL result"
+// chain), classify them so the UI can render correctly.
+
+export type ValueFormat =
+  | "fraction"   // 0..1 rate — display as value*100 with a % sign
+  | "percent"    // already 0..100 with a % meaning
+  | "percentage_points"
+  | "count"
+  | "ms"
+  | "seconds"
+  | "currency"
+  | "number";
+
+export function inferFormat(name: string, values: number[]): ValueFormat {
+  const n = name.toLowerCase();
+  const max = values.length ? Math.max(...values.map(Math.abs)) : 0;
+  if (/_pp$|percentage_point|_delta_pct/.test(n)) return "percentage_points";
+  if (/_ms$|latency|duration_ms/.test(n)) return "ms";
+  if (/_s$|_sec|seconds|elapsed/.test(n)) return "seconds";
+  if (/amount|revenue|value|price|discount|fee/.test(n)) return "currency";
+  if (/rate|ratio|share|pct|percent|conversion|success/.test(n)) {
+    return max <= 1.05 ? "fraction" : "percent";
+  }
+  if (/^(n|count|users|sessions|rows|payers|uploads|events)/.test(n) || Number.isInteger(max))
+    return "count";
+  return "number";
+}
+
+/** Attach format hints to the chart and to every table column. */
+function annotateFormats(insight: Narration, results: TaskResult[]): void {
+  const columnsOf = (taskId: string) => {
+    const r = results.find((x) => x.id === taskId);
+    return r?.rows[0] ? Object.keys(r.rows[0]) : [];
+  };
+  if (insight.chart) {
+    const cols = columnsOf(insight.chart.sourceTask);
+    const valueCol =
+      cols.find((c) => /rate|pct|percent|amount|latency|_ms|_pp/i.test(c)) ??
+      cols.find((c) => !/^(os|device|platform|segment|label|country|city|month)/i.test(c)) ??
+      insight.chart.title;
+    insight.chart.valueFormat = inferFormat(
+      valueCol,
+      insight.chart.series.map((s) => s.value),
+    );
+  }
+  if (insight.segmentTable) {
+    insight.segmentTable.columnFormats = insight.segmentTable.columns.map((col, i) => {
+      const vals = insight.segmentTable!.rows
+        .map((r) => Number(r[i]))
+        .filter((v) => Number.isFinite(v));
+      return vals.length === 0 ? "text" : inferFormat(col, vals);
+    });
+  }
 }
 
 // ── sanity gate (pure code) ──────────────────────────────────────
@@ -602,6 +665,8 @@ export async function runAnalytics(
         return parsed;
       });
     }
+
+    annotateFormats(narration, kept);
 
     const insight: Insight = {
       ...narration,

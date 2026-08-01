@@ -7,6 +7,9 @@
  * guarded read-only SQL.
  */
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Response } from "express";
 import { command, insert, query } from "../core/db.js";
 import {
@@ -66,13 +69,24 @@ export async function createConversation(title?: string): Promise<string> {
 }
 
 export async function listConversations(): Promise<unknown[]> {
+  // Correlated subqueries are rejected by ClickHouse ("Cannot check Sorting plan
+  // step for correlated expressions") — aggregate once and join. FINAL collapses
+  // the ReplacingMergeTree versions from title/star updates.
   return query(`
-    SELECT c.conv_id AS id, c.title, c.starred, toString(c.updated_at) AS updatedAt,
-           (SELECT question FROM messages WHERE conv_id = c.conv_id AND role = 'user'
-            ORDER BY seq DESC LIMIT 1) AS preview,
-           (SELECT count() FROM messages WHERE conv_id = c.conv_id) AS messages
-    FROM conversations c
-    ORDER BY c.updated_at DESC LIMIT 100
+    WITH stats AS (
+      SELECT conv_id,
+             toUInt32(count()) AS messages,
+             argMaxIf(question, seq, role = 'user') AS preview
+      FROM messages GROUP BY conv_id
+    )
+    SELECT c.conv_id AS id, c.title, toUInt8(c.starred) AS starred,
+           toString(c.updated_at) AS updatedAt,
+           coalesce(s.preview, '') AS preview,
+           coalesce(s.messages, toUInt32(0)) AS messages
+    FROM conversations AS c FINAL
+    LEFT JOIN stats AS s ON s.conv_id = c.conv_id
+    ORDER BY c.updated_at DESC
+    LIMIT 100
   `);
 }
 
@@ -115,18 +129,55 @@ export async function setStarred(convId: string, starred: boolean): Promise<void
   ]);
 }
 
-/** Suggested-question chips: the PM questions instrumentation already stored. */
+/**
+ * Suggested-question chips. Read from the spec files on disk for any spec that has
+ * been instrumented — they carry the PM's questions as clean bullets, whereas the
+ * stored summary paraphrases them inline. Falls back to the stored entry.
+ */
 export async function suggestions(): Promise<Array<{ spec: string; question: string }>> {
-  const rows = await query<{ entity: string; definition_md: string }>(`
-    SELECT entity, definition_md FROM context_store
-    WHERE entity LIKE 'spec:%' ORDER BY entity ASC, version DESC LIMIT 1 BY entity
-  `);
   const out: Array<{ spec: string; question: string }> = [];
-  for (const r of rows) {
-    const spec = r.entity.slice("spec:".length);
-    for (const line of r.definition_md.split("\n")) {
-      const m = /^\s*[-*]\s+(.{15,180}\?)\s*$/.exec(line);
-      if (m?.[1]) out.push({ spec, question: m[1].replace(/\*\*/g, "").trim() });
+  const seen = new Set<string>();
+  const add = (spec: string, q: string) => {
+    const clean = q.replace(/`/g, "").replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+    if (clean.length < 15 || clean.length > 200) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ spec, question: clean });
+  };
+
+  // which specs are live (source_spec is the spec directory name)
+  const rows = await query<{ spec: string }>(`
+    SELECT DISTINCT source_spec AS spec FROM context_store
+    WHERE source_spec NOT IN ('base_context.md') AND source_spec NOT LIKE 'data_audit%'
+  `);
+  const specsRoot = fileURLToPath(new URL("../../../specs", import.meta.url));
+
+  for (const { spec } of rows) {
+    try {
+      const md = await readFile(path.join(specsRoot, spec, "spec.md"), "utf-8");
+      // the questions section, as authored
+      const section = /##\s*Questions[^\n]*\n([\s\S]*?)(\n##|$)/i.exec(md)?.[1] ?? md;
+      for (const line of section.split("\n")) {
+        const m = /^\s*[-*]\s+(.+)$/.exec(line);
+        if (m?.[1]) add(spec, m[1]);
+      }
+    } catch {
+      /* spec not on disk (uploaded run) — fall through to the stored summary */
+    }
+  }
+
+  if (out.length === 0) {
+    // fallback: pull ?-terminated sentences out of the stored spec summaries
+    const entries = await query<{ entity: string; definition_md: string }>(`
+      SELECT entity, definition_md FROM context_store
+      WHERE entity LIKE 'spec:%' ORDER BY entity ASC, version DESC LIMIT 1 BY entity
+    `);
+    for (const e of entries) {
+      const spec = e.entity.slice("spec:".length);
+      for (const m of e.definition_md.matchAll(/(?:^|\(\d\)\s*|\.\s+)([^.?]{15,180}\?)/g)) {
+        if (m[1]) add(spec, m[1]);
+      }
     }
   }
   return out.slice(0, 12);
@@ -162,11 +213,13 @@ export async function streamAnswer(
     }
   }, 15000);
 
+  // count(), not max(seq): ClickHouse returns 0 for max() over an empty set, which
+  // made nextSeq 1 for a brand-new conversation and stopped it ever being titled.
   const priorRows = await query<{ n: string }>(
-    `SELECT toString(max(seq)) AS n FROM messages WHERE conv_id = {conv:String}`,
+    `SELECT toString(count()) AS n FROM messages WHERE conv_id = {conv:String}`,
     { conv: convId },
   );
-  const nextSeq = Number(priorRows[0]?.n ?? -1) + 1;
+  const nextSeq = Number(priorRows[0]?.n ?? 0);
 
   const history = (
     await query<{ role: string; question: string; insight_json: string }>(

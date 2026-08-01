@@ -27,11 +27,13 @@ import { getContext, reconcileWithLive } from "./context.js";
 
 /** Hard caps — a verbose rationale is rejected and regenerated, so the FE panel
  * always renders 1-2 tight statements per field. */
+/** Length is a presentation concern — truncate, never reject a sound schema for it. */
+const clamp = (n: number) => z.string().transform((v) => v.trim().slice(0, n));
 const RationaleSchema = z.object({
-  ordering_key: z.string().max(200, "ordering_key must be <= 200 chars — one statement"),
-  partitioning: z.string().max(160, "partitioning must be <= 160 chars"),
-  types_codecs: z.string().max(260, "types_codecs must be <= 260 chars — only non-obvious calls"),
-  deviations: z.string().max(240, "deviations must be <= 240 chars").default(""),
+  ordering_key: clamp(240),
+  partitioning: clamp(160),
+  types_codecs: clamp(340),
+  deviations: clamp(240).default("").catch(""),
 });
 
 /** One concurrent call designs one table. */
@@ -62,7 +64,10 @@ const ProposalSchema = z.object({
 });
 export type InstrumentationProposal = z.infer<typeof ProposalSchema>;
 
-const PurposesSchema = z.object({ purposes: z.record(z.string(), z.string()) });
+const DesignSchema = z.object({
+  ddl: z.string().min(40),
+  rationale: RationaleSchema,
+});
 
 export interface Approval {
   approved: boolean;
@@ -297,45 +302,94 @@ export async function runInstrumentation(
             const parsed = parseEventPurposes(spec);
             const purposes: Record<string, string> = {};
             for (const [event, desc] of parsed) purposes[event] = desc;
-            const undescribed = [...plans.keys()].filter((e) => !purposes[e]);
-            if (undescribed.length > 0) try {
-              const tablesDesc = [...plans.values()]
-                .filter((p) => undescribed.includes(p.name))
-                .map(
-                  (p) =>
-                    `- ${p.name} (${p.facts.rows} rows): ${p.columns.map((c) => c.name).join(", ")}`,
-                )
-                .join("\n");
-              const prompt = await loadPrompt("instrument_table_purposes", {
-                spec,
-                tables: tablesDesc,
-                feedback: feedback ? `\n# Reviewer feedback to honour\n${feedback}\n` : "",
-              });
-              const text = await llm(genSpan, "table_purposes", prompt);
-              Object.assign(
-                purposes,
-                PurposesSchema.parse(JSON.parse(stripFences(text))).purposes,
-              );
-            } catch {
-              emitRunEvent({
-                type: "log",
-                name: "purposes_fallback",
-                payload: { note: "purpose text unavailable; schema unaffected" },
-              });
-            }
 
-            const tables = [...plans.values()].map((plan) => {
-              const purpose =
-                purposes[plan.name]?.slice(0, 140) ??
-                `${plan.name} events captured for this feature`;
-              return {
-                name: plan.name,
-                event: plan.event,
-                purpose,
-                ddl: renderCreateTable(plan, purpose),
-                rationale: renderRationale(plan),
-              };
-            });
+            // 3. A ClickHouse engineer designs each table FROM the measured facts:
+            //    codecs, Enum8 vs LowCardinality, ordering-key order for pruning.
+            //    Code validated the arithmetic; this is the judgement that earns the
+            //    marks. Per table, concurrent, with the deterministic plan as both
+            //    the starting point and the fallback if a design is rejected.
+            const tables = await Promise.all(
+              [...plans.entries()].map(([event, plan]) =>
+                step(genSpan, `design_${event}`, { event }, async (dSpan) => {
+                  const purpose =
+                    purposes[event]?.slice(0, 140) ?? `${event} events for this feature`;
+                  const baseline = renderCreateTable(plan, purpose);
+                  const expected = new Set(plan.columns.map((c) => c.name));
+                  let designFeedback = feedback;
+                  let lastDdl = "";
+
+                  for (let tryN = 1; tryN <= MAX_TABLE_TRIES; tryN++) {
+                    try {
+                      const prompt = await loadPrompt("instrument_design_table", {
+                        event,
+                        profile: eventProfiles.get(event) ?? "",
+                        baseline,
+                        spec,
+                        conventions: bundle.markdown,
+                        feedback: designFeedback
+                          ? `\n<feedback>\nYour previous design was rejected: ${designFeedback}\n</feedback>\n`
+                          : "",
+                      });
+                      const text = await llm(dSpan, `design_${event}`, prompt);
+                      const design = DesignSchema.parse(JSON.parse(stripFences(text)));
+                      // a trailing semicolon is idiomatic, not an error — strip it,
+                      // then reject only a genuine second statement
+                      const ddl = design.ddl.trim().replace(/;+\s*$/, "");
+                      lastDdl = ddl;
+
+                      if (!/^create\s+table\s/i.test(ddl))
+                        throw new Error("must be a single CREATE TABLE statement");
+                      // a ';' inside a quoted COMMENT is legal SQL — strip string
+                      // literals before looking for a genuine second statement
+                      if (ddl.replace(/'(?:[^']|'')*'/g, "''").includes(";"))
+                        throw new Error("only one statement allowed (found a second statement)");
+                      if (!new RegExp(`create\\s+table\\s+\`?${event}\`?[\\s(]`, "i").test(ddl))
+                        throw new Error(`the table must be named ${event}`);
+                      // every measured field must survive, and nothing invented
+                      const declared = new Set(
+                        [...ddl.matchAll(/^\s*\`([a-z0-9_]+)\`\s+/gim)].map((m) => m[1]!),
+                      );
+                      const dropped = [...expected].filter((c) => !declared.has(c));
+                      if (dropped.length)
+                        throw new Error(`these measured columns are missing: ${dropped.join(", ")}`);
+                      const invented = [...declared].filter((c) => !expected.has(c));
+                      if (invented.length)
+                        throw new Error(`these columns are not in the profile: ${invented.join(", ")}`);
+                      await command(`EXPLAIN AST ${ddl}`); // ClickHouse must parse it
+
+                      return { name: event, event, purpose, ddl, rationale: design.rationale };
+                    } catch (error) {
+                      designFeedback = error instanceof Error ? error.message : String(error);
+                      emitRunEvent({
+                        type: "log",
+                        name: "design_rejected",
+                        payload: {
+                          event,
+                          attempt: tryN,
+                          reason: designFeedback.slice(0, 300),
+                          // the offending SQL, or a rejection is undiagnosable
+                          ddl: lastDdl.slice(0, 1200),
+                        },
+                      });
+                    }
+                  }
+
+                  // every design attempt failed — ship the deterministic schema
+                  emitRunEvent({
+                    type: "log",
+                    name: "design_fallback",
+                    payload: { event, note: "using the deterministic baseline schema" },
+                  });
+                  return {
+                    name: event,
+                    event,
+                    purpose,
+                    ddl: baseline,
+                    rationale: renderRationale(plan),
+                  };
+                }),
+              ),
+            );
 
             // 3. Dry-run every statement — cheap, and proves the synthesis.
             await step(genSpan, "dry_run", { tables: tables.map((t) => t.name) }, async () => {

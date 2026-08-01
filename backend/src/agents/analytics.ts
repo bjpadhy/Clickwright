@@ -271,14 +271,19 @@ export type ValueFormat =
   | "currency"
   | "number";
 
-export function inferFormat(name: string, values: number[]): ValueFormat {
+export function inferFormat(name: string, values: number[], sql = ""): ValueFormat {
   const n = name.toLowerCase();
   const max = values.length ? Math.max(...values.map(Math.abs)) : 0;
+  // A query that multiplies by 100 emits percentages; 0.383 then means 0.383%,
+  // not 38.3%. Values alone cannot distinguish this below 1%.
+  const scaledToPercent = /\*\s*100(\.0)?\b/.test(sql);
   if (/_pp$|percentage_point|_delta_pct/.test(n)) return "percentage_points";
   if (/_ms$|latency|duration_ms/.test(n)) return "ms";
   if (/_s$|_sec|seconds|elapsed/.test(n)) return "seconds";
   if (/amount|revenue|value|price|discount|fee/.test(n)) return "currency";
-  if (/rate|ratio|share|pct|percent|conversion|success/.test(n)) {
+  // suffix match — "share_clicked_applications" is a count, not a share
+  if (/(^|_)(rate|ratio|pct|percent)$/.test(n) || /_rate_|success_rate/.test(n)) {
+    if (scaledToPercent) return "percent";
     return max <= 1.05 ? "fraction" : "percent";
   }
   if (/^(n|count|users|sessions|rows|payers|uploads|events)/.test(n) || Number.isInteger(max))
@@ -292,6 +297,7 @@ function annotateFormats(insight: Narration, results: TaskResult[]): void {
     const r = results.find((x) => x.id === taskId);
     return r?.rows[0] ? Object.keys(r.rows[0]) : [];
   };
+  const sqlOf = (taskId: string) => results.find((x) => x.id === taskId)?.sql ?? "";
   if (insight.chart) {
     const cols = columnsOf(insight.chart.sourceTask);
     const valueCol =
@@ -301,6 +307,7 @@ function annotateFormats(insight: Narration, results: TaskResult[]): void {
     insight.chart.valueFormat = inferFormat(
       valueCol,
       insight.chart.series.map((s) => s.value),
+      sqlOf(insight.chart.sourceTask),
     );
   }
   if (insight.segmentTable) {
@@ -308,7 +315,9 @@ function annotateFormats(insight: Narration, results: TaskResult[]): void {
       const vals = insight.segmentTable!.rows
         .map((r) => Number(r[i]))
         .filter((v) => Number.isFinite(v));
-      return vals.length === 0 ? "text" : inferFormat(col, vals);
+      return vals.length === 0
+        ? "text"
+        : inferFormat(col, vals, sqlOf(insight.segmentTable!.sourceTask));
     });
   }
 }
@@ -328,7 +337,9 @@ function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[
       for (const [col, v] of Object.entries(row)) {
         const n = Number(v);
         if (!Number.isFinite(n)) continue;
-        if (/rate|ratio|pct|share|conversion/i.test(col) && n > 1.05) {
+        // suffix match, not substring: "share_clicked_applications" is a count,
+        // and matching "share" inside it flagged 1,601 as a rate above 100%
+        if (/(^|_)(rate|ratio|pct|percent)$/i.test(col) && n > 1.05) {
           r.flags.push(`${col}=${n} looks like a rate above 100%`);
         }
       }

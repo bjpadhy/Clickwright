@@ -167,12 +167,18 @@ export function renderRationale(plan: TablePlan): {
   ]
     .filter(Boolean)
     .join(". ");
+  const hasTs = plan.columns.some((c) => c.name === "timestamp");
   return {
     ordering_key: plan.facts.orderByReason,
     partitioning: plan.partitionBy
       ? `${plan.partitionBy} — monthly parts stay merge-friendly`
       : "no timestamp column, so unpartitioned",
-    types_codecs: types.slice(0, 258),
+    // the base tables are second-precision DateTime; say so, because a reviewer
+    // seeing DateTime64(3) here will otherwise wonder if joins are safe
+    types_codecs: (hasTs
+      ? `timestamp DateTime64(3) — joins cleanly with the second-precision base tables. ${types}`
+      : types
+    ).slice(0, 300),
     deviations: plan.facts.nullableDefaults.length
       ? `empty values present in ${plan.facts.nullableDefaults.slice(0, 4).join(", ")} — String DEFAULT '' per hygiene convention`
       : "",

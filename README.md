@@ -71,10 +71,15 @@ Flow A — instrument a spec (human-gated, queued one at a time)
   spec.md + events.ndjson
     → profile (code)          measured stats per field per event type
     → context load            conventions + existing table names
-    → DDL synthesis (CODE)    types/LowCardinality/ORDER BY are arithmetic on the
-                              profile — no LLM, no retries, instant
-    → purposes (CODE)         parsed from the spec's own event descriptions;
-                              an LLM fills only events the spec left undescribed
+    → baseline plan (CODE)    a safe schema from measured stats — correct but
+                              unoptimized; also the fallback if design fails
+    → schema design (LLM)     one call per table, concurrent: codecs, Enum8 vs
+                              LowCardinality, and an ordering key shaped by the
+                              PM's questions (low cardinality first for pruning)
+    → validation (CODE)       every profiled column present, none invented, one
+                              statement, ClickHouse EXPLAIN-parses it — else retry,
+                              and after 3 tries ship the deterministic baseline
+    → purposes (CODE)         parsed from the spec's own event descriptions
     → dry-run                 ClickHouse EXPLAIN-parses every statement
     → ⛔ HUMAN GATE            approve, or reject with feedback → regenerate
     → execute + load + verify row counts match the file

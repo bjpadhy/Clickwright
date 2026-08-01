@@ -9,17 +9,21 @@ export function CodeSurface({ className, ...props }: React.ComponentProps<"div">
 
 /**
  * DDL rendered line by line so trailing `--` comments can be dimmed without a
- * syntax-highlighting dependency — exactly how the prototype does it.
+ * syntax-highlighting dependency.
+ *
+ * `pre-wrap`, not `pre`: the agent's own formatting is preserved, but a table
+ * that comes back as one long `CREATE TABLE …` line wraps instead of running
+ * off into a horizontal scrollbar the reviewer has to drag through.
  */
 export function DdlBlock({ ddl, className }: { ddl: string; className?: string }) {
   const lines = React.useMemo(() => splitDdl(ddl), [ddl])
 
   return (
-    <CodeSurface className={cn("rounded-[10px]", className)}>
+    <CodeSurface className={cn("overflow-x-hidden rounded-[10px]", className)}>
       {lines.map((line, index) => (
         <div
           key={index}
-          className="font-mono text-[11.5px] leading-[1.68] whitespace-pre"
+          className="font-mono text-[11.5px] leading-[1.68] break-words whitespace-pre-wrap"
         >
           <span className="text-zinc-200">{line.code}</span>
           <span className="text-gray-500">{line.comment}</span>

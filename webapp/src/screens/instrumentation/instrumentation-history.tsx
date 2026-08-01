@@ -9,9 +9,7 @@ import * as React from "react"
 import { backend, type RunEvent } from "@/api/instrumentation"
 import { Button } from "@/components/ui/button"
 import { MonoChip, StatusPill } from "@/components/ui-kit/chips"
-import { DdlBlock } from "@/components/ui-kit/code"
 import { Icon, Spinner } from "@/components/ui-kit/icon"
-import { Markdown } from "@/components/ui-kit/markdown"
 import { Panel, PanelBody, PanelHeader, Screen, ScreenHeader } from "@/components/ui-kit/panel"
 import { cn } from "@/lib/utils"
 import { useInstrumentation } from "@/state/instrumentation"
@@ -21,6 +19,7 @@ import {
   ContextProposalBody,
   ContradictionCallout,
   LoadedTablesTable,
+  ProposedTables,
   StepTimeline,
   TraceLink,
 } from "./parts"
@@ -248,30 +247,8 @@ export function InstrumentationHistory() {
                         </StatusPill>
                       ) : null}
                     </PanelHeader>
-                    <PanelBody className="flex flex-col gap-3 px-4 py-3.5">
-                      {model.ddlProposal.tables.map((table) => (
-                        <div key={table.name}>
-                          <div className="flex flex-wrap items-center gap-2 pb-1.5">
-                            <MonoChip icon="ti-table" className="border-transparent bg-zinc-100">
-                              {table.name}
-                            </MonoChip>
-                            <span className="truncate text-[11.5px] text-zinc-500">
-                              {table.event} · {table.purpose}
-                            </span>
-                          </div>
-                          <DdlBlock ddl={table.ddl} className="max-h-[400px]" />
-                        </div>
-                      ))}
-                    </PanelBody>
-                  </Panel>
-
-                  <Panel>
-                    <PanelHeader>
-                      <Icon name="ti-bulb" size={15} className="text-zinc-600" />
-                      <span className="text-[13px] font-semibold">Design rationale</span>
-                    </PanelHeader>
                     <PanelBody className="px-4 py-3.5">
-                      <Markdown text={model.ddlProposal.reasoning} />
+                      <ProposedTables proposal={model.ddlProposal} />
                     </PanelBody>
                   </Panel>
                 </>

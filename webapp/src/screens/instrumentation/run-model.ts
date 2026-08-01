@@ -63,6 +63,15 @@ const STEP_LABEL: Record<string, string> = {
 /** Wrappers spanning a whole phase — their children carry the detail. */
 const WRAPPERS = new Set(["instrumentation", "context_update"])
 
+/**
+ * `ddl_table_<event>` steps are the per-event generations that fan out inside
+ * one `ddl_generation` attempt — one LLM call per table, all in flight at once.
+ * They nest under their parent instead of sitting beside it, or a five-event
+ * spec renders six identical spinners stacked in the timeline.
+ */
+const FANOUT_PREFIX = "ddl_table_"
+const FANOUT_PARENT = "ddl_generation"
+
 const GATE_PHASE: Record<Gate, PhaseId> = { ddl: "approval", context: "context" }
 
 export interface Attempt {
@@ -85,6 +94,8 @@ export interface StepGroup {
   phase: PhaseId
   attempts: Attempt[]
   status: "running" | "done" | "error"
+  /** parallel sub-steps (the per-event DDL generations) */
+  children: StepGroup[]
 }
 
 export interface ExecLine {
@@ -142,6 +153,7 @@ function splitStep(name: string): { key: string; attempt: number | null } {
 }
 
 export function stepLabel(key: string): string {
+  if (key.startsWith(FANOUT_PREFIX)) return key.slice(FANOUT_PREFIX.length)
   return STEP_LABEL[key] ?? key.replace(/_/g, " ")
 }
 
@@ -158,6 +170,11 @@ function count(value: unknown): number | null {
 /** A short, honest one-liner per step — never invents numbers it can't read. */
 function summarize(key: string, output: unknown): string | null {
   const out = record(output)
+
+  if (key.startsWith(FANOUT_PREFIX)) {
+    const name = out?.["name"]
+    return typeof name === "string" ? `→ ${name}` : null
+  }
 
   switch (key) {
     case "profile": {
@@ -238,9 +255,12 @@ export function buildRunModel(events: RunEvent[]): RunModel {
         const group = groups.get(key) ?? {
           key,
           label: stepLabel(key),
-          phase: STEP_PHASE[key] ?? "parse",
+          phase: key.startsWith(FANOUT_PREFIX)
+            ? ("design" as PhaseId)
+            : (STEP_PHASE[key] ?? "parse"),
           attempts: [],
           status: "running" as const,
+          children: [],
         }
         group.attempts.push({
           attempt,
@@ -337,7 +357,14 @@ export function buildRunModel(events: RunEvent[]): RunModel {
     }
   }
 
-  const steps = [...groups.values()]
+  // Fan-out generations belong inside the attempt that spawned them.
+  const all = [...groups.values()]
+  const steps = all.filter((step) => !step.key.startsWith(FANOUT_PREFIX))
+  const fanout = all.filter((step) => step.key.startsWith(FANOUT_PREFIX))
+  const parent = steps.find((step) => step.key === FANOUT_PARENT)
+  if (parent) parent.children = fanout
+  else steps.push(...fanout) // parent missing (partial replay) — don't hide them
+
   return {
     status,
     traceUrl,

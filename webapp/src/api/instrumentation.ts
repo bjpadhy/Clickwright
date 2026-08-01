@@ -69,16 +69,28 @@ export interface RunEvent {
 
 /* ── gate proposals (payload.proposal of an approval_request) ───────────── */
 
+/** Per-table design notes — each field is capped to one or two statements. */
+export interface TableRationale {
+  ordering_key: string
+  partitioning: string
+  types_codecs: string
+  deviations?: string
+}
+
+export interface ProposedTable {
+  name: string
+  event: string
+  purpose: string
+  /** the full CREATE TABLE statement, executed byte-for-byte on approval */
+  ddl: string
+  /** absent on runs recorded before the agent emitted structured rationale */
+  rationale?: TableRationale
+}
+
 export interface DdlProposal {
-  /** markdown with `##` sections: ordering keys, partitioning, types, deviations */
+  /** markdown, one `##` section per table — the assembled per-table rationale */
   reasoning: string
-  tables: {
-    name: string
-    event: string
-    purpose: string
-    /** the full CREATE TABLE statement, executed byte-for-byte on approval */
-    ddl: string
-  }[]
+  tables: ProposedTable[]
 }
 
 export interface ContextProposal {

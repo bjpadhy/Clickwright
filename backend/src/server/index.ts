@@ -170,10 +170,12 @@ app.get("/api/history", async (_req, res) => {
 
 /** Full decision record of one past run (replay source for the report view). */
 app.get("/api/history/:runId", async (req, res) => {
+  // The alias must NOT be `seq`: `ORDER BY seq` would bind to the String
+  // projection and sort 0,1,10,11,…,2 — scrambling the replay.
   const rows = await query<{
-    seq: string; ts: string; type: string; name: string; payload: string;
+    seq_text: string; ts: string; type: string; name: string; payload: string;
   }>(
-    `SELECT toString(seq) AS seq, toString(ts) AS ts, type, name, payload
+    `SELECT toString(seq) AS seq_text, toString(ts) AS ts, type, name, payload
      FROM runs_log WHERE run_id = {runId:String} ORDER BY seq ASC`,
     { runId: req.params.runId },
   );

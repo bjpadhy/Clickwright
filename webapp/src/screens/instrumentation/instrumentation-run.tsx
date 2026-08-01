@@ -136,9 +136,11 @@ export function InstrumentationRun() {
                 </PanelHeader>
                 <PanelBody className="flex flex-col gap-2">
                   <StepTimeline steps={model.steps} />
+                  {/* A hint, not a progress indicator — the running step already
+                      spins, so this one stays still. */}
                   {busy && !model.pendingGate ? (
                     <div className="flex items-center gap-[9px] pt-1 text-zinc-400">
-                      <Spinner size={14} />
+                      <Icon name="ti-clock-pause" size={14} />
                       <span className="text-[12.5px]">
                         generation steps take 1–3 minutes with no intermediate output
                       </span>

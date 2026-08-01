@@ -12,6 +12,9 @@
  */
 import { query } from "../core/db.js";
 import { env } from "../core/env.js";
+import { complete, loadPrompt, stripFences } from "../core/llm.js";
+import type { Ctx } from "../core/tracing.js";
+import { step } from "../core/tracing.js";
 
 export interface ContextEntry {
   entity: string;
@@ -116,6 +119,56 @@ export async function getContext(
   }
 
   return { markdown: parts.join("\n\n"), entries };
+}
+
+// ── smart lookup (LLM-as-retriever) ──────────────────────────────
+// Mid-analysis questions ("payment failing on Apple devices?") need semantic
+// retrieval, not substring matching. The LLM reads a tiny index of the whole
+// store (entity + first line, ~1.5k tokens) and picks the relevant entries —
+// no embeddings needed at this corpus size. Falls back to term matching if
+// the LLM call fails, so a lookup can never crash an analysis.
+
+export async function lookupContext(
+  parent: Ctx,
+  question: string,
+  llm: (
+    parent: Ctx,
+    name: string,
+    prompt: string,
+  ) => Promise<string> = (p, n, prompt) =>
+    complete(p, n, prompt, { maxTokens: 500 }),
+): Promise<ContextBundle> {
+  return step(parent, "context_lookup", { question }, async (span) => {
+    const all = await latestEntries();
+    const byEntity = new Map(all.map((e) => [e.entity, e]));
+
+    let picked: ContextEntry[] = [];
+    try {
+      const index = all
+        .map((e) => `${e.entity} — ${e.definition_md.split("\n")[0]?.slice(0, 160)}`)
+        .join("\n");
+      const prompt = await loadPrompt("context_lookup", { question, index });
+      const text = await llm(span, "context_lookup", prompt);
+      const ids = JSON.parse(stripFences(text)) as unknown;
+      if (!Array.isArray(ids)) throw new Error("retriever did not return an array");
+      picked = ids
+        .filter((id): id is string => typeof id === "string")
+        .slice(0, 8)
+        .map((id) => byEntity.get(id))
+        .filter((e): e is ContextEntry => e !== undefined);
+    } catch {
+      // fallback: dumb term matching — better than returning nothing
+      const bundle = await getContext({ topic: question });
+      picked = bundle.entries.filter(
+        (e) => !CORE_PREFIXES.includes(category(e.entity)),
+      );
+    }
+
+    const markdown = picked
+      .map((e) => `${e.definition_md}\n*[${e.entity} v${e.version}]*`)
+      .join("\n\n");
+    return { markdown, entries: picked };
+  });
 }
 
 // ── reconciliation service ───────────────────────────────────────

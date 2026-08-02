@@ -723,7 +723,151 @@
   <span class="slide-number">04</span>
 </div>
 
-<!-- ═══ SLIDE 5: Quality ═══ -->
+<!-- ═══ SLIDE 5: Architecture Diagram ═══ -->
+<div class="slide" style="padding:36px 48px;background:#fff;">
+  <p style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:#3b82f6;margin-bottom:8px;">Architecture Overview</p>
+  <h2 style="font-size:32px;font-weight:800;color:#0f172a;letter-spacing:-0.5px;margin-bottom:20px;">How the three agents collaborate</h2>
+  <svg viewBox="0 0 1180 540" style="width:100%;height:auto;max-height:560px;" font-family="Inter,system-ui,sans-serif">
+    <defs>
+      <filter id="ds" x="-2%" y="-3%" width="104%" height="110%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.07"/></filter>
+      <marker id="ma" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="7" markerHeight="5" orient="auto"><path d="M0 .5L9 3.5 0 6.5z" fill="#64748b"/></marker>
+      <marker id="mt" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="7" markerHeight="5" orient="auto"><path d="M0 .5L9 3.5 0 6.5z" fill="#0d9488"/></marker>
+      <marker id="mo" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="7" markerHeight="5" orient="auto"><path d="M0 .5L9 3.5 0 6.5z" fill="#ea580c"/></marker>
+    </defs>
+
+    <!-- Input -->
+    <rect x="20" y="30" width="150" height="60" rx="10" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" filter="url(#ds)"/>
+    <text x="95" y="55" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">Feature Spec</text>
+    <text x="95" y="72" text-anchor="middle" font-size="9.5" fill="#a16207">spec.md + events.ndjson</text>
+
+    <!-- Agent 1 -->
+    <rect x="220" y="15" width="220" height="90" rx="12" fill="#f0fdfa" stroke="#2dd4bf" stroke-width="1.5" filter="url(#ds)"/>
+    <rect x="220" y="15" width="220" height="26" rx="12" fill="#0d9488"/><rect x="220" y="30" width="220" height="11" fill="#0d9488"/>
+    <text x="330" y="34" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">① Instrumentation Agent</text>
+    <text x="330" y="60" text-anchor="middle" font-size="9.5" fill="#115e59">Profile → Design DDL → Execute</text>
+    <text x="330" y="75" text-anchor="middle" font-size="9.5" fill="#115e59">→ Load → Verify row counts</text>
+    <text x="330" y="92" text-anchor="middle" font-size="8" fill="#5eead4">⛔ Human approval gate</text>
+
+    <!-- Arrow input → Agent 1 -->
+    <line x1="170" y1="60" x2="218" y2="60" stroke="#64748b" stroke-width="1.5" marker-end="url(#ma)"/>
+
+    <!-- Agent 2 -->
+    <rect x="490" y="15" width="220" height="90" rx="12" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.5" filter="url(#ds)"/>
+    <rect x="490" y="15" width="220" height="26" rx="12" fill="#475569"/><rect x="490" y="30" width="220" height="11" fill="#475569"/>
+    <text x="600" y="34" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">② Context Agent</text>
+    <text x="600" y="60" text-anchor="middle" font-size="9.5" fill="#334155">Synthesize docs + metrics</text>
+    <text x="600" y="75" text-anchor="middle" font-size="9.5" fill="#334155">Detect contradictions</text>
+    <text x="600" y="92" text-anchor="middle" font-size="8" fill="#94a3b8">⛔ Human approval gate</text>
+
+    <!-- Arrow Agent 1 → Agent 2 -->
+    <line x1="440" y1="60" x2="488" y2="60" stroke="#0d9488" stroke-width="2" marker-end="url(#mt)"/>
+    <text x="464" y="52" text-anchor="middle" font-size="8" fill="#0d9488">handoff</text>
+
+    <!-- PM -->
+    <rect x="20" y="390" width="150" height="60" rx="10" fill="#ede9fe" stroke="#a78bfa" stroke-width="1.5" filter="url(#ds)"/>
+    <text x="95" y="416" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">Product Manager</text>
+    <text x="95" y="433" text-anchor="middle" font-size="9.5" fill="#7c3aed">asks questions</text>
+
+    <!-- Agent 3 -->
+    <rect x="220" y="370" width="220" height="100" rx="12" fill="#fff7ed" stroke="#fdba74" stroke-width="1.5" filter="url(#ds)"/>
+    <rect x="220" y="370" width="220" height="26" rx="12" fill="#ea580c"/><rect x="220" y="385" width="220" height="11" fill="#ea580c"/>
+    <text x="330" y="389" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">③ Analytics Agent</text>
+    <text x="330" y="416" text-anchor="middle" font-size="9.5" fill="#9a3412">Plan → SQL → Verify → Narrate</text>
+    <text x="330" y="431" text-anchor="middle" font-size="9.5" fill="#9a3412">Citation check · Wilson precision</text>
+    <text x="330" y="446" text-anchor="middle" font-size="9.5" fill="#9a3412">Execution-backed verification</text>
+    <text x="330" y="460" text-anchor="middle" font-size="8" fill="#fdba74">Every number traces to SQL</text>
+
+    <!-- Arrow PM → Agent 3 -->
+    <line x1="170" y1="420" x2="218" y2="420" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#ma)"/>
+
+    <!-- Insight output -->
+    <rect x="220" y="490" width="220" height="42" rx="8" fill="#f0fdf4" stroke="#4ade80" stroke-width="2"/>
+    <text x="330" y="510" text-anchor="middle" font-size="11" font-weight="700" fill="#166534">✓ Cited Insight Card</text>
+    <text x="330" y="524" text-anchor="middle" font-size="8.5" fill="#15803d">headline · findings · chart · confidence</text>
+    <line x1="330" y1="470" x2="330" y2="488" stroke="#ea580c" stroke-width="1.5" marker-end="url(#mo)"/>
+
+    <!-- ═══ ClickHouse Cloud ═══ -->
+    <rect x="490" y="145" width="460" height="320" rx="14" fill="#fff" stroke="#e2e8f0" stroke-width="2" filter="url(#ds)"/>
+    <text x="720" y="174" text-anchor="middle" font-size="15" font-weight="800" fill="#0f172a">ClickHouse Cloud</text>
+
+    <!-- Base tables -->
+    <rect x="510" y="195" width="200" height="60" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+    <text x="610" y="217" text-anchor="middle" font-size="11" font-weight="600" fill="#166534">8 Base Event Tables</text>
+    <text x="610" y="233" text-anchor="middle" font-size="9" fill="#16a34a">~3.5M rows · funnel + supporting</text>
+    <text x="610" y="247" text-anchor="middle" font-size="8" fill="#4ade80">provided data — never modified</text>
+
+    <!-- Spec tables -->
+    <rect x="730" y="195" width="200" height="60" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+    <text x="830" y="217" text-anchor="middle" font-size="11" font-weight="600" fill="#1e40af">Spec-Created Tables</text>
+    <text x="830" y="233" text-anchor="middle" font-size="9" fill="#2563eb">N per spec · codecs + TTL</text>
+    <text x="830" y="247" text-anchor="middle" font-size="8" fill="#60a5fa">optimized ordering keys</text>
+
+    <!-- context_store -->
+    <rect x="510" y="275" width="200" height="65" rx="8" fill="#fefce8" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="610" y="297" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">context_store</text>
+    <text x="610" y="314" text-anchor="middle" font-size="9" fill="#a16207">Versioned knowledge store</text>
+    <text x="610" y="328" text-anchor="middle" font-size="8" fill="#ca8a04">table: · metric: · convention: · spec:</text>
+
+    <!-- App state -->
+    <rect x="730" y="275" width="200" height="65" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+    <text x="830" y="297" text-anchor="middle" font-size="11" font-weight="600" fill="#475569">Application State</text>
+    <text x="830" y="314" text-anchor="middle" font-size="8.5" fill="#64748b">runs_log · conversations</text>
+    <text x="830" y="328" text-anchor="middle" font-size="8.5" fill="#64748b">insight_cache · dashboards</text>
+
+    <!-- Quality box -->
+    <rect x="510" y="360" width="420" height="45" rx="8" fill="#faf5ff" stroke="#c4b5fd" stroke-width="1"/>
+    <text x="720" y="380" text-anchor="middle" font-size="10" font-weight="700" fill="#6b21a8">Code-Enforced Quality Checks</text>
+    <text x="720" y="395" text-anchor="middle" font-size="8.5" fill="#7c3aed">SQL guard (readonly=1) · citation check · Wilson precision · sanity gate · verification</text>
+
+    <!-- Arrows into ClickHouse -->
+    <!-- Agent 1 → creates tables -->
+    <path d="M 440 80 Q 470 80 470 145 L 470 220 L 508 220" stroke="#0d9488" stroke-width="1.5" fill="none" marker-end="url(#mt)"/>
+    <text x="478" y="155" font-size="7.5" fill="#0d9488">CREATE</text>
+
+    <!-- Agent 2 → context_store -->
+    <path d="M 600 105 L 600 140 L 610 140 L 610 273" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#ma)"/>
+    <text x="618" y="138" font-size="7.5" fill="#475569">write</text>
+
+    <!-- context_store → Agent 3 -->
+    <path d="M 508 310 L 460 310 Q 445 310 445 325 L 445 400 L 440 400" stroke="#ca8a04" stroke-width="1.5" fill="none" stroke-dasharray="5 3" marker-end="url(#ma)"/>
+    <text x="455" y="355" font-size="7.5" fill="#ca8a04">reads</text>
+
+    <!-- Agent 3 → reads tables -->
+    <path d="M 440 430 Q 470 430 470 350 L 470 240 L 508 240" stroke="#ea580c" stroke-width="1" fill="none" stroke-dasharray="5 3" marker-end="url(#ma)"/>
+    <text x="478" y="350" font-size="7.5" fill="#ea580c">readonly</text>
+
+    <!-- ═══ Side boxes ═══ -->
+    <!-- Langfuse -->
+    <rect x="980" y="145" width="180" height="110" rx="10" fill="#fff7ed" stroke="#fb923c" stroke-width="1.5" filter="url(#ds)"/>
+    <text x="1070" y="172" text-anchor="middle" font-size="13" font-weight="700" fill="#c2410c">Langfuse</text>
+    <text x="1070" y="192" text-anchor="middle" font-size="9" fill="#ea580c">Every step = one span</text>
+    <text x="1070" y="208" text-anchor="middle" font-size="8.5" fill="#ea580c">LLM generations traced</text>
+    <text x="1070" y="222" text-anchor="middle" font-size="8.5" fill="#ea580c">Numeric scores sortable</text>
+    <text x="1070" y="236" text-anchor="middle" font-size="8.5" fill="#ea580c">Failed attempts kept</text>
+
+    <!-- Claude -->
+    <rect x="980" y="275" width="180" height="80" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5" filter="url(#ds)"/>
+    <text x="1070" y="302" text-anchor="middle" font-size="13" font-weight="700" fill="#1d4ed8">Claude Sonnet 5</text>
+    <text x="1070" y="322" text-anchor="middle" font-size="9" fill="#3b82f6">Structured JSON + SQL</text>
+    <text x="1070" y="338" text-anchor="middle" font-size="8.5" fill="#3b82f6">Zod-validated every call</text>
+
+    <!-- Webapp -->
+    <rect x="980" y="375" width="180" height="90" rx="10" fill="#f0fdf4" stroke="#4ade80" stroke-width="1.5" filter="url(#ds)"/>
+    <text x="1070" y="402" text-anchor="middle" font-size="13" font-weight="700" fill="#166534">Webapp</text>
+    <text x="1070" y="420" text-anchor="middle" font-size="9" fill="#15803d">React + SSE streaming</text>
+    <text x="1070" y="436" text-anchor="middle" font-size="8.5" fill="#15803d">Chat · Instrumentation</text>
+    <text x="1070" y="450" text-anchor="middle" font-size="8.5" fill="#15803d">Dashboards · Observe</text>
+
+    <!-- Dashed lines to side boxes -->
+    <line x1="940" y1="200" x2="978" y2="200" stroke="#fb923c" stroke-width="1" stroke-dasharray="4 3"/>
+    <line x1="940" y1="315" x2="978" y2="315" stroke="#93c5fd" stroke-width="1" stroke-dasharray="4 3"/>
+    <line x1="940" y1="420" x2="978" y2="420" stroke="#4ade80" stroke-width="1" stroke-dasharray="4 3"/>
+  </svg>
+  <span class="logo-bar">CLICKWRIGHT</span>
+  <span class="slide-number">05</span>
+</div>
+
+<!-- ═══ SLIDE 6: Quality ═══ -->
 <div class="slide s5">
   <p class="label">Correctness Stack</p>
   <h2>Seven layers between the LLM and the PM.</h2>
@@ -787,10 +931,10 @@
     </div>
   </div>
   <span class="logo-bar">CLICKWRIGHT</span>
-  <span class="slide-number">05</span>
+  <span class="slide-number">06</span>
 </div>
 
-<!-- ═══ SLIDE 6: Tech ═══ -->
+<!-- ═══ SLIDE 7: Tech ═══ -->
 <div class="slide s6">
   <p class="label">Built With</p>
   <h2>Production-grade from day one.</h2>
@@ -833,10 +977,10 @@
     <div class="perf-card"><span class="perf-num">100%</span><p class="perf-label">Numbers traceable to SQL</p></div>
   </div>
   <span class="logo-bar">CLICKWRIGHT</span>
-  <span class="slide-number">06</span>
+  <span class="slide-number">07</span>
 </div>
 
-<!-- ═══ SLIDE 7: What the PM Gets ═══ -->
+<!-- ═══ SLIDE 8: What the PM Gets ═══ -->
 <div class="slide s7">
   <p class="label">What the PM Gets</p>
   <h2>Not dashboards. Answers.</h2>
@@ -863,10 +1007,10 @@
     </div>
   </div>
   <span class="logo-bar">CLICKWRIGHT</span>
-  <span class="slide-number">07</span>
+  <span class="slide-number">08</span>
 </div>
 
-<!-- ═══ SLIDE 8: Closing ═══ -->
+<!-- ═══ SLIDE 9: Closing ═══ -->
 <div class="slide s8">
   <h2>Spec in. <span>Insight out.</span><br>Every step traced.</h2>
   <p class="closing-sub">Clickwright makes analytics trustworthy by construction — not by hoping the LLM gets it right, but by making it prove that it did.</p>
@@ -884,7 +1028,7 @@
       ClickHouse &middot; Claude &middot; Langfuse &middot; TypeScript
     </div>
   </div>
-  <span class="slide-number" style="color:#475569">08</span>
+  <span class="slide-number" style="color:#475569">09</span>
 </div>
 
 </body>

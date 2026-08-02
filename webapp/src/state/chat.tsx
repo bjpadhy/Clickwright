@@ -111,8 +111,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         const list = await refreshConversations()
         if (cancelled) return
         setOffline(null)
-        // Reopen the most recent conversation; an empty backend starts on a draft.
-        if (list.length > 0) setActiveId(list[0]!.id)
+        // Always start on a fresh draft — the sidebar still lists prior chats.
       } catch (error) {
         if (!cancelled) setOffline(message(error))
       }

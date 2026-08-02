@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clickwright — Pitch Deck</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #fafafa;
+    --text: #0f172a;
+    --muted: #64748b;
+    --accent: #0d9488;
+    --accent-light: #ccfbf1;
+    --blue: #3b82f6;
+    --orange: #ea580c;
+    --red: #dc2626;
+    --purple: #7c3aed;
+    --surface: #fff;
+    --border: #e2e8f0;
+  }
+
+  html { font-family: 'Inter', system-ui, sans-serif; }
+
+  @media print {
+    .slide { page-break-after: always; page-break-inside: avoid; }
+    .slide:last-child { page-break-after: auto; }
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+
+  .slide {
+    width: 1280px;
+    height: 720px;
+    background: var(--bg);
+    position: relative;
+    overflow: hidden;
+    margin: 0 auto 40px;
+    border-radius: 12px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+  }
+
+  .slide-number {
+    position: absolute;
+    bottom: 24px;
+    right: 36px;
+    font-size: 12px;
+    color: #94a3b8;
+    font-weight: 500;
+  }
+
+  .logo-bar {
+    position: absolute;
+    bottom: 24px;
+    left: 36px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #94a3b8;
+    letter-spacing: 0.5px;
+  }
+
+  /* ─── SLIDE 1: Title ─── */
+  .s1 {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+  }
+  .s1 .icon-row {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 32px;
+  }
+  .s1 .icon-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+  }
+  .s1 h1 {
+    font-size: 72px;
+    font-weight: 900;
+    color: #fff;
+    letter-spacing: -2px;
+    line-height: 1;
+  }
+  .s1 h1 span { color: #2dd4bf; }
+  .s1 .tagline {
+    margin-top: 20px;
+    font-size: 22px;
+    color: #94a3b8;
+    font-weight: 400;
+    max-width: 700px;
+    line-height: 1.5;
+  }
+  .s1 .built-for {
+    margin-top: 40px;
+    font-size: 13px;
+    color: #475569;
+    font-weight: 500;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+  .s1 .tech-pills {
+    display: flex;
+    gap: 10px;
+    margin-top: 16px;
+  }
+  .s1 .tech-pill {
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid #334155;
+    color: #94a3b8;
+  }
+
+  /* ─── SLIDE 2: Problem ─── */
+  .s2 { padding: 60px 80px; }
+  .s2 .label {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--red);
+    margin-bottom: 12px;
+  }
+  .s2 h2 {
+    font-size: 44px;
+    font-weight: 800;
+    color: var(--text);
+    line-height: 1.15;
+    max-width: 800px;
+    letter-spacing: -1px;
+  }
+  .s2 .problems {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-top: 48px;
+  }
+  .s2 .problem-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    position: relative;
+  }
+  .s2 .problem-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4px;
+    height: 100%;
+    border-radius: 12px 0 0 12px;
+    background: var(--red);
+  }
+  .s2 .problem-card h3 {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+  .s2 .problem-card p {
+    font-size: 14px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  .s2 .stat-row {
+    display: flex;
+    gap: 40px;
+    margin-top: 40px;
+  }
+  .s2 .stat {
+    text-align: center;
+  }
+  .s2 .stat .num {
+    font-size: 36px;
+    font-weight: 800;
+    color: var(--red);
+  }
+  .s2 .stat .desc {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  /* ─── SLIDE 3: Solution ─── */
+  .s3 { padding: 60px 80px; }
+  .s3 .label {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+  .s3 h2 {
+    font-size: 40px;
+    font-weight: 800;
+    color: var(--text);
+    line-height: 1.15;
+    letter-spacing: -1px;
+  }
+  .s3 .subtitle {
+    font-size: 18px;
+    color: var(--muted);
+    margin-top: 8px;
+    max-width: 700px;
+  }
+  .s3 .flow {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-top: 48px;
+  }
+  .s3 .flow-step {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px 20px;
+    text-align: center;
+    position: relative;
+  }
+  .s3 .flow-step .step-num {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 12px;
+  }
+  .s3 .flow-step h4 {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .s3 .flow-step p {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .s3 .flow-arrow {
+    font-size: 24px;
+    color: #cbd5e1;
+    padding: 0 6px;
+    flex-shrink: 0;
+  }
+  .s3 .bottom-note {
+    margin-top: 36px;
+    padding: 20px 28px;
+    background: var(--accent-light);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .s3 .bottom-note .check {
+    font-size: 28px;
+    color: var(--accent);
+  }
+  .s3 .bottom-note p {
+    font-size: 14px;
+    color: #134e4a;
+    font-weight: 500;
+    line-height: 1.5;
+  }
+
+  /* ─── SLIDE 4: How It Works ─── */
+  .s4 { padding: 60px 80px; }
+  .s4 .label {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--blue);
+    margin-bottom: 12px;
+  }
+  .s4 h2 {
+    font-size: 40px;
+    font-weight: 800;
+    color: var(--text);
+    letter-spacing: -1px;
+  }
+  .s4 .agents {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 24px;
+    margin-top: 36px;
+  }
+  .s4 .agent-card {
+    background: var(--surface);
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    padding: 28px 24px;
+    position: relative;
+    overflow: hidden;
+  }
+  .s4 .agent-card .stripe {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+  }
+  .s4 .agent-card .num {
+    font-size: 40px;
+    font-weight: 800;
+    color: #e2e8f0;
+    position: absolute;
+    top: 12px;
+    right: 16px;
+  }
+  .s4 .agent-card h3 {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+    margin-top: 8px;
+    margin-bottom: 12px;
+  }
+  .s4 .agent-card ul {
+    list-style: none;
+    padding: 0;
+  }
+  .s4 .agent-card li {
+    font-size: 13px;
+    color: var(--muted);
+    padding: 5px 0;
+    padding-left: 18px;
+    position: relative;
+    line-height: 1.5;
+  }
+  .s4 .agent-card li::before {
+    content: '→';
+    position: absolute;
+    left: 0;
+    color: #cbd5e1;
+    font-weight: 600;
+  }
+  .s4 .handoff {
+    margin-top: 20px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .s4 .handoff strong { color: var(--text); }
+
+  /* ─── SLIDE 5: Quality ─── */
+  .s5 { padding: 60px 80px; }
+  .s5 .label {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--purple);
+    margin-bottom: 12px;
+  }
+  .s5 h2 {
+    font-size: 40px;
+    font-weight: 800;
+    color: var(--text);
+    letter-spacing: -1px;
+  }
+  .s5 .subtitle {
+    font-size: 16px;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+  .s5 .checks {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-top: 32px;
+  }
+  .s5 .check-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+  }
+  .s5 .check-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+  .s5 .check-card h4 {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .s5 .check-card p {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  /* ─── SLIDE 6: Tech Stack ─── */
+  .s6 { padding: 60px 80px; }
+  .s6 .label {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--orange);
+    margin-bottom: 12px;
+  }
+  .s6 h2 {
+    font-size: 40px;
+    font-weight: 800;
+    color: var(--text);
+    letter-spacing: -1px;
+  }
+  .s6 .stack-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 20px;
+    margin-top: 36px;
+  }
+  .s6 .stack-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    text-align: center;
+  }
+  .s6 .stack-card .tech-name {
+    font-size: 20px;
+    font-weight: 800;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .s6 .stack-card .tech-role {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .s6 .stack-card .tech-why {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .s6 .perf-row {
+    display: flex;
+    gap: 20px;
+    margin-top: 28px;
+  }
+  .s6 .perf-card {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    text-align: center;
+  }
+  .s6 .perf-card .perf-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--accent);
+  }
+  .s6 .perf-card .perf-label {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  /* ─── SLIDE 7: Results ─── */
+  .s7 { padding: 60px 80px; }
+  .s7 .label {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+  .s7 h2 {
+    font-size: 40px;
+    font-weight: 800;
+    color: var(--text);
+    letter-spacing: -1px;
+  }
+  .s7 .results-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-top: 32px;
+  }
+  .s7 .result-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+  }
+  .s7 .result-card h4 {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+  .s7 .result-card p {
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  .s7 .result-card .example {
+    margin-top: 12px;
+    padding: 12px 16px;
+    background: #f8fafc;
+    border-radius: 8px;
+    font-size: 12px;
+    color: #334155;
+    font-style: italic;
+    line-height: 1.5;
+    border-left: 3px solid var(--accent);
+  }
+
+  /* ─── SLIDE 8: Closing ─── */
+  .s8 {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+  }
+  .s8 h2 {
+    font-size: 52px;
+    font-weight: 900;
+    color: #fff;
+    letter-spacing: -1.5px;
+    line-height: 1.2;
+  }
+  .s8 h2 span { color: #2dd4bf; }
+  .s8 .closing-sub {
+    margin-top: 16px;
+    font-size: 20px;
+    color: #94a3b8;
+    max-width: 650px;
+    line-height: 1.5;
+  }
+  .s8 .links {
+    display: flex;
+    gap: 32px;
+    margin-top: 48px;
+  }
+  .s8 .link-item {
+    color: #64748b;
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .s8 .link-item strong {
+    color: #2dd4bf;
+    display: block;
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══ SLIDE 1: Title ═══ -->
+<div class="slide s1">
+  <div class="icon-row">
+    <div class="icon-dot" style="background:#2dd4bf"></div>
+    <div class="icon-dot" style="background:#3b82f6"></div>
+    <div class="icon-dot" style="background:#f97316"></div>
+  </div>
+  <h1>Click<span>wright</span></h1>
+  <p class="tagline">Three AI agents turn a feature spec into live ClickHouse tables, documented context, and PM-ready insights — with every decision traced and human-approved.</p>
+  <p class="built-for">Click-a-thon India 2026 &middot; Atlys Track</p>
+  <div class="tech-pills">
+    <span class="tech-pill">ClickHouse Cloud</span>
+    <span class="tech-pill">Claude (Anthropic)</span>
+    <span class="tech-pill">Langfuse</span>
+    <span class="tech-pill">TypeScript</span>
+  </div>
+  <span class="slide-number">01</span>
+</div>
+
+<!-- ═══ SLIDE 2: Problem ═══ -->
+<div class="slide s2">
+  <p class="label">The Problem</p>
+  <h2>Getting from raw events to<br>trustworthy analytics is slow,<br>brittle, and manual.</h2>
+  <div class="problems">
+    <div class="problem-card">
+      <h3>Schema design is guesswork</h3>
+      <p>Engineers pick ordering keys and types by intuition. Wrong choices are immutable — a bad key means rebuilding the table.</p>
+    </div>
+    <div class="problem-card">
+      <h3>Context lives in people's heads</h3>
+      <p>Metric definitions, data quirks, known issues — scattered across Slack, docs, and tribal knowledge. Every new analyst starts from zero.</p>
+    </div>
+    <div class="problem-card">
+      <h3>AI analytics hallucinate numbers</h3>
+      <p>LLM-generated insights look plausible but cite figures that aren't in the data. A PM acts on a number that doesn't exist.</p>
+    </div>
+    <div class="problem-card">
+      <h3>No audit trail</h3>
+      <p>When an insight is wrong, there's no way to trace it back to the query, the schema decision, or the context that shaped it.</p>
+    </div>
+  </div>
+  <span class="logo-bar">CLICKWRIGHT</span>
+  <span class="slide-number">02</span>
+</div>
+
+<!-- ═══ SLIDE 3: Solution ═══ -->
+<div class="slide s3">
+  <p class="label">The Solution</p>
+  <h2>Spec in. Insight out. Every step traced.</h2>
+  <p class="subtitle">An agentic pipeline that instruments, documents, and analyses — with human gates at every irreversible decision.</p>
+  <div class="flow">
+    <div class="flow-step">
+      <div class="step-num">1</div>
+      <h4>Upload a spec</h4>
+      <p>PM writes what events the feature emits. The system does the rest.</p>
+    </div>
+    <span class="flow-arrow">&#10132;</span>
+    <div class="flow-step">
+      <div class="step-num">2</div>
+      <h4>Tables go live</h4>
+      <p>Profiled, optimized, loaded, row-count verified. Human approves the DDL.</p>
+    </div>
+    <span class="flow-arrow">&#10132;</span>
+    <div class="flow-step">
+      <div class="step-num">3</div>
+      <h4>Context updates</h4>
+      <p>Knowledge store learns new metrics, tables, gotchas. Human approves changes.</p>
+    </div>
+    <span class="flow-arrow">&#10132;</span>
+    <div class="flow-step">
+      <div class="step-num">4</div>
+      <h4>PM asks questions</h4>
+      <p>Every answer is cited, verified by an independent query, and bounded by Wilson intervals.</p>
+    </div>
+  </div>
+  <div class="bottom-note">
+    <span class="check">&#10003;</span>
+    <p><strong>Every number traces back to a SQL result.</strong> Every schema decision traces to a Langfuse span. Every context change is versioned and attributed. Nothing is a black box.</p>
+  </div>
+  <span class="logo-bar">CLICKWRIGHT</span>
+  <span class="slide-number">03</span>
+</div>
+
+<!-- ═══ SLIDE 4: How It Works ═══ -->
+<div class="slide s4">
+  <p class="label">Architecture</p>
+  <h2>Three agents. One shared brain.</h2>
+  <div class="agents">
+    <div class="agent-card">
+      <div class="stripe" style="background:var(--accent)"></div>
+      <span class="num">01</span>
+      <h3>Instrumentation</h3>
+      <ul>
+        <li>Profiles every field (types, nulls, cardinality)</li>
+        <li>Deterministic baseline DDL from stats</li>
+        <li>LLM optimizes codecs, ordering keys, types</li>
+        <li>Cross-table coherence in one call</li>
+        <li>EXPLAIN AST dry-run before execution</li>
+        <li>DML retry separate from schema retry</li>
+      </ul>
+    </div>
+    <div class="agent-card">
+      <div class="stripe" style="background:#475569"></div>
+      <span class="num">02</span>
+      <h3>Context</h3>
+      <ul>
+        <li>Append-only versioned knowledge store</li>
+        <li>Table docs synthesized from measurements</li>
+        <li>LLM writes spec summaries + metric defs</li>
+        <li>Detects contradictions with existing context</li>
+        <li>Every future agent inherits what was learned</li>
+        <li>Semantic retrieval for mid-analysis lookups</li>
+      </ul>
+    </div>
+    <div class="agent-card">
+      <div class="stripe" style="background:var(--orange)"></div>
+      <span class="num">03</span>
+      <h3>Analytics</h3>
+      <ul>
+        <li>Plans ≤4 tasks with proactive segmentation</li>
+        <li>Concurrent SQL with self-healing retries</li>
+        <li>Full-set digests computed in ClickHouse</li>
+        <li>Citation check: every number verified</li>
+        <li>Independent query cross-checks headline</li>
+        <li>Wilson confidence intervals on every rate</li>
+      </ul>
+    </div>
+  </div>
+  <p class="handoff">Agents share state through <strong>context_store</strong> in ClickHouse — never call each other directly. Runs are serialized; tasks within a run are concurrent.</p>
+  <span class="logo-bar">CLICKWRIGHT</span>
+  <span class="slide-number">04</span>
+</div>
+
+<!-- ═══ SLIDE 5: Quality ═══ -->
+<div class="slide s5">
+  <p class="label">Correctness Stack</p>
+  <h2>Seven layers between the LLM and the PM.</h2>
+  <p class="subtitle">Quality is the hard constraint. A slower right answer beats a fast wrong one.</p>
+  <div class="checks">
+    <div class="check-card">
+      <div class="check-icon" style="background:#f0fdf4;color:#16a34a;">&#9745;</div>
+      <div>
+        <h4>SQL Guard</h4>
+        <p>readonly=1, banned keywords, single statement, LIMIT cap. The model cannot mutate data.</p>
+      </div>
+    </div>
+    <div class="check-card">
+      <div class="check-icon" style="background:#eff6ff;color:#2563eb;">&#9881;</div>
+      <div>
+        <h4>Full-Set Digest</h4>
+        <p>Population stats computed over every row in ClickHouse. No extrapolation from samples.</p>
+      </div>
+    </div>
+    <div class="check-card">
+      <div class="check-icon" style="background:#fef9c3;color:#ca8a04;">&#9888;</div>
+      <div>
+        <h4>Sanity Gate</h4>
+        <p>Rates >100% flagged. Empty results dropped. Low sample sizes warned. All over the full set.</p>
+      </div>
+    </div>
+    <div class="check-card">
+      <div class="check-icon" style="background:#faf5ff;color:#7c3aed;">&#128269;</div>
+      <div>
+        <h4>Citation Check</h4>
+        <p>Every number in prose must exist in the SQL results — or be a verified arithmetic of two that do.</p>
+      </div>
+    </div>
+    <div class="check-card">
+      <div class="check-icon" style="background:#fef2f2;color:#dc2626;">&#177;</div>
+      <div>
+        <h4>Wilson Precision</h4>
+        <p>95% confidence intervals computed from the actual denominator. Reported with the figure, not separately.</p>
+      </div>
+    </div>
+    <div class="check-card">
+      <div class="check-icon" style="background:#f0fdfa;color:#0d9488;">&#10003;&#10003;</div>
+      <div>
+        <h4>Execution-Backed Verification</h4>
+        <p>An independently written query recomputes the headline figure. Disagreement drops confidence to low.</p>
+      </div>
+    </div>
+    <div class="check-card">
+      <div class="check-icon" style="background:#fff7ed;color:#ea580c;">&#9203;</div>
+      <div>
+        <h4>Established Figures</h4>
+        <p>Follow-up answers carry prior figures + denominators. A changed denominator is explained, never silent.</p>
+      </div>
+    </div>
+    <div class="check-card">
+      <div class="check-icon" style="background:#e0e7ff;color:#4f46e5;">&#128100;</div>
+      <div>
+        <h4>Human Approval Gates</h4>
+        <p>DDL and context changes require explicit human approval. The agent proposes; the human decides.</p>
+      </div>
+    </div>
+  </div>
+  <span class="logo-bar">CLICKWRIGHT</span>
+  <span class="slide-number">05</span>
+</div>
+
+<!-- ═══ SLIDE 6: Tech ═══ -->
+<div class="slide s6">
+  <p class="label">Built With</p>
+  <h2>Production-grade from day one.</h2>
+  <div class="stack-grid">
+    <div class="stack-card">
+      <p class="tech-name">ClickHouse Cloud</p>
+      <p class="tech-role">Database</p>
+      <p class="tech-why">Event tables, knowledge store, run history, insight cache, dashboards — all in one engine. Codecs, TTL, and ordering keys optimized per table.</p>
+    </div>
+    <div class="stack-card">
+      <p class="tech-name">Claude Sonnet 5</p>
+      <p class="tech-role">LLM</p>
+      <p class="tech-why">Best structured-output reliability for DDL + SQL + JSON. Effort pinned to medium — schema-validated prompts don't need extended thinking.</p>
+    </div>
+    <div class="stack-card">
+      <p class="tech-name">Langfuse Cloud</p>
+      <p class="tech-role">Tracing</p>
+      <p class="tech-why">Every span, generation, and score queryable. Numeric scores (self-heal attempts, citation failures) as sortable columns.</p>
+    </div>
+    <div class="stack-card">
+      <p class="tech-name">TypeScript</p>
+      <p class="tech-role">Backend</p>
+      <p class="tech-why">Strong typing + Zod runtime validation on every LLM output. Async-native for concurrent task execution.</p>
+    </div>
+    <div class="stack-card">
+      <p class="tech-name">React + Vite</p>
+      <p class="tech-role">Frontend</p>
+      <p class="tech-why">SSE streaming for live pipeline steps. Chat UI with insight cards, charts, segment tables, and confidence badges.</p>
+    </div>
+    <div class="stack-card">
+      <p class="tech-name">Zod</p>
+      <p class="tech-role">Validation</p>
+      <p class="tech-why">Every LLM response is parsed through a strict schema. Malformed output triggers self-healing retry with the verbatim error.</p>
+    </div>
+  </div>
+  <div class="perf-row">
+    <div class="perf-card"><span class="perf-num">~30s</span><p class="perf-label">Spec → live tables</p></div>
+    <div class="perf-card"><span class="perf-num">~15s</span><p class="perf-label">Question → cited insight</p></div>
+    <div class="perf-card"><span class="perf-num">~0.6s</span><p class="perf-label">Cached repeat question</p></div>
+    <div class="perf-card"><span class="perf-num">100%</span><p class="perf-label">Numbers traceable to SQL</p></div>
+  </div>
+  <span class="logo-bar">CLICKWRIGHT</span>
+  <span class="slide-number">06</span>
+</div>
+
+<!-- ═══ SLIDE 7: What the PM Gets ═══ -->
+<div class="slide s7">
+  <p class="label">What the PM Gets</p>
+  <h2>Not dashboards. Answers.</h2>
+  <div class="results-grid">
+    <div class="result-card">
+      <h4>Headline with the number that matters</h4>
+      <p>Every insight leads with the one figure the PM needs — not a data dump.</p>
+      <div class="example">"Express Checkout lifts checkout-to-purchase conversion by 12.3pp over standard (67.0% vs 54.7%, n=1,007 vs 3,412)."</div>
+    </div>
+    <div class="result-card">
+      <h4>Findings tagged by type</h4>
+      <p>Drivers (what explains it), segments (where it concentrates), caveats (what to watch), known issues (linked by ID).</p>
+      <div class="example">SEGMENT: "The gap is widest on iOS in the UAE — 67.7% Express vs 41.8% standard — consistent with K1 (OTP autofill regression)."</div>
+    </div>
+    <div class="result-card">
+      <h4>Charts and tables from the SQL</h4>
+      <p>Bar/line charts and segment tables rendered directly from query results. Value formats (%, count, currency) inferred from column names and SQL.</p>
+      <div class="example">Chart: "Step-through rate by funnel stage: iOS vs Android" — 8 bars, lowest highlighted in coral.</div>
+    </div>
+    <div class="result-card">
+      <h4>Confidence you can trust</h4>
+      <p>Computed from Wilson intervals, sanity flags, citation retries, and an independent verification query. Never the model's self-assessment.</p>
+      <div class="example">Confidence: HIGH — "±2.1pp on conversion_rate (n=6,715); an independently written query reproduced the figure."</div>
+    </div>
+  </div>
+  <span class="logo-bar">CLICKWRIGHT</span>
+  <span class="slide-number">07</span>
+</div>
+
+<!-- ═══ SLIDE 8: Closing ═══ -->
+<div class="slide s8">
+  <h2>Spec in. <span>Insight out.</span><br>Every step traced.</h2>
+  <p class="closing-sub">Clickwright makes analytics trustworthy by construction — not by hoping the LLM gets it right, but by making it prove that it did.</p>
+  <div class="links">
+    <div class="link-item">
+      <strong>REPO</strong>
+      github.com/bjpadhy/Clickwright
+    </div>
+    <div class="link-item">
+      <strong>TRACES</strong>
+      Every run linked to Langfuse
+    </div>
+    <div class="link-item">
+      <strong>STACK</strong>
+      ClickHouse &middot; Claude &middot; Langfuse &middot; TypeScript
+    </div>
+  </div>
+  <span class="slide-number" style="color:#475569">08</span>
+</div>
+
+</body>
+</html>

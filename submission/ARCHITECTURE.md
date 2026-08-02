@@ -79,6 +79,20 @@ The knowledge store is an append-only, versioned ClickHouse table. Reads resolve
 | `spec:` | Feature summaries from instrumented specs |
 | `known_issue:` | Data quirks (K1–K7) |
 
+## Key Differentiators
+
+### ClickHouse Best-Practice DDL Generation
+
+Schemas are measured, not guessed. The Instrumentation Agent profiles every field — types, null rates, cardinality, numeric ranges — and code synthesizes a deterministic baseline DDL with correct `LowCardinality`, `Decimal64` for money, and data-driven ordering keys. The LLM then optimizes codecs, partitioning, cross-table type coherence, and TTL in a single call — guided by the ClickHouse architecture review skill. Every DDL is dry-run through `EXPLAIN AST` before execution. If the LLM fails, the measured baseline ships unchanged, so the pipeline never produces an invalid schema.
+
+### Cross-Conversation Context
+
+Follow-up answers carry prior SQL, established figures (with their denominators and source tables), and dropped-task reasons from earlier turns. This prevents silent denominator drift: if one answer reports UAE conversion as 56.6%, the next turn knows both the number and the `n` it rests on. A changed denominator is explained rather than silently contradicting what the PM was already told. Failed tasks are forwarded so the planner doesn't repeat impossible work. The history window is 12 turns with smart compression.
+
+### Wilson Score Validation
+
+Every rate the Analytics Agent reports is classified (proportion, mean, quantile, ratio) — only proportions get a 95% Wilson confidence interval computed from the actual denominator. The interval is reported inline with the figure, not separately. Confidence (high/medium/low) is *computed* from the widest interval, sanity flags, citation retries, and whether an independent verification query reproduced the headline — never asked of the model. A ±10pp+ interval drops confidence to low; a verification disagreement does the same.
+
 ## Quality & Correctness Stack
 
 Every insight passes through multiple deterministic checks before reaching the PM:

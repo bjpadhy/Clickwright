@@ -75,10 +75,11 @@ Three agents, one shared brain — the `context_store` in ClickHouse:
 
 ### Key implementation details
 
-- **Deterministic DDL baseline** — code synthesizes a correct schema from measured stats alone; the LLM optimizes it (codecs, ordering keys, type coherence). If the LLM fails, the baseline ships.
+- **ClickHouse best-practice DDL generation** — schemas are not guessed. Code profiles every field (types, null rates, cardinality, numeric ranges) and synthesizes a deterministic baseline DDL with correct `LowCardinality`, `Decimal64` for money, and sensible ordering keys. The LLM then optimizes codecs, partitioning, cross-table type coherence, and TTL in a single call — guided by the ClickHouse architecture review skill. If the LLM fails, the measured baseline ships unchanged. Every DDL is dry-run through `EXPLAIN AST` before execution.
+- **Cross-conversation context** — follow-up answers carry prior SQL, established figures (with their denominators and source tables), and dropped-task reasons from earlier turns. This prevents silent denominator drift: if one answer reports UAE conversion as 56.6%, the next turn knows both the number and the `n` it rests on, so a changed denominator is explained rather than silently contradicting what the PM was already told. History window is 12 turns with smart compression.
+- **Wilson score validation** — every rate the Analytics Agent reports is classified (proportion, mean, quantile, ratio) and only proportions get a 95% Wilson confidence interval computed from the actual denominator. The interval is reported inline with the figure, not separately. Confidence (high/medium/low) is *computed* from the widest interval, sanity flags, citation retries, and whether an independent verification query reproduced the headline — never asked of the model. A ±10pp+ interval drops confidence to low; a verification disagreement does the same.
 - **Concurrent SQL execution** — ≤4 tasks run in parallel; dependent tasks (funnels) run sequentially with result forwarding.
 - **Full-set profiling** — large results are wrapped as subqueries and profiled entirely in ClickHouse. The narrator sees exact population stats, not sample extrapolations.
-- **Conversation memory** — follow-ups carry prior SQL, established figures, and dropped-task reasons. History window is 12 turns with smart compression.
 - **DML vs schema retry** — transient INSERT failures retry the load only; type-mismatch errors trigger schema redesign.
 
 ### Project structure

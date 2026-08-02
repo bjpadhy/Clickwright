@@ -687,8 +687,8 @@
       <ul>
         <li>Profiles every field (types, nulls, cardinality)</li>
         <li>Deterministic baseline DDL from stats</li>
-        <li>LLM optimizes codecs, ordering keys, types</li>
-        <li>Cross-table coherence in one call</li>
+        <li>LLM optimizes via architecture review skill</li>
+        <li>Codecs, ordering keys, cross-table coherence</li>
         <li>EXPLAIN AST dry-run before execution</li>
         <li>DML retry separate from schema retry</li>
       </ul>
@@ -936,7 +936,48 @@
   <span class="slide-number">06</span>
 </div>
 
-<!-- ═══ SLIDE 7: Tech ═══ -->
+<!-- ═══ SLIDE 7: Differentiators ═══ -->
+<div class="slide" style="padding:60px 80px;background:var(--bg);">
+  <p style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:#0d9488;margin-bottom:12px;">What Sets Us Apart</p>
+  <h2 style="font-size:40px;font-weight:800;color:#0f172a;letter-spacing:-1px;">Three things no other submission does.</h2>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;margin-top:40px;">
+    <!-- Card 1 -->
+    <div style="background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:32px 24px;position:relative;overflow:hidden;">
+      <div style="position:absolute;top:0;left:0;right:0;height:4px;background:#0d9488;"></div>
+      <p style="font-size:28px;margin-bottom:12px;">&#9881;</p>
+      <h3 style="font-size:17px;font-weight:700;color:#0f172a;margin-bottom:10px;">ClickHouse Best-Practice DDL</h3>
+      <p style="font-size:12.5px;color:#64748b;line-height:1.6;">
+        Schemas are <strong>measured, not guessed</strong>. Code profiles every field — types, null rates, cardinality, ranges — and builds a deterministic baseline with correct <code>LowCardinality</code>, <code>Decimal64</code> for money, and data-driven ordering keys. The LLM optimizes codecs, partitioning, and cross-table coherence in one call — guided by the <strong>ClickHouse architecture review skill</strong>. Every DDL is dry-run through <code>EXPLAIN AST</code> before execution. If the LLM fails, the measured baseline ships unchanged.
+      </p>
+    </div>
+    <!-- Card 2 -->
+    <div style="background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:32px 24px;position:relative;overflow:hidden;">
+      <div style="position:absolute;top:0;left:0;right:0;height:4px;background:#3b82f6;"></div>
+      <p style="font-size:28px;margin-bottom:12px;">&#128172;</p>
+      <h3 style="font-size:17px;font-weight:700;color:#0f172a;margin-bottom:10px;">Cross-Conversation Context</h3>
+      <p style="font-size:12.5px;color:#64748b;line-height:1.6;">
+        Follow-ups carry <strong>prior SQL, established figures, their denominators, and source tables</strong> from earlier turns. This prevents silent denominator drift — if one answer reports UAE conversion as 56.6%, the next turn knows both the number and the <em>n</em> it rests on. A changed denominator is <strong>explained, never silent</strong>. Failed tasks are also forwarded so the planner doesn't repeat impossible work.
+      </p>
+    </div>
+    <!-- Card 3 -->
+    <div style="background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:32px 24px;position:relative;overflow:hidden;">
+      <div style="position:absolute;top:0;left:0;right:0;height:4px;background:#7c3aed;"></div>
+      <p style="font-size:28px;margin-bottom:12px;">&#177;</p>
+      <h3 style="font-size:17px;font-weight:700;color:#0f172a;margin-bottom:10px;">Wilson Score Validation</h3>
+      <p style="font-size:12.5px;color:#64748b;line-height:1.6;">
+        Every rate is <strong>classified</strong> (proportion, mean, quantile, ratio) — only proportions get a 95% Wilson interval from the actual denominator. Confidence is <strong>computed, never asked of the model</strong>: widest interval, sanity flags, citation retries, and independent verification query agreement are combined into a deterministic score. <code>&plusmn;10pp+</code> or a verification disagreement drops confidence to low.
+      </p>
+    </div>
+  </div>
+  <div style="margin-top:32px;padding:20px 28px;background:#ccfbf1;border-radius:10px;display:flex;align-items:center;gap:16px;">
+    <span style="font-size:28px;color:#0d9488;">&#10003;</span>
+    <p style="font-size:14px;color:#134e4a;font-weight:500;line-height:1.5;">These are not configuration options — they are <strong>code-enforced by default</strong>. Every DDL, every insight, and every follow-up answer passes through them automatically.</p>
+  </div>
+  <span class="logo-bar">CLICKWRIGHT</span>
+  <span class="slide-number">07</span>
+</div>
+
+<!-- ═══ SLIDE 8: Tech ═══ -->
 <div class="slide s6">
   <p class="label">Built With</p>
   <h2>Production-grade from day one.</h2>
@@ -979,10 +1020,10 @@
     <div class="perf-card"><span class="perf-num">100%</span><p class="perf-label">Numbers traceable to SQL</p></div>
   </div>
   <span class="logo-bar">CLICKWRIGHT</span>
-  <span class="slide-number">07</span>
+  <span class="slide-number">08</span>
 </div>
 
-<!-- ═══ SLIDE 8: What the PM Gets ═══ -->
+<!-- ═══ SLIDE 9: What the PM Gets ═══ -->
 <div class="slide s7">
   <p class="label">What the PM Gets</p>
   <h2>Not dashboards. Answers.</h2>
@@ -1009,10 +1050,10 @@
     </div>
   </div>
   <span class="logo-bar">CLICKWRIGHT</span>
-  <span class="slide-number">08</span>
+  <span class="slide-number">09</span>
 </div>
 
-<!-- ═══ SLIDE 9: Closing ═══ -->
+<!-- ═══ SLIDE 10: Closing ═══ -->
 <div class="slide s8">
   <h2>Spec in. <span>Insight out.</span><br>Every step traced.</h2>
   <p class="closing-sub">Clickwright makes analytics trustworthy by construction — not by hoping the LLM gets it right, but by making it prove that it did.</p>
@@ -1032,7 +1073,7 @@
   </div>
   <p style="margin-top:40px;font-size:16px;color:#2dd4bf;font-weight:700;">Team Shard Spartans</p>
   <p style="margin-top:6px;font-size:13px;color:#94a3b8;font-weight:400;">Biswaranjan Padhy &middot; Wilson Patro &middot; Harshit Singh</p>
-  <span class="slide-number" style="color:#475569">09</span>
+  <span class="slide-number" style="color:#475569">10</span>
 </div>
 
 </body>

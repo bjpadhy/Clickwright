@@ -1,6 +1,6 @@
-# SpecLoop Console
+# Clickwright
 
-Prototype implementation of the `SpecLoop Console` design — a feature spec goes in,
+Prototype implementation of the `Clickwright` design — a feature spec goes in,
 a human-approved ClickHouse schema comes out, and every artifact links back to a
 Langfuse trace.
 
@@ -51,7 +51,7 @@ src/
 │   └── client.ts            # resolves the mock
 ├── mock/
 │   ├── fixtures.ts          # seed data (dashboard tiles, traces, changelog)
-│   └── server.ts            # MockSpecLoopServer: in-memory state + streamed progress
+│   └── server.ts            # MockClickwrightServer: in-memory state + streamed progress
 ├── state/
 │   ├── console.tsx          # client-only state (active screen, filters) + mock store
 │   ├── chat.tsx             # conversations, the streaming turn, saved answers
@@ -110,7 +110,7 @@ deleted.
 
 ### Swapping in the rest of the backend
 
-`SpecLoopApi` in `src/api/types.ts` still fronts Dashboards and Observability, with
+`ClickwrightApi` in `src/api/types.ts` still fronts Dashboards and Observability, with
 the mock implementing it. Each can be cut over the way Instrumentation and Chat were
 — add a client next to `src/api/chat.ts`, then move that screen's state out of
 `ServerState`. `src/mock/fixtures.ts` is imported only by `src/mock/server.ts`, so

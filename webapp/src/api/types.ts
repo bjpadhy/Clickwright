@@ -1,6 +1,6 @@
 /**
  * Domain contract for the still-mocked half of the console: Dashboards and
- * Observability. `SpecLoopApi` is implemented in `src/mock/server.ts`.
+ * Observability. `ClickwrightApi` is implemented in `src/mock/server.ts`.
  *
  * Instrumentation and Chat are not part of this contract — they run against the
  * real backend through `src/api/instrumentation.ts` and `src/api/chat.ts`.
@@ -133,7 +133,7 @@ export interface ApiConfig {
 /** Fired by the server so the shell can surface a toast. */
 export type Notice = { message: string }
 
-export interface SpecLoopApi {
+export interface ClickwrightApi {
   readonly config: ApiConfig
 
   /* reactive store — read with useSyncExternalStore */

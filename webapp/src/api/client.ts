@@ -4,8 +4,8 @@
  * backend via `src/api/instrumentation.ts`.
  */
 
-import type { ApiConfig, SimulationSpeed, SpecLoopApi } from "./types"
-import { MockSpecLoopServer } from "@/mock/server"
+import type { ApiConfig, SimulationSpeed, ClickwrightApi } from "./types"
+import { MockClickwrightServer } from "@/mock/server"
 
 const SPEEDS: SimulationSpeed[] = ["instant", "fast", "realistic"]
 
@@ -19,4 +19,4 @@ function readConfig(): ApiConfig {
   return { speed: speed && SPEEDS.includes(speed) ? speed : "fast" }
 }
 
-export const api: SpecLoopApi = new MockSpecLoopServer(readConfig())
+export const api: ClickwrightApi = new MockClickwrightServer(readConfig())

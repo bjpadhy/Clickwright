@@ -43,7 +43,7 @@ export function NavRail() {
             <Icon name="ti-bolt" size={19} className="text-white" />
           </div>
         </TooltipTrigger>
-        <TooltipContent side="right">SpecLoop — spec → insight · Atlys</TooltipContent>
+        <TooltipContent side="right">Clickwright — spec → insight · Atlys</TooltipContent>
       </Tooltip>
 
       {NAV_ITEMS.map((item) => {

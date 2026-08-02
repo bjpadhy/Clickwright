@@ -15,7 +15,7 @@ import type {
   Notice,
   Series,
   ServerState,
-  SpecLoopApi,
+  ClickwrightApi,
 } from "@/api/types"
 import {
   ANSWERS,
@@ -39,7 +39,7 @@ function clone<T>(value: T): T {
   return structuredClone(value)
 }
 
-export class MockSpecLoopServer implements SpecLoopApi {
+export class MockClickwrightServer implements ClickwrightApi {
   readonly config: ApiConfig
 
   private state: ServerState

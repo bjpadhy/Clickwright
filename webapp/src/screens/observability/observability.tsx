@@ -22,7 +22,7 @@ const CTA: Record<ObsTab, { label: string; icon: string; notice: string }> = {
   traces: {
     label: "Open in Langfuse",
     icon: "ti-external-link",
-    notice: "Opening Langfuse (self-hosted) — project specloop",
+    notice: "Opening Langfuse (self-hosted) — project clickwright",
   },
   stack: {
     label: "Open in ClickStack",

@@ -563,6 +563,29 @@ function shapeFeedback(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * The self-healing loop shared by the JSON-producing steps: run an attempt, and
+ * when it throws feed a readable version of the error into the next attempt's
+ * prompt. Exhaustion is the call site's decision — `onExhausted` throws for a
+ * load-bearing step (plan) and returns a degraded value for an advisory one
+ * (quality gate).
+ */
+export async function retryWithFeedback<T>(
+  attempts: number,
+  run: (feedback: string, attempt: number) => Promise<T>,
+  onExhausted: (feedback: string) => T | Promise<T>,
+): Promise<T> {
+  let feedback = "";
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await run(feedback, attempt);
+    } catch (error) {
+      feedback = shapeFeedback(error);
+    }
+  }
+  return onExhausted(feedback);
+}
+
 /** One entry per column, keeping the WIDEST interval — that is the figure a reader
  * should be most careful with, so it is the one worth reporting. */
 function widestPerColumn(entries: Precision[]): Precision[] {
@@ -635,6 +658,10 @@ function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[
 const NARRATION_ROWS = 24;
 const MAX_SQL_ATTEMPTS = 3;
 const MAX_NARRATE_ATTEMPTS = 3;
+const MAX_PLAN_ATTEMPTS = 3;
+/** Advisory only — exhaustion ships the answer unrevised, so a third call buys
+ * nothing a second one didn't. */
+const MAX_QUALITY_ATTEMPTS = 2;
 
 /**
  * Profile the entire result set whenever it is larger than the narrator can read.
@@ -812,29 +839,41 @@ export async function runAnalytics(
     });
 
     // ── plan ──
-    const plan: Plan = await step(span, "plan", {}, async (planSpan) => {
-      const prompt = await loadPrompt("analytics_plan_tasks", {
-        knowledge: bundle.markdown + prePlanKnowledge,
-        // Planning needs to distinguish dimensions from metrics and spot time
-        // columns. Replace verbose types with short tags: DateTime→[time],
-        // LowCardinality(String)→[dim], numeric types→[num], keep the rest as-is
-        // for anything unusual. Saves ~40% of schema tokens while preserving the
-        // information the planner actually uses to choose tables and dimensions.
-        schemas: [...schemas.values()]
-          .map((line) => line
-            .replace(/ DateTime64?\(\d\)/g, " [time]")
-            .replace(/ LowCardinality\(String\)/g, " [dim]")
-            .replace(/ (UInt\d+|Int\d+|Float\d+)/g, " [num]")
-            .replace(/ Nullable\(([^)]+)\)/g, (_, inner) => ` [${/Int|UInt|Float/.test(inner) ? "num?" : "str?"}]`)
-            .replace(/ String(,|$)/g, " [str]$1")
-            .replace(/ UUID(,|$)/g, " [id]$1"))
-          .join("\n"),
-        history: historyText,
-        question: input.question,
-      });
-      const text = await llm(planSpan, "plan", prompt);
-      return PlanSchema.parse(JSON.parse(stripFences(text)));
-    });
+    // Planning needs to distinguish dimensions from metrics and spot time
+    // columns. Replace verbose types with short tags: DateTime→[time],
+    // LowCardinality(String)→[dim], numeric types→[num], keep the rest as-is
+    // for anything unusual. Saves ~40% of schema tokens while preserving the
+    // information the planner actually uses to choose tables and dimensions.
+    const planSchemas = [...schemas.values()]
+      .map((line) => line
+        .replace(/ DateTime64?\(\d\)/g, " [time]")
+        .replace(/ LowCardinality\(String\)/g, " [dim]")
+        .replace(/ (UInt\d+|Int\d+|Float\d+)/g, " [num]")
+        .replace(/ Nullable\(([^)]+)\)/g, (_, inner) => ` [${/Int|UInt|Float/.test(inner) ? "num?" : "str?"}]`)
+        .replace(/ String(,|$)/g, " [str]$1")
+        .replace(/ UUID(,|$)/g, " [id]$1"))
+      .join("\n");
+    const plan: Plan = await retryWithFeedback(
+      MAX_PLAN_ATTEMPTS,
+      (planFeedback, attempt) =>
+        step(span, `plan_attempt_${attempt}`, { feedback: planFeedback }, async (planSpan) => {
+          const prompt = await loadPrompt("analytics_plan_tasks", {
+            knowledge: bundle.markdown + prePlanKnowledge,
+            schemas: planSchemas,
+            history: historyText,
+            question: input.question,
+            feedback: planFeedback
+              ? `\n# Feedback on your previous attempt — fix this\n${planFeedback}\n`
+              : "",
+          });
+          const text = await llm(planSpan, "plan", prompt);
+          return PlanSchema.parse(JSON.parse(stripFences(text)));
+        }),
+      (planFeedback) => {
+        // Everything downstream needs a plan — this failure is terminal.
+        throw new Error(`planning failed schema checks ${MAX_PLAN_ATTEMPTS} times: ${planFeedback}`);
+      },
+    );
 
     // Surface the plan interpretation so the PM can catch a wrong reading
     // before waiting for SQL results. The chat UI renders this as a brief
@@ -1282,15 +1321,37 @@ export async function runAnalytics(
           links_known_issue: true, honest_confidence: true,
           verdict: "pass" as const, revision_note: "",
         }
-      : await step(span, "quality_gate", {}, async (qSpan) => {
-      const prompt = await loadPrompt("analytics_review_quality", {
-        question: input.question,
-        insight: JSON.stringify(narration),
-        results: resultsText.slice(0, 4000),
-      });
-      const text = await llm(qSpan, "quality", prompt);
-      return QualitySchema.parse(JSON.parse(stripFences(text)));
-    });
+      : await retryWithFeedback(
+          MAX_QUALITY_ATTEMPTS,
+          (qualityFeedback, attempt) =>
+            step(span, `quality_gate_attempt_${attempt}`, { feedback: qualityFeedback }, async (qSpan) => {
+              const prompt = await loadPrompt("analytics_review_quality", {
+                question: input.question,
+                insight: JSON.stringify(narration),
+                results: resultsText.slice(0, 4000),
+                feedback: qualityFeedback
+                  ? `\n# Feedback on your previous attempt — fix this\n${qualityFeedback}\n`
+                  : "",
+              });
+              const text = await llm(qSpan, "quality", prompt);
+              return QualitySchema.parse(JSON.parse(stripFences(text)));
+            }),
+          (qualityFeedback) => {
+            // The gate is advisory: an unusable reviewer must not kill an answer
+            // that already passed schema and citation checks. Ship it unrevised,
+            // and record that the review never happened.
+            emitRunEvent({
+              type: "log",
+              name: "quality_gate_unusable",
+              payload: { reason: qualityFeedback.slice(0, 300) },
+            });
+            return {
+              actionable: true, cites_numbers: true, names_segment: true,
+              links_known_issue: true, honest_confidence: true,
+              verdict: "pass" as const, revision_note: "",
+            };
+          },
+        );
 
     if (quality.verdict === "revise" && quality.revision_note) {
       const preRevision = narration;

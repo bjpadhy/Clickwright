@@ -34,13 +34,13 @@ const PHASES: Array<[RegExp, string]> = [
   [/^analytics$/, ""],
   [/^cache_lookup$/, ""],
   [/^context_load$/, "Reading the knowledge store"],
-  [/^plan$/, "Planning the analysis"],
+  [/^plan/, "Planning the analysis"],
   [/^(task_|sql_attempt)/, "Querying ClickHouse"],
   [/^digest_/, "Analysing every row of the results"],
   [/^sanity_gate$/, "Validating the results"],
   [/^context_lookup$/, "Looking for known issues"],
   [/^narrate/, "Writing the insight"],
-  [/^quality_gate$/, "Reviewing the answer"],
+  [/^quality_gate/, "Reviewing the answer"],
 ];
 
 /** "" means: plumbing, do not surface it in the chat timeline. */

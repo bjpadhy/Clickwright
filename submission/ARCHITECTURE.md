@@ -6,7 +6,7 @@ Clickwright is an agentic analytics pipeline for Atlys. A PM uploads a feature s
 
 ## System Architecture
 
-![System Architecture](docs/architecture-overview.svg)
+![System Architecture](../docs/architecture-overview.svg)
 
 The three agents never call each other directly. All shared state flows through `context_store` in ClickHouse — this makes each agent independently testable and the pipeline recoverable after any failure.
 
@@ -14,7 +14,7 @@ The three agents never call each other directly. All shared state flows through 
 
 ## Pipeline Detail
 
-![Pipeline Detail](docs/pipeline-detail.svg)
+![Pipeline Detail](../docs/pipeline-detail.svg)
 
 ### ① Instrumentation Agent
 
@@ -95,7 +95,7 @@ Every insight passes through multiple deterministic checks before reaching the P
 
 Langfuse is not a bolt-on — it is wired into the core execution primitive that every agent operation passes through. The `step()` function in `core/tracing.ts` wraps every unit of work: it creates a Langfuse span on entry, records output (or error) on exit, and emits SSE events for the live UI. No agent code touches Langfuse directly — all tracing flows through this single function.
 
-![Langfuse Integration](docs/langfuse-integration.svg)
+![Langfuse Integration](../docs/langfuse-integration.svg)
 
 ### How it's wired
 

@@ -53,23 +53,50 @@ const ENTRIES: Entry[] = [
       "denominator and should be re-checked before the number is reported.",
   },
   {
+    entity: "metric:express_payment_completion_rate",
+    change_note:
+      "New: express-vs-standard comparisons need a stage-matched express metric. Without one, asking for the comparison made the agent quietly redenominate express_checkout_conversion_rate onto express_checkout_selected and report 83.0% under a name whose stored definition means 50.7%. Both denominators are legitimate; only sharing a name was not. Measured against the live tables.",
+    definition_md:
+      "**Express payment completion rate** = `uniqExact(application_id)` in " +
+      "`express_payment_confirmed` ÷ `uniqExact(application_id)` in " +
+      "`express_checkout_selected` — of the users who CHOSE express, how many paid.\n\n" +
+      "This is the stage-matched counterpart to `metric:standard_checkout_conversion_rate`: " +
+      "both are denominated on committing to pay (`express_checkout_selected` ≈ " +
+      "`pay_now_clicked`), so they are the pair to use for an express-vs-standard comparison.\n\n" +
+      "**It is a different metric from `metric:express_checkout_conversion_rate`**, which is " +
+      "denominated on `express_checkout_shown` and answers 'of everyone offered express, how " +
+      "many paid'. Do not use one name for the other.\n\n" +
+      "**Measured 2026-08-02:** 836 ÷ 1,007 = **83.0%**. For contrast, " +
+      "`metric:express_checkout_conversion_rate` is 836 ÷ 1,650 = **50.7%**, and the gap " +
+      "between them is express adoption (`metric:express_adoption_rate`), not payment success.",
+  },
+  {
     entity: "guide:conversion_denominators",
     change_note:
-      "New: three defensible conversion denominators exist in this schema and nothing said which to use when, so the same question could be answered three ways without any of them being wrong.",
+      "New: four defensible conversion denominators exist in this schema and nothing said which to use when, so the same question could be answered several ways without any of them being wrong.",
     definition_md:
-      "**Which conversion denominator to use.** This schema supports three, and they are " +
+      "**Which conversion denominator to use.** This schema supports several, and they are " +
       "not interchangeable — picking silently is how two answers to one question end up " +
       "disagreeing.\n\n" +
       "| Question shape | Denominator | Metric |\n" +
       "|---|---|---|\n" +
       "| Headline conversion reported to leadership | sessions (resolves to `application_started`) | `metric:conversion_rate` |\n" +
       "| Funnel / drop-off analysis | users who started an application | `metric:funnel_conversion` |\n" +
-      "| Express vs standard checkout | `pay_now_clicked` applications | `metric:standard_checkout_conversion_rate` |\n\n" +
-      "**Rules.** State the denominator you used in the task question, so the SQL step cannot " +
-      "drift from the plan. Both sides of any comparison must use the same funnel stage. If a " +
-      "figure for this quantity was already reported earlier in the conversation, recompute it " +
-      "the same way — a follow-up that quietly changes basis contradicts what the reader was " +
-      "already told, and they cannot tell which answer was right.",
+      "| Standard checkout performance | `pay_now_clicked` applications | `metric:standard_checkout_conversion_rate` |\n" +
+      "| Express reach — of everyone offered it | `express_checkout_shown` | `metric:express_checkout_conversion_rate` |\n" +
+      "| **Express vs standard, like for like** | `express_checkout_selected` vs `pay_now_clicked` | `metric:express_payment_completion_rate` vs `metric:standard_checkout_conversion_rate` |\n\n" +
+      "**Both sides of a comparison must sit at the same funnel stage** — comparing " +
+      "shown→paid against pay-now→paid charges express for its adoption gap and understates " +
+      "it. Use the like-for-like row for that.\n\n" +
+      "**Never satisfy that by redefining a named metric.** A metric's denominator is fixed " +
+      "by its definition. If a comparison needs a different stage, use the metric that is " +
+      "already defined at that stage, and call it by ITS name — reporting 83.0% as 'express " +
+      "checkout conversion' when that name is defined as 50.7% is a wrong answer even though " +
+      "the arithmetic is right. When both framings are informative, report both and label each.\n\n" +
+      "**State the denominator you used in the task question**, so the SQL step cannot drift " +
+      "from the plan. If a figure for this quantity was already reported earlier in the " +
+      "conversation, recompute it the same way — a follow-up that quietly changes basis " +
+      "contradicts what the reader was already told, and they cannot tell which was right.",
   },
 ];
 

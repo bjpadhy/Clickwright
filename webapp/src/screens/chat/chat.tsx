@@ -161,12 +161,11 @@ export function Chat() {
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter") send()
+                  if (event.key === "Enter" && !streaming) send()
                 }}
                 placeholder={
                   streaming ? "Writing the answer…" : "Ask about the funnel, a feature, a segment…"
                 }
-                disabled={streaming}
                 className="h-auto flex-1 border-none bg-transparent p-0 text-[13.5px] shadow-none focus-visible:border-none focus-visible:ring-0 md:text-[13.5px]"
               />
               <Button

@@ -547,6 +547,7 @@ export async function runInstrumentation(
           `ddl_execution_attempt_${attempt}`,
           { tables: proposal.tables.map((t) => t.name) },
           async () => {
+            // Phase 1: CREATE TABLEs — a failure here is a schema problem.
             const results: LoadedTable[] = [];
             for (const table of proposal.tables) {
               const t0 = Date.now();
@@ -558,37 +559,67 @@ export async function runInstrumentation(
                 payload: { table: table.name, ok: true, ms: Date.now() - t0 },
               });
             }
+
+            // Phase 2: INSERT rows — a failure here is a data/type mismatch, NOT
+            // necessarily a schema design problem. Retry just the load up to 2 times
+            // before falling through to the schema-level retry.
+            const MAX_LOAD_RETRIES = 2;
             for (const table of proposal.tables) {
-              const t0 = Date.now();
-              const records = groups.get(table.event) ?? [];
-              const flat = records.map(flattenRow);
-              for (let i = 0; i < flat.length; i += 5000) {
-                await insert(table.name, flat.slice(i, i + 5000));
+              let loadError: unknown = null;
+              for (let loadTry = 1; loadTry <= MAX_LOAD_RETRIES; loadTry++) {
+                try {
+                  const t0 = Date.now();
+                  const records = groups.get(table.event) ?? [];
+                  const flat = records.map(flattenRow);
+                  if (loadTry > 1) {
+                    // Truncate before retry — clear any partial insert from the
+                    // previous attempt so the row count matches after reload.
+                    await command(`TRUNCATE TABLE IF EXISTS ${table.name}`);
+                  }
+                  for (let i = 0; i < flat.length; i += 5000) {
+                    await insert(table.name, flat.slice(i, i + 5000));
+                  }
+                  const loadedCount = await rowCount(table.name);
+                  emitRunEvent({
+                    type: "log",
+                    name: "rows_loaded",
+                    payload: {
+                      table: table.name,
+                      rows: loadedCount,
+                      expected: records.length,
+                      ok: loadedCount === records.length,
+                      ms: Date.now() - t0,
+                      loadAttempt: loadTry,
+                    },
+                  });
+                  if (loadedCount !== records.length) {
+                    throw new Error(
+                      `Row count mismatch for ${table.name}: file has ${records.length}, table has ${loadedCount}`,
+                    );
+                  }
+                  results.push({
+                    name: table.name,
+                    event: table.event,
+                    purpose: table.purpose,
+                    rowsInFile: records.length,
+                    rowsLoaded: loadedCount,
+                  });
+                  loadError = null;
+                  break;
+                } catch (err) {
+                  loadError = err;
+                  const msg = err instanceof Error ? err.message : String(err);
+                  // Type mismatch errors indicate a schema problem — don't retry
+                  // the load, let it fall through to schema redesign.
+                  if (/type mismatch|cannot parse|cannot convert/i.test(msg)) break;
+                  emitRunEvent({
+                    type: "log",
+                    name: "load_retry",
+                    payload: { table: table.name, attempt: loadTry, error: msg.slice(0, 200) },
+                  });
+                }
               }
-              const loadedCount = await rowCount(table.name);
-              emitRunEvent({
-                type: "log",
-                name: "rows_loaded",
-                payload: {
-                  table: table.name,
-                  rows: loadedCount,
-                  expected: records.length,
-                  ok: loadedCount === records.length,
-                  ms: Date.now() - t0,
-                },
-              });
-              if (loadedCount !== records.length) {
-                throw new Error(
-                  `Row count mismatch for ${table.name}: file has ${records.length}, table has ${loadedCount}`,
-                );
-              }
-              results.push({
-                name: table.name,
-                event: table.event,
-                purpose: table.purpose,
-                rowsInFile: records.length,
-                rowsLoaded: loadedCount,
-              });
+              if (loadError) throw loadError;
             }
             emitRunEvent({
               type: "log",
@@ -615,9 +646,6 @@ export async function runInstrumentation(
           tableEntries: loaded.map((t) => {
             const plan = tablePlans.get(t.event);
             const executed = proposal.tables.find((x) => x.name === t.name);
-            // Document the schema that RAN, not the baseline: the designer is told
-            // to reorder the key for pruning, so the baseline's join key and
-            // ordering would be wrong in the store the analytics agent reads.
             if (plan && executed) {
               const orderBy = /ORDER BY \(([^)]+)\)/i.exec(executed.ddl)?.[1];
               if (orderBy) {
@@ -635,12 +663,18 @@ export async function runInstrumentation(
           }),
         };
       } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        // Type-mismatch errors mean the schema is wrong — drop tables and
+        // redesign. Transient/load errors should not trigger a full redesign.
+        const isSchemaError = /type mismatch|cannot parse|cannot convert|syntax error|unknown column|no such column/i.test(msg);
         for (const name of created.reverse()) {
           await command(`DROP TABLE IF EXISTS ${name}`).catch(() => {});
         }
         execAttempts++;
         if (execAttempts >= MAX_EXEC_ATTEMPTS) throw error;
-        feedback = `Executing your DDL (or loading data into it) failed with this ClickHouse error — fix the DDL accordingly:\n${error instanceof Error ? error.message : String(error)}`;
+        feedback = isSchemaError
+          ? `Your DDL has a schema error — fix the DDL accordingly:\n${msg}`
+          : `Loading data into the tables failed (the DDL itself may be fine):\n${msg}`;
       }
     }
 

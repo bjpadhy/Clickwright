@@ -12,6 +12,9 @@ import type { FieldProfile, NdjsonProfile } from "./profiler.js";
 const IDENTIFIER_RE =
   /(^|_)(id|ids|uuid|guid|token|hash|key)$|^(user_id|application_id|app_session_id|share_id|group_id|client_ip)$/i;
 
+/** Matches 32-char hex strings (MD5-like event IDs). */
+const HEX_ID_RE = /^[0-9a-f]{32}$/i;
+
 const MONEY_RE = /(amount|value|price|revenue|fee|discount|total|balance)/i;
 const LOW_CARDINALITY_MAX = 1000;
 
@@ -19,6 +22,7 @@ export interface ColumnPlan {
   name: string;
   type: string;
   comment: string;
+  codec?: string;
 }
 
 export interface TablePlan {
@@ -42,8 +46,9 @@ function isIdentifier(field: string): boolean {
 }
 
 /** Pick the narrowest correct ClickHouse type from the measured profile. */
-export function chooseType(f: FieldProfile): { type: string; note?: string } {
-  if (f.inferredType === "timestamp") return { type: "DateTime64(3)" };
+export function chooseType(f: FieldProfile): { type: string; note?: string; codec?: string } {
+  if (f.inferredType === "timestamp")
+    return { type: "DateTime64(3)", codec: "CODEC(Delta(8), ZSTD(1))" };
   if (f.inferredType === "boolean") return { type: "UInt8", note: `${f.field}: boolean as 0/1` };
   if (f.inferredType === "number") {
     const max = f.numericRange?.max ?? 0;
@@ -57,25 +62,36 @@ export function chooseType(f: FieldProfile): { type: string; note?: string } {
       MONEY_RE.test(f.field) ||
       looksContinuous;
     if (fractional) {
+      // Decimal64(2) for money — Float64 causes rounding errors on aggregation.
+      // Float64 for other continuous values (latencies, scores, percentages).
       return MONEY_RE.test(f.field)
-        ? { type: "Float64", note: `${f.field}: monetary, Float64` }
+        ? { type: "Decimal64(2)", note: `${f.field}: monetary, Decimal64(2)` }
         : { type: "Float64" };
     }
-    if (min >= 0 && max < 256) return { type: "UInt8", note: `${f.field}: max ${max} → UInt8` };
-    if (min >= 0 && max < 65536) return { type: "UInt16", note: `${f.field}: max ${max} → UInt16` };
-    if (min >= 0 && max < 4294967296) return { type: "UInt32", note: `${f.field}: max ${max} → UInt32` };
-    return { type: "Int64" };
+    const intCodec = "CODEC(T64, ZSTD(1))";
+    if (min >= 0 && max < 256) return { type: "UInt8", note: `${f.field}: max ${max} → UInt8`, codec: intCodec };
+    if (min >= 0 && max < 65536) return { type: "UInt16", note: `${f.field}: max ${max} → UInt16`, codec: intCodec };
+    if (min >= 0 && max < 4294967296) return { type: "UInt32", note: `${f.field}: max ${max} → UInt32`, codec: intCodec };
+    return { type: "Int64", codec: intCodec };
   }
-  if (f.inferredType === "json") return { type: "String" }; // already flattened; leftovers as text
-  // strings
-  if (!isIdentifier(f.field) && f.distinctCount < LOW_CARDINALITY_MAX) {
+  if (f.inferredType === "json") return { type: "String", codec: "CODEC(ZSTD(1))" };
+  // strings — detect 32-char hex IDs (MD5-like event IDs) for FixedString
+  if (isIdentifier(f.field)) {
+    const allHex = f.sampleValues.length > 0 && f.sampleValues.every((v) => HEX_ID_RE.test(v));
+    if (allHex && f.maxLength === 32) {
+      return { type: "FixedString(32)", note: `${f.field}: 32-char hex → FixedString(32)`, codec: "CODEC(ZSTD(1))" };
+    }
+    return { type: f.nullRate > 0 ? "String DEFAULT ''" : "String", codec: "CODEC(ZSTD(1))" };
+  }
+  if (f.distinctCount < LOW_CARDINALITY_MAX) {
     const base = "LowCardinality(String)";
     return {
       type: f.nullRate > 0 ? `${base} DEFAULT ''` : base,
       note: `${f.field}: ${f.distinctCount} distinct → LowCardinality`,
+      // LowCardinality is already dictionary-encoded — no extra codec needed
     };
   }
-  return { type: f.nullRate > 0 ? "String DEFAULT ''" : "String" };
+  return { type: f.nullRate > 0 ? "String DEFAULT ''" : "String", codec: "CODEC(ZSTD(1))" };
 }
 
 function columnComment(f: FieldProfile, type: string): string {
@@ -93,28 +109,58 @@ function columnComment(f: FieldProfile, type: string): string {
   return bits.join("; ") || "measured from the spec sample";
 }
 
-/** Ordering key: the join key that is actually always present, then time. */
+/** Common filter/segment dimensions PMs query by — low cardinality, so they
+ *  should lead the ordering key for granule pruning. */
+const DIMENSION_CANDIDATES = ["device_type", "os", "geoip_country_code", "destination"];
+
+/** Ordering key: low-cardinality dimensions first (for pruning), then join key,
+ *  then timestamp. This follows ClickHouse's `schema-pk-cardinality-order` rule:
+ *  low-cardinality leading columns let whole granules be skipped. */
 function chooseOrderBy(profile: NdjsonProfile): { orderBy: string[]; reason: string } {
   const by = new Map(profile.fields.map((f) => [f.field, f]));
   const hasTs = by.has("timestamp");
-  const candidates = ["application_id", "share_id", "group_id", "user_id"];
-  for (const c of candidates) {
+  const key: string[] = [];
+  const reasons: string[] = [];
+
+  // 1. Lead with the best low-cardinality dimension present (for granule pruning)
+  const dims = DIMENSION_CANDIDATES
+    .filter((d) => by.has(d) && by.get(d)!.nullRate === 0)
+    .sort((a, b) => (by.get(a)!.distinctCount) - (by.get(b)!.distinctCount));
+  if (dims[0]) {
+    key.push(dims[0]);
+    reasons.push(`${dims[0]} (${by.get(dims[0])!.distinctCount} distinct) leads for pruning`);
+  }
+
+  // 2. Then the join key
+  const joinCandidates = ["application_id", "share_id", "group_id", "user_id"];
+  for (const c of joinCandidates) {
     const f = by.get(c);
     if (f && f.nullRate === 0) {
-      return {
-        orderBy: hasTs ? [c, "timestamp"] : [c],
-        reason: `${c} present on 100% of rows (${profile.totalRows}/${profile.totalRows}) so it leads, then timestamp`,
-      };
+      key.push(c);
+      reasons.push(`${c} is the join key (0% null)`);
+      break;
     }
   }
-  // no reliable join key — fall back to any id-ish field, else time only
-  const anyId = profile.fields.find((f) => isIdentifier(f.field) && f.nullRate === 0);
-  if (anyId)
-    return {
-      orderBy: hasTs ? [anyId.field, "timestamp"] : [anyId.field],
-      reason: `no join key is always present; ${anyId.field} (0% null) leads instead`,
-    };
-  return { orderBy: hasTs ? ["timestamp"] : [], reason: "no always-present key; ordered by time only" };
+
+  // 3. Then timestamp
+  if (hasTs) {
+    key.push("timestamp");
+    reasons.push("timestamp for range scans");
+  }
+
+  // Fallback: if no dimension or join key found
+  if (key.length === 0) {
+    const anyId = profile.fields.find((f) => isIdentifier(f.field) && f.nullRate === 0);
+    if (anyId) {
+      return {
+        orderBy: hasTs ? [anyId.field, "timestamp"] : [anyId.field],
+        reason: `no standard key; ${anyId.field} (0% null) leads instead`,
+      };
+    }
+    return { orderBy: hasTs ? ["timestamp"] : [], reason: "no always-present key; ordered by time only" };
+  }
+
+  return { orderBy: key, reason: reasons.join("; ") };
 }
 
 export function planTable(event: string, profile: NdjsonProfile): TablePlan {
@@ -124,8 +170,8 @@ export function planTable(event: string, profile: NdjsonProfile): TablePlan {
   const notable: string[] = [];
 
   for (const f of profile.fields) {
-    const { type, note } = chooseType(f);
-    columns.push({ name: f.field, type, comment: columnComment(f, type) });
+    const { type, note, codec } = chooseType(f);
+    columns.push({ name: f.field, type, comment: columnComment(f, type), ...(codec ? { codec } : {}) });
     if (type.startsWith("LowCardinality")) lowCardinality.push(f.field);
     if (type.includes("DEFAULT ''")) nullableDefaults.push(f.field);
     if (note) notable.push(note);
@@ -148,15 +194,22 @@ const q = (s: string) => `'${s.replaceAll("'", "''")}'`;
 
 export function renderCreateTable(plan: TablePlan, purpose: string): string {
   const cols = plan.columns
-    .map((c) => `  \`${c.name}\` ${c.type} COMMENT ${q(c.comment)}`)
+    .map((c) => {
+      const parts = [`  \`${c.name}\` ${c.type}`];
+      parts.push(`COMMENT ${q(c.comment)}`);
+      if (c.codec) parts.push(c.codec);
+      return parts.join(" ");
+    })
     .join(",\n");
-  const parts = [
+  const tableParts = [
     `CREATE TABLE ${plan.name} (\n${cols}\n) ENGINE = MergeTree`,
     plan.partitionBy ? `PARTITION BY ${plan.partitionBy}` : "",
     plan.orderBy.length ? `ORDER BY (${plan.orderBy.join(", ")})` : "ORDER BY tuple()",
+    // Default 1-year TTL on event tables — prevents unbounded growth.
+    plan.partitionBy ? "TTL toDateTime(timestamp) + INTERVAL 1 YEAR" : "",
     `COMMENT ${q(purpose)}`,
   ].filter(Boolean);
-  return parts.join("\n");
+  return tableParts.join("\n");
 }
 
 /** Rationale assembled from measurements — no model needed, always accurate. */

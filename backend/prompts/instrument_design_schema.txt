@@ -49,13 +49,15 @@ almost nothing. Put the join key and timestamp after. Justify from measured dist
 counts.
 
 **Types** — narrowest correct type from the measured range:
-- `Enum8('a' = 1, ...)` when a string has ≤ 15 measured distinct values that are a
-  closed set (status, channel, platform, method). Enum8 is one byte and validates on
-  insert. Use `LowCardinality(String)` for repeated strings that are open-ended
-  (city, app_version, destination) — dictionary encoding pays off well below the
-  ~10K-distinct ceiling (`schema-types-lowcardinality`).
+- Prefer `LowCardinality(String)` over `Enum8` for ALL categorical columns. Enum8
+  validates on insert, which means a new value in future data causes a HARD INSERT
+  FAILURE — unrecoverable without an ALTER. LowCardinality(String) is nearly as
+  compact (dictionary-encoded, ~1 byte per value for small sets) and handles new
+  values gracefully. Use it for status, channel, platform, method, and any string
+  with fewer than ~10K distinct values (`schema-types-lowcardinality`).
 - Integers: UInt8 < 256, UInt16 < 65536, UInt32 < 4.29e9, else Int64/UInt64.
-- Money and decimals: Float64. Timestamps: `DateTime64(3, 'UTC')`.
+- Money: `Decimal64(2)` — Float64 causes rounding errors on aggregation.
+  Other decimals (latency, scores): Float64. Timestamps: `DateTime64(3, 'UTC')`.
 - Identifiers (user_id, application_id, share_id, uuid-like): plain String, never
   LowCardinality — high cardinality makes the dictionary a liability.
 - Any field with a measured null/empty rate: `DEFAULT ''` (or 0), never Nullable —
@@ -100,11 +102,11 @@ should produce:
 CREATE TABLE example_event (
   `timestamp` DateTime64(3, 'UTC') COMMENT 'event time, ms precision' CODEC(Delta(8), ZSTD(1)),
   `os` LowCardinality(String) DEFAULT '' COMMENT 'empty on ~7% of rows, bucket as unknown',
-  `status` Enum8('submitted' = 1, 'processing' = 2, 'approved' = 3) COMMENT 'application status when the event fired',
+  `status` LowCardinality(String) COMMENT 'application status when the event fired (3 values)',
   `channel` LowCardinality(String) COMMENT 'share channel: whatsapp, copy, email, sms',
   `user_id` String COMMENT 'traveller id, 28 chars, joins every table' CODEC(ZSTD(1)),
   `latency_ms` UInt16 COMMENT 'client-measured latency in milliseconds' CODEC(T64, ZSTD(1)),
-  `amount` Float64 COMMENT 'value in the accompanying currency, never summed across currencies'
+  `amount` Decimal64(2) COMMENT 'value in the accompanying currency, never summed across currencies'
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (status, channel, user_id, timestamp)
@@ -127,8 +129,8 @@ Verify all of these against your own DDL before you answer:
 3. Exactly one CREATE TABLE statement; nothing follows it.
 4. Every single quote inside a comment is doubled.
 4b. Every column reads `Type [DEFAULT] COMMENT CODEC` — never CODEC before COMMENT.
-5. Timestamps carry Delta+ZSTD; integer measures carry T64+ZSTD; Enum8 and
-   LowCardinality columns carry no codec.
+5. Timestamps carry Delta+ZSTD; integer measures carry T64+ZSTD; identifiers
+   carry ZSTD(1); LowCardinality columns carry no codec.
 6. Every ordering-key column exists, and the low-cardinality ones come first.
 </self_check>
 

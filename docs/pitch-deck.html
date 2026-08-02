@@ -25,11 +25,19 @@
 
   html { font-family: 'Inter', system-ui, sans-serif; }
 
+  @page {
+    size: 1280px 720px landscape;
+    margin: 0;
+  }
+
   @media print {
-    .slide { page-break-after: always; page-break-inside: avoid; }
+    html, body { width: 1280px; margin: 0; padding: 0; }
+    .slide { page-break-after: always; page-break-inside: avoid; box-shadow: none; border-radius: 0; margin: 0; }
     .slide:last-child { page-break-after: auto; }
     body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   }
+
+  body { display: flex; flex-direction: column; align-items: center; }
 
   .slide {
     width: 1280px;

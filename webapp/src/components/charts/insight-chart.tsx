@@ -67,23 +67,32 @@ export function InsightChart({
   // there is a spread worth pointing at.
   const lowest = values.length > 2 && max > 0 && min < max * 0.75 ? Math.min(...values) : null
 
+  // When there are many bars with long labels, rotate them to avoid overlap.
+  const needsRotation = data.length > 5 || data.some((d) => d.label.length > 12)
+  const xAxisHeight = needsRotation ? 70 : 22
+  const chartHeight = Math.round((150 + (needsRotation ? 50 : 0)) * scale)
+
+  const xTickProps = needsRotation
+    ? { fontSize: 9.5, fill: "var(--color-zinc-500)", textAnchor: "end" as const, angle: -35 }
+    : { fontSize: 10.5, fill: "var(--color-zinc-500)" }
+
   return (
     <ChartContainer
       config={config}
       className="aspect-auto w-full"
-      style={{ height: Math.round(150 * scale) }}
+      style={{ height: chartHeight }}
     >
       {chart.kind === "line" ? (
-        <LineChart data={data} margin={{ top: 20, left: 4, right: 8 }}>
+        <LineChart data={data} margin={{ top: 20, left: 4, right: 8, bottom: needsRotation ? 10 : 0 }}>
           <YAxis hide domain={[min < 0 ? min * 1.1 : 0, max * 1.15]} />
           <XAxis
             dataKey="label"
             axisLine={false}
             tickLine={false}
             tickMargin={6}
-            height={22}
+            height={xAxisHeight}
             interval="preserveStartEnd"
-            tick={{ fontSize: 10.5, fill: "var(--color-zinc-500)" }}
+            tick={xTickProps}
           />
           <Line
             dataKey="value"
@@ -105,16 +114,16 @@ export function InsightChart({
           </Line>
         </LineChart>
       ) : (
-        <BarChart data={data} margin={{ top: 20 }} barCategoryGap="26%">
+        <BarChart data={data} margin={{ top: 20, bottom: needsRotation ? 10 : 0 }} barCategoryGap="26%">
           <YAxis hide domain={[min < 0 ? min * 1.1 : 0, max * 1.15]} />
           <XAxis
             dataKey="label"
             axisLine={false}
             tickLine={false}
             tickMargin={6}
-            height={22}
+            height={xAxisHeight}
             interval={0}
-            tick={{ fontSize: 10.5, fill: "var(--color-zinc-500)" }}
+            tick={xTickProps}
           />
           <Bar
             dataKey="value"

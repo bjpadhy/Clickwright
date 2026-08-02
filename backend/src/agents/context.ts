@@ -285,21 +285,29 @@ export async function updateContext(
     // The updater must know what already exists (to avoid duplicates) but only
     // needs FULL text of the entries it might revise — conventions and known
     // issues. Everything else goes in as one-liners.
-    // Two context bundles — one per half. The feature half only needs to see
-    // existing metrics/funnels/specs (to avoid duplicates) and table names.
-    // Conventions are irrelevant to it. This halves its prompt size.
-    const [current, featureContext] = await Promise.all([
-      getContext({
-        include: ["*"],
-        brief: ["table", "metric", "funnel", "entity", "spec", "overview", "guide"],
-        require: ["convention:envelope", "convention:data_hygiene"],
-      }),
-      getContext({
-        core: [],
-        include: ["metric", "funnel", "spec", "entity"],
-        brief: ["metric", "funnel", "spec", "entity"],
-      }),
-    ]);
+    // The feature half needs to see existing entries to avoid duplicates, but
+    // conventions in FULL are irrelevant to it (it never emits conventions).
+    // Brief everything for the feature half — smaller prompt, same awareness.
+    const current = await getContext({
+      include: ["*"],
+      brief: ["table", "metric", "funnel", "entity", "spec", "overview", "guide"],
+      require: ["convention:envelope", "convention:data_hygiene"],
+    });
+    // Feature half context: same entries but ALL categories are brief (including
+    // conventions). This preserves the overview and structure the LLM needs to
+    // write a meaningful spec summary while cutting convention prose.
+    const featureContextMd = current.entries
+      .map((e) => {
+        const cat = e.entity.split(":")[0] ?? "";
+        // Conventions → one-liner only; everything else → already brief from current
+        if (cat === "convention" || cat === "known_issue" || cat === "join_map" || cat === "guide") {
+          const first = e.definition_md.replace(/\n+/g, " ").replace(/\*\*/g, "").trim();
+          const m = /^(.{0,160}?[.;])\s/.exec(first);
+          return `- ${e.entity} v${e.version}: ${(m?.[1] ?? first.slice(0, 160)).trim()}`;
+        }
+        return `- ${e.entity} v${e.version}: ${e.definition_md.split("\n")[0]?.slice(0, 160) ?? ""}`;
+      })
+      .join("\n");
     const existingEntities = new Set(current.entries.map((e) => e.entity));
     const createdTables = new Set(input.instrumentation.tables.map((t) => t.name));
 
@@ -368,7 +376,7 @@ export async function updateContext(
 
             const [feature, conventions] = await Promise.all([
               // Feature half: small context (just existing metrics/specs/entities)
-              half(FEATURE_SCOPE, "context_write_feature", featureContext.markdown),
+              half(FEATURE_SCOPE, "context_write_feature", featureContextMd),
               needsConventionReview
                 // Conventions half: full context (needs convention text to check contradictions)
                 ? half(CONVENTION_SCOPE, "context_write_conventions", current.markdown)

@@ -146,3 +146,4 @@ vite.config.ts.timestamp-*
 out/
 *.ndjson.tmp
 uploads/
+pm_questions/

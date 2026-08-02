@@ -173,7 +173,7 @@ const ProposedEntrySchema = z.object({
     .regex(
       /^(table|spec|metric|funnel|entity|convention|known_issue):[a-z0-9_]+$/i,
     ),
-  definition_md: z.string().min(20).max(1800, "definition_md must be <= 1800 chars — be precise, not exhaustive"),
+  definition_md: z.string().min(20).transform((s) => s.slice(0, 2400)),
   change_note: z.string().min(5).max(200, "change_note must be one clause <= 200 chars"),
 });
 

@@ -1,5 +1,8 @@
 # Shard Spartans
 
+## Hosted URL
+https://shard-spartans.best/
+
 ## Track
 
 Atlys

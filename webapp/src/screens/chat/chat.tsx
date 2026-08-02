@@ -5,9 +5,11 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Icon, Spinner } from "@/components/ui-kit/icon"
 import { Panel } from "@/components/ui-kit/panel"
+import { capsuleButton } from "@/components/ui-kit/styles"
 import { useChat } from "@/state/chat"
 import { AgentSteps } from "./agent-steps"
 import { ConversationList } from "./conversation-list"
+import { ConversationPdf } from "./conversation-pdf"
 import { InsightCard } from "./insight-card"
 
 /** Shown when no spec has been instrumented yet, so `/api/suggestions` is empty. */
@@ -34,6 +36,10 @@ export function Chat() {
     send,
     stepLog,
   } = useChat()
+
+  // Mounted only while an export is in flight — it renders the whole
+  // conversation off-screen and opens the print dialog.
+  const [exporting, setExporting] = React.useState(false)
 
   const threadRef = React.useRef<HTMLDivElement>(null)
   React.useEffect(() => {
@@ -73,6 +79,20 @@ export function Chat() {
               <Icon name="ti-plug-connected-x" size={13} />
               backend unreachable — {offline}
             </span>
+          ) : null}
+          {messages.length > 0 ? (
+            <Button
+              variant="outline"
+              // Exporting mid-answer would print a turn that is still being
+              // written, so the button waits for the stream to finish.
+              disabled={exporting || streaming || loadingMessages}
+              onClick={() => setExporting(true)}
+              title="Export this conversation as a PDF"
+              className={capsuleButton}
+            >
+              {exporting ? <Spinner size={12} /> : <Icon name="ti-file-type-pdf" size={13} />}
+              {exporting ? "Preparing…" : "Export PDF"}
+            </Button>
           ) : null}
         </header>
 
@@ -184,6 +204,15 @@ export function Chat() {
           </div>
         </div>
       </div>
+
+      {exporting ? (
+        <ConversationPdf
+          title={active?.title ?? "Conversation"}
+          messages={messages}
+          contextSummary={contextSummary}
+          onDone={() => setExporting(false)}
+        />
+      ) : null}
     </section>
   )
 }

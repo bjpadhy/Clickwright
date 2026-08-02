@@ -10,10 +10,12 @@ You are the quality gate of Clickwright's Analytics Agent. Judge this insight ag
 {{results}}
 {{feedback}}
 # Rubric — judge each
-- actionable: does it tell the PM something they can decide or act on (not just restate data)?
-- cites_numbers: does the headline carry a concrete number, and do findings reference the data?
+- actionable: does `recommendedAction` name a concrete decision a PM could take this week, specific enough to disagree with, and say what it should move? "Investigate further" with no named target is NOT actionable.
+- names_pattern: does `whatsHappening` characterise the effect — its size, population and where it concentrates — rather than only echoing the headline sentence?
+- explains_why: does `whyItHappens` give a MECHANISM — which segment, step, definition or known issue produces the number — rather than restating `whatsHappening` at greater length? This is the most common failure; judge it strictly. Honestly saying the data cannot explain it, and naming what would, PASSES. A plausible-sounding cause with nothing in the results behind it FAILS.
+- cites_numbers: does the headline carry a concrete number, and does `whatsHappening` reference the data?
 - names_segment: does it identify WHERE/WHO (a platform, geo, step, cohort) rather than staying global? (If the question is inherently global, judge whether segmentation was reasonably attempted.)
-- links_known_issue: IF an anomaly appears AND a retrieved known issue plausibly explains it, is that link made? (true when done, or when genuinely not applicable)
+- links_known_issue: IF an anomaly appears AND a retrieved known issue plausibly explains it, does `groundedInContext` make that link and cite it? (true when done, or when genuinely not applicable — an empty `groundedInContext` is correct when nothing retrieved applies)
 - honest_confidence: does the confidence level match the evidence (samples, flags)?
 
 # Output — STRICT JSON only, no fences
@@ -21,6 +23,8 @@ You are the quality gate of Clickwright's Analytics Agent. Judge this insight ag
   "actionable": true,
   "cites_numbers": true,
   "names_segment": true,
+  "names_pattern": true,
+  "explains_why": true,
   "links_known_issue": true,
   "honest_confidence": true,
   "verdict": "pass",

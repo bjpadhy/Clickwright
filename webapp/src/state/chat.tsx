@@ -20,7 +20,6 @@ import {
   type ChatEvent,
   type ChatMessage,
   type ConversationSummary,
-  type Insight,
   type Suggestion,
 } from "@/api/chat"
 import { useConsole } from "@/state/console"
@@ -65,7 +64,6 @@ interface ChatValue {
 
   /** step logs of answers watched this session, keyed `<convId>#<messageIndex>` */
   stepLog: Record<string, ChatEvent[]>
-  saveToDashboard: (insight: Insight, taskId: string) => void
 }
 
 const ChatContext = React.createContext<ChatValue | null>(null)
@@ -365,26 +363,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [ask, goto, streaming]
   )
 
-  const saveToDashboard = React.useCallback((insight: Insight, taskId: string) => {
-    const source = insight.sql.find((entry) => entry.task === taskId) ?? insight.sql[0]
-    if (!source?.query) {
-      toast.error("This insight has no query to save")
-      return
-    }
-    void chat
-      .saveToDashboard({
-        title: insight.chart?.title ?? source.title,
-        sql: source.query,
-        chartKind: insight.chart?.kind ?? "bar",
-        meta: {
-          headline: insight.headline,
-          contextVersion: insight.contextVersion,
-          ...(insight.chart?.valueFormat ? { valueFormat: insight.chart.valueFormat } : {}),
-        },
-      })
-      .then(() => toast.success("Saved — the board re-runs this SQL on every load"))
-      .catch((error: unknown) => toast.error(message(error)))
-  }, [])
 
   const value: ChatValue = {
     conversations,
@@ -406,7 +384,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     remove,
     askAbout,
     stepLog,
-    saveToDashboard,
   }
 
   return <ChatContext value={value}>{children}</ChatContext>

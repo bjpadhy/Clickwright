@@ -1,8 +1,8 @@
 /**
  * Instrumentation runs and the context store, as specified in `backend/API.md`.
  *
- * Chat talks to the same backend through `src/api/chat.ts`; Dashboards and
- * Observability are still served by the in-memory mock in `src/mock`.
+ * Chat and Changelog talk to the same backend through `src/api/chat.ts` and
+ * `src/api/changelog.ts`.
  */
 
 import { post, request } from "./http"

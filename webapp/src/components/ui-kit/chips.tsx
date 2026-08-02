@@ -46,7 +46,7 @@ export function MonoChip({
   )
 }
 
-/** Clickable `tr_xx_1234` capsule that jumps to the trace in Observability. */
+/** Clickable `tr_xx_1234` capsule that opens the trace in Langfuse. */
 export function TraceChip({
   traceId,
   className,

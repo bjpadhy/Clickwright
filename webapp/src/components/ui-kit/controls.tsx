@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { TabsList, TabsTrigger } from "@/components/ui/tabs"
 
-/* ── Screen-level segmented control (Observability tabs) ───────────────── */
+/* ── Screen-level segmented control ────────────────────────────────────── */
 
 export function SegmentedTabsList({
   className,

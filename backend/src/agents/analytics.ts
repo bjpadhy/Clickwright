@@ -88,9 +88,22 @@ export function establishedFigures(insight: Insight): string {
   return `${figures.join("; ")}${tables.length ? ` — computed from ${tables.slice(0, 6).join(", ")}` : ""}`;
 }
 
+/**
+ * Bump whenever the shape of an answer changes. Cached entries hold whole
+ * insights, so without this a repeat question replays an answer built to the old
+ * contract and the change looks like it never shipped. Entries under a retired
+ * version are simply never read again, and the 30-day TTL clears them.
+ *
+ * v3 — sections: whatsHappening, whyItHappens, evidence{}, groundedInContext,
+ *      recommendedAction, replacing the tagged `findings` list.
+ */
+const INSIGHT_FORMAT_VERSION = "v3";
+
 const cacheKey = (question: string, contextKey: string, historyDigest = "") =>
   createHash("sha256")
-    .update(`${question.trim().toLowerCase().replace(/\s+/g, " ")}::${contextKey}::${historyDigest}`)
+    .update(
+      `${INSIGHT_FORMAT_VERSION}::${question.trim().toLowerCase().replace(/\s+/g, " ")}::${contextKey}::${historyDigest}`,
+    )
     .digest("hex")
     .slice(0, 32);
 
@@ -110,26 +123,42 @@ async function readCache(key: string): Promise<Insight | null> {
 
 // ── output contract (mirrors backend/API.md `Insight`) ──────────
 
+export interface InsightChart {
+  kind: "bar" | "line";
+  series: Array<{ label: string; value: number }>;
+  sourceTask: string;
+  /** How to render `value` — derived in code, never asked of the model. */
+  valueFormat?: string | undefined;
+}
+
+export interface InsightTable {
+  columns: string[];
+  rows: Array<Array<string | number>>;
+  sourceTask: string;
+  /** Per-column render hint, parallel to `columns`. */
+  columnFormats?: string[] | undefined;
+}
+
 export interface Insight {
   headline: string;
-  findings: Array<{ tag: "driver" | "segment" | "caveat" | "known_issue"; text: string }>;
-  chart: null | {
+  /** The effect, in numbers. */
+  whatsHappening: string;
+  /** The mechanism behind it. */
+  whyItHappens: string;
+  /** The visual, and what basis it was computed on. */
+  evidence: {
     title: string;
-    kind: "bar" | "line";
-    series: Array<{ label: string; value: number }>;
-    sourceTask: string;
-    /** How to render `value` — derived in code, never asked of the model. */
-    valueFormat?: string | undefined;
+    chart: InsightChart | null;
+    segmentTable: InsightTable | null;
   };
-  segmentTable: null | {
-    columns: string[];
-    rows: Array<Array<string | number>>;
-    sourceTask: string;
-    /** Per-column render hint, parallel to `columns`. */
-    columnFormats?: string[] | undefined;
-  };
-  /** COMPUTED from measured precision and checks — never the model's opinion. */
-  confidence: { value: "high" | "medium" | "low"; note: string };
+  /** Retrieved knowledge that bears on the answer; "" when none applies. */
+  groundedInContext: string;
+  /** The decision this implies, and what it should move. */
+  recommendedAction: string;
+  /** COMPUTED from measured precision and checks — never the model's opinion.
+   * `score` is the same judgement as `value` on a 0–1 scale, so the UI can show
+   * a bar; it is derived from the same measurements, not an extra opinion. */
+  confidence: { value: "high" | "medium" | "low"; score: number; note: string };
   /** Per-figure 95% bounds, or a stated reason none could be computed. */
   precision: Precision[];
   /** Result of recomputing a figure with an independently written query. */
@@ -180,42 +209,57 @@ const PlanSchema = z.object({
 });
 type Plan = z.infer<typeof PlanSchema>;
 
+/**
+ * The answer, in the order a PM reads it: what is happening, why it happens, the
+ * evidence, what the context store already knew, and what to do.
+ *
+ * Each section is its own key rather than an entry in a tagged `findings` list,
+ * because a list lets an answer satisfy the schema while never saying why — six
+ * observations and no mechanism used to pass. A named, required slot cannot be
+ * skipped, and a reader always finds the same thing in the same place.
+ */
 const NarrationSchema = z.object({
   headline: z.string().min(1),
-  findings: z
-    .array(
-      z.object({
-        tag: z.enum(["driver", "segment", "caveat", "known_issue"]),
-        text: z.string().min(1),
-      }),
-    )
-    .min(1)
-    .max(6),
-  chart: z
-    .object({
-      title: z.string(),
-      kind: z.enum(["bar", "line"]),
-      series: z.array(z.object({ label: z.string(), value: z.number() })).min(1).max(12),
-      // Which task a visual came from is bookkeeping. Losing a chart because the
-      // model omitted it beats losing the whole answer, and annotateFormats
-      // recovers the reference when there is only one task it could mean.
-      sourceTask: z.string().default(""),
-      valueFormat: z.string().optional(),
-    })
-    .nullish()
-    .transform((v) => v ?? null),
-  segmentTable: z
-    .object({
-      columns: z.array(z.string()).min(2),
-      rows: z.array(z.array(z.union([z.string(), z.number()]))).min(1).max(15),
-      sourceTask: z.string().default(""),
-      columnFormats: z.array(z.string()).optional(),
-    })
-    .nullish()
-    .transform((v) => v ?? null),
+  /** The finding itself, in numbers: the size and shape of the effect. */
+  whatsHappening: z.string().min(1),
+  /** The mechanism behind it — the part that decides what gets built. */
+  whyItHappens: z.string().min(1),
+  evidence: z.object({
+    /** What the chart or table shows, including the basis: population, window. */
+    title: z.string().default(""),
+    chart: z
+      .object({
+        kind: z.enum(["bar", "line"]),
+        series: z.array(z.object({ label: z.string(), value: z.number() })).min(1).max(12),
+        // Which task a visual came from is bookkeeping. Losing a chart because the
+        // model omitted it beats losing the whole answer, and annotateFormats
+        // recovers the reference when there is only one task it could mean.
+        sourceTask: z.string().default(""),
+        valueFormat: z.string().optional(),
+      })
+      .nullish()
+      .transform((v) => v ?? null),
+    segmentTable: z
+      .object({
+        columns: z.array(z.string()).min(2),
+        rows: z.array(z.array(z.union([z.string(), z.number()]))).min(1).max(15),
+        sourceTask: z.string().default(""),
+        columnFormats: z.array(z.string()).optional(),
+      })
+      .nullish()
+      .transform((v) => v ?? null),
+  }),
+  /**
+   * What the context store already knew that bears on this answer — a known
+   * issue, a definition, a caveat about the basis. Empty when nothing retrieved
+   * applies: an invented connection is worse than an absent one.
+   */
+  groundedInContext: z.string().default(""),
+  /** The decision this implies, and what it should move. */
+  recommendedAction: z.string().min(1),
   // No confidence field: the level is computed from measured precision, and asking
   // the model for one only invites a plausible-sounding guess. Uncertainty belongs
-  // in a `caveat` finding, which it does emit.
+  // in `groundedInContext` or in the basis stated in `evidence.title`.
 });
 type Narration = z.infer<typeof NarrationSchema>;
 
@@ -223,6 +267,10 @@ const QualitySchema = z.object({
   actionable: z.boolean(),
   cites_numbers: z.boolean(),
   names_segment: z.boolean(),
+  /** Is the pattern a named phenomenon, or the metric restated as a label? */
+  names_pattern: z.boolean(),
+  /** Does `why` give a mechanism, or just describe the number again? */
+  explains_why: z.boolean(),
   links_known_issue: z.boolean(),
   honest_confidence: z.boolean(),
   verdict: z.enum(["pass", "revise"]),
@@ -410,6 +458,48 @@ export function collectDateLiterals(results: CitableResult[], rowsShown: number)
   return [...out];
 }
 
+const normalizeText = (s: string) =>
+  s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+
+/** Every prose field of an answer — the text a citation check must cover. */
+const narrativeTexts = (n: Narration): string[] => [
+  n.headline,
+  n.whatsHappening,
+  n.whyItHappens,
+  n.evidence.title,
+  n.groundedInContext,
+  n.recommendedAction,
+];
+
+/**
+ * Does each section say something the others did not?
+ *
+ * The failure mode this guards is specific and common: asked for a mechanism,
+ * a model restates the measurement at greater length, so `whyItHappens` becomes
+ * `whatsHappening` with different words. That is detectable without judgement —
+ * the section repeats one already on the card, or is too short to carry a cause.
+ * Anything subtler goes to the LLM gate.
+ */
+export function sectionsAreSubstantive(narration: {
+  headline: string;
+  whatsHappening: string;
+  whyItHappens: string;
+  recommendedAction: string;
+}): boolean {
+  const headline = normalizeText(narration.headline);
+  const happening = normalizeText(narration.whatsHappening);
+  const why = normalizeText(narration.whyItHappens);
+  const action = normalizeText(narration.recommendedAction);
+  if (!happening || !why || !action) return false;
+  // a mechanism does not fit in a handful of words
+  if (why.length < 60) return false;
+  // …nor is it a sentence already on the card
+  if (headline.includes(why) || happening.includes(why) || why.includes(happening)) return false;
+  // an action has to say something to do
+  if (action.length < 25) return false;
+  return true;
+}
+
 /**
  * A number is citable when it appears in the results, OR when it is the
  * difference/ratio of two values that do — arithmetic code can verify, so the
@@ -515,35 +605,33 @@ function annotateFormats(insight: Narration, results: TaskResult[]): void {
   // With one surviving task there is only one thing a visual can be sourced from, so
   // repair a missing or wrong reference rather than discarding a usable chart.
   const onlyTask = results.length === 1 ? results[0]?.id : undefined;
-  if (insight.chart && !known.has(insight.chart.sourceTask) && onlyTask)
-    insight.chart.sourceTask = onlyTask;
-  if (insight.segmentTable && !known.has(insight.segmentTable.sourceTask) && onlyTask)
-    insight.segmentTable.sourceTask = onlyTask;
+  const { evidence } = insight;
+  if (evidence.chart && !known.has(evidence.chart.sourceTask) && onlyTask)
+    evidence.chart.sourceTask = onlyTask;
+  if (evidence.segmentTable && !known.has(evidence.segmentTable.sourceTask) && onlyTask)
+    evidence.segmentTable.sourceTask = onlyTask;
   // a chart or table pointing at a dropped task cannot be format-inferred, and
   // would cite results the reader cannot open — drop the visual instead
-  if (insight.chart && !known.has(insight.chart.sourceTask)) insight.chart = null;
-  if (insight.segmentTable && !known.has(insight.segmentTable.sourceTask))
-    insight.segmentTable = null;
-  if (insight.chart) {
-    const cols = columnsOf(insight.chart.sourceTask);
+  if (evidence.chart && !known.has(evidence.chart.sourceTask)) evidence.chart = null;
+  if (evidence.segmentTable && !known.has(evidence.segmentTable.sourceTask))
+    evidence.segmentTable = null;
+  if (evidence.chart) {
+    const cols = columnsOf(evidence.chart.sourceTask);
     const valueCol =
       cols.find((c) => /rate|pct|percent|amount|latency|_ms|_pp/i.test(c)) ??
       cols.find((c) => !/^(os|device|platform|segment|label|country|city|month)/i.test(c)) ??
-      insight.chart.title;
-    insight.chart.valueFormat = inferFormat(
+      evidence.title;
+    evidence.chart.valueFormat = inferFormat(
       valueCol,
-      insight.chart.series.map((s) => s.value),
-      sqlOf(insight.chart.sourceTask),
+      evidence.chart.series.map((s) => s.value),
+      sqlOf(evidence.chart.sourceTask),
     );
   }
-  if (insight.segmentTable) {
-    insight.segmentTable.columnFormats = insight.segmentTable.columns.map((col, i) => {
-      const vals = insight.segmentTable!.rows
-        .map((r) => Number(r[i]))
-        .filter((v) => Number.isFinite(v));
-      return vals.length === 0
-        ? "text"
-        : inferFormat(col, vals, sqlOf(insight.segmentTable!.sourceTask));
+  if (evidence.segmentTable) {
+    const table = evidence.segmentTable;
+    table.columnFormats = table.columns.map((col, i) => {
+      const vals = table.rows.map((r) => Number(r[i])).filter((v) => Number.isFinite(v));
+      return vals.length === 0 ? "text" : inferFormat(col, vals, sqlOf(table.sourceTask));
     });
   }
 }
@@ -901,15 +989,15 @@ export async function runAnalytics(
       });
       return {
         headline: `This can't be answered from the current tables: ${plan.approach}`,
-        findings: [
-          { tag: "caveat", text: plan.approach },
-          ...(suggestions.length
-            ? [{ tag: "driver" as const, text: `Try instead: ${suggestions.slice(0, 3).join(" · ")}` }]
-            : []),
-        ],
-        chart: null,
-        segmentTable: null,
-        confidence: { value: "low", note: "no queryable data for this question" },
+        whatsHappening: plan.approach,
+        whyItHappens:
+          "No table in the context store carries the fields this question needs, so there is nothing to measure — this is a gap in what has been instrumented, not a finding about the product.",
+        evidence: { title: "", chart: null, segmentTable: null },
+        groundedInContext: "",
+        recommendedAction: suggestions.length
+          ? `Instrument the events this question needs, or ask something the current tables can answer: ${suggestions.slice(0, 3).join(" · ")}`
+          : "Instrument the events this question needs before asking it again.",
+        confidence: { value: "low", score: 0.05, note: "no queryable data for this question" },
         precision: [],
         verification: null,
         contextVersion,
@@ -1262,11 +1350,13 @@ export async function runAnalytics(
             const text = await llm(nSpan, "narrate", prompt);
             const parsed = NarrationSchema.parse(JSON.parse(stripFences(text)));
 
+            // Every prose section is held to the citation rule, not just the
+            // headline — an invented number in a recommendation is the most
+            // expensive kind there is.
             const texts = [
-              parsed.headline,
-              ...parsed.findings.map((f) => f.text),
-              ...(parsed.chart?.series.map((s) => String(s.value)) ?? []),
-              ...(parsed.segmentTable?.rows.flat().map(String) ?? []),
+              ...narrativeTexts(parsed),
+              ...(parsed.evidence.chart?.series.map((s) => String(s.value)) ?? []),
+              ...(parsed.evidence.segmentTable?.rows.flat().map(String) ?? []),
             ];
             const uncited = findUncitedNumbers(texts, pool, datePool);
             if (uncited.length > 0) {
@@ -1300,24 +1390,26 @@ export async function runAnalytics(
 
     // ── quality gate ──
     // Skip the LLM call when deterministic checks already cover the rubric.
-    // The quality gate checks 5 booleans; most are verifiable in code:
+    // Most of the rubric is verifiable in code:
     //   cites_numbers — guaranteed by the citation checker above
-    //   names_segment — checked by finding tag presence
     //   honest_confidence — confidence is computed by code, not the model
-    //   links_known_issue — true when no anomaly, or when a known_issue finding exists
-    // Only `actionable` genuinely needs LLM judgement, but a headline with a
-    // number and a segment finding is actionable by construction.
-    const hasKnownIssueFinding = narration.findings.some((f) => f.tag === "known_issue");
-    const hasAnomalyWithoutLink = sanityNotes.some((n) => /flagged/i.test(n)) && !hasKnownIssueFinding;
+    //   links_known_issue — true when no anomaly, or when groundedInContext says so
+    // `explains_why` and `actionable` need judgement, but their FAILURE mode is
+    // mechanical — a `whyItHappens` that restates the measurement, or an action too
+    // vague to do — so `sectionsAreSubstantive` catches the degenerate cases in code
+    // and only a genuinely doubtful answer pays for a call.
+    const hasAnomalyWithoutLink =
+      sanityNotes.some((n) => /flagged/i.test(n)) && !narration.groundedInContext.trim();
     const selfEvident =
       sanityNotes.filter((n) => !/flagged/i.test(n)).length === 0 &&
       citationFailures === 0 &&
-      narration.findings.some((f) => f.tag === "segment") &&
       /\d/.test(narration.headline) &&
+      sectionsAreSubstantive(narration) &&
       !hasAnomalyWithoutLink;
     const quality = selfEvident
       ? {
           actionable: true, cites_numbers: true, names_segment: true,
+          names_pattern: true, explains_why: true,
           links_known_issue: true, honest_confidence: true,
           verdict: "pass" as const, revision_note: "",
         }
@@ -1347,6 +1439,7 @@ export async function runAnalytics(
             });
             return {
               actionable: true, cites_numbers: true, names_segment: true,
+              names_pattern: true, explains_why: true,
               links_known_issue: true, honest_confidence: true,
               verdict: "pass" as const, revision_note: "",
             };
@@ -1370,11 +1463,7 @@ export async function runAnalytics(
         });
         const text = await llm(rSpan, "narrate", prompt);
         const parsed = NarrationSchema.parse(JSON.parse(stripFences(text)));
-        const uncited = findUncitedNumbers(
-          [parsed.headline, ...parsed.findings.map((f) => f.text)],
-          pool,
-          datePool,
-        );
+        const uncited = findUncitedNumbers(narrativeTexts(parsed), pool, datePool);
         if (uncited.length > 0) {
           // keep the answer that already passed every check rather than failing
           // the request over a cosmetic revision

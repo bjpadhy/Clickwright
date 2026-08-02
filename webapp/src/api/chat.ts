@@ -28,15 +28,7 @@ export type ValueFormat =
   | "currency"
   | "number"
 
-export type FindingTag = "driver" | "segment" | "caveat" | "known_issue"
-
-export interface InsightFinding {
-  tag: FindingTag
-  text: string
-}
-
 export interface InsightChart {
-  title: string
   kind: "bar" | "line"
   series: { label: string; value: number }[]
   /** id of the task whose query produced the series */
@@ -63,14 +55,38 @@ export interface InsightSql {
   totalRows?: number
 }
 
+/** The visual, and the basis it was computed on. */
+export interface InsightEvidence {
+  /** what the visual shows, including population/ordering/window */
+  title: string
+  chart: InsightChart | null
+  segmentTable: InsightTable | null
+}
+
+/**
+ * An answer, in the order a PM reads it.
+ *
+ * The sections are separate keys rather than a tagged list of findings so that
+ * none of them can be skipped: an answer that never says WHY cannot satisfy the
+ * schema. Everything but `headline` and `confidence` is prose written by the
+ * narrator, and every number in it has been checked against a SQL result set.
+ */
 export interface Insight {
   /** one sentence, carrying the key number */
   headline: string
-  findings: InsightFinding[]
-  chart: InsightChart | null
-  segmentTable: InsightTable | null
-  /** capped by code when a gate flagged something */
-  confidence: { value: "high" | "medium" | "low"; note: string }
+  /** the effect, in numbers: how big, over what population, where */
+  whatsHappening: string
+  /** the mechanism behind it — never the measurement restated */
+  whyItHappens: string
+  evidence: InsightEvidence
+  /** retrieved knowledge bearing on the answer; `""` when nothing applies */
+  groundedInContext: string
+  /** the decision this implies, and what it should move */
+  recommendedAction: string
+  /** Computed in code from measured precision, gate flags and an independent
+   * verification query — never the model's opinion. `score` is the same
+   * judgement on a 0–1 scale, for the meter. */
+  confidence: { value: "high" | "medium" | "low"; score: number; note: string }
   /** e.g. "44 entities · max v2" */
   contextVersion: string
   sql: InsightSql[]
@@ -206,13 +222,5 @@ export const chat = {
     if (entries.length === 0) return ""
     const maxVersion = Math.max(...entries.map((entry) => entry.version))
     return `${entries.length} entities · max v${maxVersion}`
-  },
-
-  /** "Save to dashboard" — the stored artifact is the SQL, re-run on every load. */
-  saveToDashboard: (input: {
-    title: string
-    sql: string
-    chartKind?: "bar" | "line"
-    meta?: Record<string, unknown>
-  }) => post<{ id: string }>("/dashboards", input).then((r) => r.id),
+  }
 }

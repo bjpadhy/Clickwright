@@ -401,20 +401,32 @@ analytics                  (wrapper)
 ```
 
 ```ts
+// The answer is a fixed set of named sections, in the order a PM reads them.
+// A tagged `findings` list let an answer satisfy the schema while never saying
+// WHY — six observations and no mechanism used to pass. A required, named slot
+// cannot be skipped, and a reader finds the same thing in the same place.
 export interface Insight {
   headline: string;                                  // one-sentence answer with the key number
-  findings: Array<{ tag: "driver" | "segment" | "caveat" | "known_issue"; text: string }>;
-  chart: null | {
-    title: string; kind: "bar" | "line";
-    series: Array<{ label: string; value: number }>; sourceTask: string;
-    valueFormat?: ValueFormat;        // how to render `value` — see below
+  whatsHappening: string;                            // the effect in numbers: size, population, where
+  whyItHappens: string;                              // the MECHANISM — never the measurement restated
+  evidence: {
+    title: string;                                   // what the visual shows + its basis (population, window)
+    chart: null | {
+      kind: "bar" | "line";
+      series: Array<{ label: string; value: number }>; sourceTask: string;
+      valueFormat?: ValueFormat;      // how to render `value` — see below
+    };
+    segmentTable: null | {
+      columns: string[]; rows: Array<Array<string | number>>; sourceTask: string;
+      columnFormats?: Array<ValueFormat | "text">;   // parallel to `columns`
+    };
   };
-  segmentTable: null | {
-    columns: string[]; rows: Array<Array<string | number>>; sourceTask: string;
-    columnFormats?: Array<ValueFormat | "text">;   // parallel to `columns`
-  };
-  // COMPUTED in code, never the model's opinion — see "Confidence" below
-  confidence: { value: "high" | "medium" | "low"; note: string };
+  groundedInContext: string;          // retrieved knowledge bearing on the answer; "" when none applies
+  recommendedAction: string;          // the decision this implies, and what it should move
+  // COMPUTED in code, never the model's opinion — see "Confidence" below.
+  // `score` is the same judgement on a 0–1 scale, clamped into the band its
+  // level implies so the number and the label can never disagree.
+  confidence: { value: "high" | "medium" | "low"; score: number; note: string };
   precision: Array<{
     column: string;
     kind: "proportion" | "mean" | "quantile" | "ratio" | "count" | "unknown";
@@ -523,23 +535,8 @@ they are consistent across answers.
 
 **Verified end-to-end.** Instrumentation (both gates), a fresh question, a cached
 question, a follow-up, conversation persistence and reload, suggestion chips, and
-dashboard save + re-run have all been exercised over HTTP. Measured: a fresh answer
+and the changelog have all been exercised over HTTP. Measured: a fresh answer
 40–67s, a cached answer **~0.6s**, instrumentation with both gates ~57s.
-
-## [LIVE] Dashboards (Boards)
-
-```
-POST   /api/dashboards          { title, sql, chartKind?, meta? } → 201 { id }
-GET    /api/dashboards          → [{ id, title, chartKind, meta, createdAt }]
-GET    /api/dashboards/:id/run  → { id, title, chartKind, meta, series, rows, rowCount, sql, ms, ranAt }
-DELETE /api/dashboards/:id      → { ok: true }
-```
-
-"Save to dashboard" on an insight chart posts the chart's title plus the SQL
-from `insight.sql[i].query`. **The stored artifact is the SQL** — `:id/run`
-re-executes it read-only on every load, so a board always shows fresh data
-(`ms` + `ranAt` give you the "re-ran <time> · fresh data" stamp). Non-SELECT SQL
-is rejected at save time and again at run time.
 
 ## [LIVE] GET /api/observe/clickhouse — the Database health tab
 

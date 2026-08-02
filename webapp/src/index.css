@@ -228,3 +228,104 @@
     min-height: 0;
     overflow-y: auto;
 }
+
+/* ── PDF export ──────────────────────────────────────────────────────────────
+   The export is a print of the real components, not a re-drawing of them: the
+   conversation renders into #print-root and the browser's "Save as PDF" turns
+   it into a file. That keeps the PDF a genuine visual duplicate — same cards,
+   same type, same colours — and keeps text and charts as vectors, so the output
+   is selectable and searchable rather than a screenshot.
+
+   Off screen, #print-root sits outside the viewport rather than under
+   `display: none`, because Recharts measures its container: a hidden chart has
+   zero width and renders nothing. It needs real layout at a fixed page width. */
+#print-root {
+    position: fixed;
+    left: -12000px;
+    top: 0;
+    width: 780px;
+    background: #fff;
+}
+
+@media print {
+    /* the app itself never prints — only the document built for it */
+    body > #root {
+        display: none !important;
+    }
+    #print-root {
+        position: static !important;
+        left: auto !important;
+        width: auto !important;
+    }
+    @page {
+        size: A4;
+        margin: 14mm 12mm;
+    }
+    html,
+    body {
+        background: #fff !important;
+    }
+    /* Chrome drops backgrounds by default, which would flatten every tag,
+       pill and panel the conversation is made of. */
+    * {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    /* Pagination.
+
+       The rule that matters: keep SMALL things whole, and let big things flow.
+       `break-inside: avoid` on a block taller than the space left pushes the
+       whole block onto the next page and leaves the remainder of the current one
+       empty — which is where large gaps in an exported conversation come from.
+       So an insight card is breakable, and only its self-contained pieces (the
+       pattern, the recommendation, a chart, a table row) are held together. */
+    .print-block {
+        break-inside: avoid;
+    }
+    /* a label must not be stranded at the foot of a page without what it labels */
+    .print-keep-next {
+        break-after: avoid;
+    }
+    /* Vertical stacks that can span a page boundary. Chrome paginates a flex
+       column badly — children jump wholesale to the next page — so on paper
+       these fall back to block flow with the same rhythm. */
+    #print-root .print-stack {
+        display: block;
+    }
+    #print-root .print-stack > * + * {
+        margin-top: 9px;
+    }
+    /* The base Card is `overflow-hidden` (to clip its rounded corners) and a
+       flex column. Both stop Chrome breaking inside it: overflow-hidden makes a
+       formatting context the pager treats as atomic, so a card taller than the
+       remaining space is pushed to the next page whole and leaves the rest of
+       the current page empty. On paper the card is plain block flow — the
+       corners are the cost, the gap was worse. */
+    #print-root [data-slot="card"] {
+        display: block;
+        overflow: visible !important;
+    }
+    #print-root h1 {
+        break-after: avoid;
+    }
+    /* a row split across pages is unreadable; the table itself may flow */
+    #print-root tr {
+        break-inside: avoid;
+    }
+    #print-root thead {
+        display: table-header-group;
+    }
+    /* never leave a single line of a paragraph alone on a page */
+    #print-root p,
+    #print-root div {
+        orphans: 3;
+        widows: 3;
+    }
+    /* On screen a card scrolls its own overflow; on paper `auto` creates a
+       scroll box that reserves height and then clips, so it has to be visible. */
+    #print-root .overflow-x-auto,
+    #print-root .scroll-y {
+        overflow: visible !important;
+    }
+}

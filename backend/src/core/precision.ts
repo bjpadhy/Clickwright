@@ -304,6 +304,7 @@ export interface ConfidenceInput {
  */
 export function deriveConfidence(input: ConfidenceInput): {
   value: "high" | "medium" | "low";
+  score: number;
   note: string;
 } {
   const reasons: string[] = [];
@@ -339,5 +340,35 @@ export function deriveConfidence(input: ConfidenceInput): {
     reasons.push("an independently written query reproduced the figure");
   }
 
-  return { value: level, note: reasons.join("; ") || "no precision signals available" };
+  return {
+    value: level,
+    score: confidenceScore(input, level),
+    note: reasons.join("; ") || "no precision signals available",
+  };
+}
+
+/**
+ * The same judgement as `value`, on a 0–1 scale, so a reader can see that two
+ * "medium" answers are not equally solid.
+ *
+ * It is a deduction from 1, not a model's guess: each measurement that weakens
+ * the answer subtracts a fixed amount, and the widest interval subtracts in
+ * proportion to how wide it is. Clamped into the band its level implies, so the
+ * number and the label can never disagree.
+ */
+function confidenceScore(input: ConfidenceInput, level: "high" | "medium" | "low"): number {
+  let score = 1;
+  if (input.verificationAgreed === false) score -= 0.45;
+  else if (input.verificationAgreed === true) score += 0.05;
+  score -= Math.min(0.2, input.citationRetries * 0.1);
+  score -= Math.min(0.2, input.sanityFlags * 0.07);
+
+  const bounded = input.precisions.filter((p) => p.interval);
+  const widest = Math.max(0, ...bounded.map((p) => p.interval!.halfWidthPp));
+  // ±0pp costs nothing, ±15pp or worse costs the full 0.35
+  if (bounded.length > 0) score -= Math.min(0.35, (widest / 15) * 0.35);
+  else if (input.precisions.length > 0) score -= 0.15; // nothing could be bounded
+
+  const band = level === "high" ? [0.75, 1] : level === "medium" ? [0.45, 0.8] : [0.05, 0.5];
+  return Math.round(Math.min(band[1]!, Math.max(band[0]!, score)) * 100) / 100;
 }

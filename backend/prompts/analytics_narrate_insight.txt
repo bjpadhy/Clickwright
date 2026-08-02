@@ -57,24 +57,79 @@ context version: {{context_version}}
 1g. Direction must match the arithmetic. If A is 45.8% and B is 5.4%, A is HIGHER than
    B — never call that a shortfall, a drop or a negative lift. State which is larger and
    by how much, then interpret.
-2. The headline answers the question in one sentence with the single most important number.
-3. findings: 2-5 items. Tags: "driver" (what explains the number), "segment" (who/where it concentrates), "caveat" (sample size, gate flags, definition nuances), "known_issue" (when a retrieved known issue plausibly explains an anomaly — cite its id, e.g. "consistent with K1").
-4. chart: pick the ONE most insightful cut, ≤ 12 points, values straight from results. null if nothing chartable. kind: "bar" for categories, "line" for time.
-5. segmentTable: the supporting cut as a table (≤ 15 rows), or null.
-6. Do NOT rate your own confidence — it is computed from measured interval widths,
-   gate flags and an independent verification query. Instead, put any uncertainty a
-   reader must know about into a `caveat` finding, in concrete terms ("the SA figure
-   rests on 16 rows"), and say nothing about overall confidence.
-7. If the results cannot answer the question, say so plainly in the headline — never fabricate.
-8. Never assert what filters, buckets or groupings were applied unless the method block
+2. **headline** — answers the question in one sentence, carrying the single most
+   important number. This is the only line some readers will read.
+3. **whatsHappening** — the effect, in numbers: how big, over what population,
+   where it concentrates. One or two sentences. This is the WHAT, so it may
+   restate and extend the headline's figure with the counts behind it
+   ("Of 511,900 started applications, only 288,700 complete document upload — a
+   223k-user loss, the largest absolute drop in the funnel.").
+4. **whyItHappens** — the MECHANISM, never the measurement again. Answer "what is
+   causing this?" from the cuts you actually have: which segment, which step,
+   which definition, which known issue. One or two sentences.
+   - Restating `whatsHappening` in different words is the single failure this
+     field exists to prevent, and it is checked — an answer whose why repeats its
+     what is sent back.
+   - Good: "Schengen destinations demand 2.3× more documents per application;
+     mobile uploaders fail 31% more often than desktop."
+   - If the data narrows it to two candidates, give both and say what would
+     separate them. If the data cannot support any mechanism, say so plainly
+     ("the cuts available do not explain the gap; a session-level breakdown
+     would") — that is a useful answer. A plausible-sounding guess is not.
+5. **evidence.title** — what the visual shows AND the basis it rests on, so the
+   reader can judge it: population, ordering, window. e.g. "Pre-purchase funnel ·
+   distinct users, in order, 90 days".
+6. **evidence.chart** — the ONE most insightful cut, ≤ 12 points, values straight
+   from results. null if nothing is chartable. kind: "bar" for categories, "line"
+   for time.
+7. **evidence.segmentTable** — the supporting cut as a table (≤ 15 rows), or null.
+8. **groundedInContext** — what the retrieved knowledge above adds: a known issue
+   that explains the anomaly (cite its id and source, e.g. "Known issue
+   (base_context v1.0): HEIC → JPEG conversion times out on files over 8MB"), a
+   definition that changes how the number reads, or a caveat about the basis the
+   reader must know ("the SA figure rests on 16 rows"). Say how strongly it
+   applies rather than asserting it as the cause. Empty string "" when nothing
+   retrieved genuinely bears on this answer — an invented connection is worse
+   than an absent one.
+9. **recommendedAction** — the decision this implies AND what it should move, in
+   one or two sentences. Concrete enough to argue with: name the thing to ship,
+   instrument, revert or investigate. "Async document checklist + client-side
+   compression. Recovering half the mobile failures ≈ +18k purchases/yr." Never
+   invent a projected figure — an estimate is only allowed when it is arithmetic
+   on numbers that ARE in the results, and should be written as approximate. If
+   the honest action is "get more data", say exactly which data.
+10. Do NOT rate your own confidence — it is computed from measured interval widths,
+   gate flags and an independent verification query. Uncertainty a reader must act
+   on belongs in `groundedInContext` or in the basis stated in `evidence.title`.
+11. If the results cannot answer the question, say so plainly in the headline — never fabricate.
+12. Never assert what filters, buckets or groupings were applied unless the method block
    above says so. If it says hygiene filters were NOT applied, and that matters to the
    reader, say that instead — silently implying clean data is worse than admitting raw.
 
+# What "good" means here
+This insight is graded on whether a PM would ACT on it. A correct number with a
+chart is not an insight — it tells them what moved, never what is going on or what
+to do. The chart is evidence FOR the explanation; it is never the answer itself.
+Every number must still be cited, so the ceiling on what you may claim is the data
+you were given: within that, always prefer the sharpest honest reading over a
+hedged restatement.
+
+The sections are read in order and each must earn its place — a reader who has
+just read `whatsHappening` learns something NEW from `whyItHappens`, and something
+new again from `recommendedAction`.
+
 # Output — STRICT JSON only, no fences
 {
-  "headline": "...",
-  "findings": [ { "tag": "driver", "text": "..." } ],
-  "chart": { "title": "...", "kind": "bar", "series": [ { "label": "iOS", "value": 0.812 } ], "sourceTask": "t1" } ,
-  "segmentTable": { "columns": ["segment", "rate", "n"], "rows": [["iOS", 0.812, 6401]], "sourceTask": "t1" }
+  "headline": "Document upload is the funnel's biggest leak — 44% of applicants who start never finish uploading.",
+  "whatsHappening": "Of 511,900 started applications, only 288,700 complete document upload — a 223k-user loss, the largest absolute drop in the funnel.",
+  "whyItHappens": "Schengen destinations demand 2.3x more documents per application; mobile uploaders fail 31% more often than desktop.",
+  "evidence": {
+    "title": "Pre-purchase funnel · distinct users, in order, 90 days",
+    "chart": { "kind": "bar", "series": [ { "label": "application_started", "value": 511900 } ], "sourceTask": "t1" },
+    "segmentTable": { "columns": ["step", "users", "step rate"], "rows": [["document_uploaded", 288700, 0.564]], "sourceTask": "t1" }
+  },
+  "groundedInContext": "Known issue (base_context v1.0): HEIC to JPEG conversion times out on files over 8MB — 61% of mobile failures match its signature.",
+  "recommendedAction": "Async document checklist + client-side compression. Recovering half the mobile failures is roughly 18k more purchases a year."
 }
-chart and segmentTable may be null.
+evidence.chart and evidence.segmentTable may each be null; groundedInContext may be "".
+Everything else is required.

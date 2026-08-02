@@ -17,7 +17,6 @@
  *   POST /api/conversations/:id/star      star/unstar
  *   DELETE /api/conversations/:id         delete a conversation and its turns
  *   GET  /api/suggestions                 suggested-question chips from spec context
- *   POST/GET/DELETE /api/dashboards       saved charts; GET :id/run re-executes the SQL
  *   GET  /api/context                     latest version of every entity
  *   GET  /api/context/:entity/history     full version history for one entity
  *   GET  /api/observe/clickhouse          database health (system tables)
@@ -33,9 +32,6 @@ import {
   initChatTables, createConversation, listConversations, getConversation,
   setStarred, deleteConversation, suggestions, streamAnswer,
 } from "./chat.js";
-import {
-  initDashboardTables, saveDashboard, listDashboards, runDashboard, deleteDashboard,
-} from "./dashboards.js";
 import { initInsightCache } from "../agents/analytics.js";
 import { closeDb, command, query } from "../core/db.js";
 import { env } from "../core/env.js";
@@ -278,40 +274,6 @@ app.get("/api/suggestions", async (_req, res) => {
   res.json(await suggestions());
 });
 
-// ── dashboards (Boards) ─────────────────────────────────────────
-
-app.post("/api/dashboards", async (req, res) => {
-  try {
-    const { title, sql, chartKind, meta } = req.body ?? {};
-    if (!title || !sql) return res.status(400).json({ error: "title and sql required" });
-    res.status(201).json({ id: await saveDashboard({ title, sql, chartKind, meta }) });
-  } catch (error) {
-    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.get("/api/dashboards", async (_req, res) => {
-  res.json(await listDashboards());
-});
-
-/** Re-runs the saved SQL — fresh data on every load. */
-app.get("/api/dashboards/:id/run", async (req, res) => {
-  try {
-    res.json(await runDashboard(req.params.id));
-  } catch (error) {
-    res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.delete("/api/dashboards/:id", async (req, res) => {
-  try {
-    await deleteDashboard(req.params.id);
-    res.json({ ok: true });
-  } catch (error) {
-    res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
 app.get("/api/context", async (_req, res) => {
   const rows = await query(`
     SELECT entity, definition_md, toUInt32(version) AS version, source_spec, change_note, toString(updated_at) AS updated_at
@@ -336,7 +298,6 @@ const openStreams = new Set<{ end: () => void }>();
 const PORT = Number(process.env["PORT"] ?? 8787);
 await manager.init();
 await initChatTables();
-await initDashboardTables();
 await initInsightCache();
 // Materialized category column — ClickHouse derives it from entity on insert,
 // so existing rows get it on the next merge and new rows have it immediately.

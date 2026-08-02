@@ -108,8 +108,10 @@ one per table in parallel.
 - **Materialized-view proposals** are in the product design but not implemented: no
   prompt asks for one and nothing executes one. The Observe advisor can propose schema
   changes separately.
-- **Chat, Boards and Observe screens** still render mock data in the webapp;
-  instrumentation is the only screen wired to the real backend.
+- **Dashboards and the Observability screen were removed** from the webapp. The app
+  is now Chat, Instrumentation and Changelog, all wired to the real backend. The
+  `/api/observe/clickhouse` and `/api/observe/suggestions` endpoints still work but
+  have no UI — the optimization advisor can only be driven over HTTP.
 
 ## How it works
 
@@ -252,8 +254,7 @@ between funnel events are meaningless and stages must be counted as set membersh
 | `conversations` | ReplacingMergeTree(updated_at) | Chat sidebar: `conv_id, title, starred, created_at, updated_at`. |
 | `messages` | MergeTree | Chat turns: `conv_id, seq, role, question, insight_json, trace_url, ts`. Agent turns store the whole Insight, so reloading a conversation re-renders cards with no recompute. |
 | `insight_cache` | ReplacingMergeTree(created_at) | Answers keyed by `sha256(question + contextVersion)`. A repeat question is a millisecond read; any context write changes the version and invalidates it naturally. |
-| `dashboards` | ReplacingMergeTree(created_at) | Saved charts: `dash_id, title, sql, chart_kind, meta_json, deleted, created_at`. **The stored artifact is the SQL** — re-executed on every load, so boards are always fresh data. |
-| `optimization_suggestions` | MergeTree | Advisor output for the Observe screen (severity, target table, action, rationale, status). |
+| `optimization_suggestions` | MergeTree | Advisor output (severity, target table, action, rationale, status). Written by `/api/observe/suggestions/scan`; no UI reads it since the Observability screen was removed. |
 
 **Resetting.** `npm run reset` drops only the event tables a spec created and deletes
 that spec's `context_store` rows. Two categories are protected by name in
@@ -293,7 +294,6 @@ file is the integration spec; this is the index.
 | `POST /api/conversations` · `GET /api/conversations` · `GET /api/conversations/:id` · `POST /api/conversations/:id/star` | Chat conversations |
 | `POST /api/conversations/:id/messages` | **SSE** — agent steps, then the Insight |
 | `GET /api/suggestions` | Suggested-question chips, from the PM questions in `spec:*` entries |
-| `POST/GET/DELETE /api/dashboards` · `GET /api/dashboards/:id/run` | Boards; `:id/run` re-executes the saved SQL |
 | `GET /api/observe/clickhouse` · `/changelog` · `/changelog/export` | Database health, change stream, markdown export |
 
 ## Tracing

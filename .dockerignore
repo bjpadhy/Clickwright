@@ -1,0 +1,21 @@
+# Both images build from the repo root, so this list is what never reaches a
+# build context. Secrets first: backend/.env holds ClickHouse and Langfuse
+# credentials and must never be baked into a layer — compose injects it at run
+# time via `env_file` instead.
+**/.env
+**/.env.local
+!**/.env.example
+
+**/node_modules
+**/dist
+**/out
+**/uploads
+**/*.tsbuildinfo
+
+.git
+.gitignore
+.claude
+**/*.log
+docker-compose.yml
+**/Dockerfile
+.dockerignore

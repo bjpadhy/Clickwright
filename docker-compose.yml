@@ -1,0 +1,76 @@
+# Clickwright — one `docker compose up` brings up the whole app.
+#
+# Order is enforced, not hoped for: the webapp will not start until the backend
+# reports healthy, and healthy here means it answered /api/health, which only
+# succeeds once ClickHouse is actually reachable. So by the time the UI is
+# served, everything behind it works.
+#
+# The browser only ever talks to the webapp container. nginx proxies every
+# /api/* request to the backend over the internal network — the same contract
+# the Vite dev proxy provides locally, so the frontend calls relative paths in
+# both worlds and there is no API URL to configure.
+#
+#   docker compose up --build      first run, or after changing dependencies
+#   docker compose up              afterwards
+#   docker compose logs -f backend
+#
+# Requires backend/.env (copy backend/.env.example and fill it in). Note that a
+# container cannot use the Claude Code OAuth fallback — set a real
+# ANTHROPIC_API_KEY or every agent call will fail.
+
+services:
+  backend:
+    build:
+      # Root context: the image needs both backend/ and specs/.
+      context: .
+      dockerfile: backend/Dockerfile
+    # Credentials as real environment variables. `src/core/env.ts` reads
+    # process.env, so nothing about the app changes; the file itself is kept out
+    # of the image by .dockerignore.
+    env_file:
+      - ./backend/.env
+    environment:
+      PORT: "8787"
+    ports:
+      # Exposed for curl and the API docs; the webapp does not use this path.
+      - "8787:8787"
+    volumes:
+      # Edit a spec and re-run it without rebuilding the image.
+      - ./specs:/app/specs:ro
+      # Uploaded specs are real state — keep them across rebuilds.
+      - backend-uploads:/app/backend/uploads
+    healthcheck:
+      # /api/health runs `SELECT version()`, so this is a ClickHouse check too —
+      # it returns 500 whenever the database is unreachable, which is exactly
+      # when the webapp should not come up yet.
+      #
+      # Node rather than curl or wget: neither is in the slim base image, and
+      # adding a package to make a health check work is a poor trade when the
+      # runtime already has fetch.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 5s
+      timeout: 5s
+      # Generous: the first boot creates tables and the context store.
+      retries: 30
+      start_period: 15s
+    restart: unless-stopped
+
+  webapp:
+    build:
+      context: .
+      dockerfile: webapp/Dockerfile
+    depends_on:
+      backend:
+        # Not `service_started` — that would race, and the first screen fires
+        # requests immediately. Wait until the backend genuinely answers.
+        condition: service_healthy
+    ports:
+      - "5173:80"
+    restart: unless-stopped
+
+volumes:
+  backend-uploads:

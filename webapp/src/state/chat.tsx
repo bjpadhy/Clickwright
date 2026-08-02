@@ -108,10 +108,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false
     void (async () => {
       try {
-        const list = await refreshConversations()
+        await refreshConversations()
         if (cancelled) return
         setOffline(null)
-        // Always start on a fresh draft — the sidebar still lists prior chats.
       } catch (error) {
         if (!cancelled) setOffline(message(error))
       }

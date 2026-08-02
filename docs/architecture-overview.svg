@@ -1,0 +1,171 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.08"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto-start-auto">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto-start-auto">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="#3b82f6"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto-start-auto">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="#10b981"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="620" rx="12" fill="#fafafa"/>
+
+  <!-- Title -->
+  <text x="450" y="36" text-anchor="middle" font-size="18" font-weight="700" fill="#18181b">Clickwright — System Architecture</text>
+
+  <!-- Input -->
+  <rect x="30" y="65" width="140" height="50" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="100" y="86" text-anchor="middle" font-size="11" font-weight="600" fill="#92400e">spec.md</text>
+  <text x="100" y="101" text-anchor="middle" font-size="10" fill="#92400e">+ events.ndjson</text>
+
+  <!-- PM -->
+  <rect x="30" y="490" width="140" height="50" rx="8" fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="100" y="511" text-anchor="middle" font-size="11" font-weight="600" fill="#5b21b6">Product Manager</text>
+  <text x="100" y="526" text-anchor="middle" font-size="10" fill="#5b21b6">asks questions</text>
+
+  <!-- Agent 1: Instrumentation -->
+  <rect x="220" y="55" width="200" height="70" rx="10" fill="#e6f4f1" stroke="#2a9d90" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="320" y="78" text-anchor="middle" font-size="13" font-weight="700" fill="#1a6e64">① Instrumentation</text>
+  <text x="320" y="94" text-anchor="middle" font-size="9.5" fill="#1a6e64">Profile → Design DDL → Execute</text>
+  <text x="320" y="108" text-anchor="middle" font-size="9.5" fill="#1a6e64">→ Load → Verify rows</text>
+
+  <!-- Agent 2: Context -->
+  <rect x="470" y="55" width="200" height="70" rx="10" fill="#e9eef2" stroke="#475569" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="570" y="78" text-anchor="middle" font-size="13" font-weight="700" fill="#1e293b">② Context</text>
+  <text x="570" y="94" text-anchor="middle" font-size="9.5" fill="#334155">Write: table docs + metrics</text>
+  <text x="570" y="108" text-anchor="middle" font-size="9.5" fill="#334155">Read: prompt-ready bundles</text>
+
+  <!-- Agent 3: Analytics -->
+  <rect x="220" y="480" width="200" height="70" rx="10" fill="#fdeae4" stroke="#e76e50" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="320" y="503" text-anchor="middle" font-size="13" font-weight="700" fill="#a03c22">③ Analytics</text>
+  <text x="320" y="519" text-anchor="middle" font-size="9.5" fill="#a03c22">Plan → SQL → Verify</text>
+  <text x="320" y="533" text-anchor="middle" font-size="9.5" fill="#a03c22">→ Narrate → Cite-check</text>
+
+  <!-- ClickHouse Cloud -->
+  <rect x="195" y="175" width="500" height="260" rx="12" fill="#fff" stroke="#e2e8f0" stroke-width="2" filter="url(#shadow)"/>
+  <text x="445" y="200" text-anchor="middle" font-size="14" font-weight="700" fill="#18181b">ClickHouse Cloud</text>
+
+  <!-- Base tables -->
+  <rect x="215" y="215" width="145" height="65" rx="6" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+  <text x="287" y="235" text-anchor="middle" font-size="10" font-weight="600" fill="#166534">8 Base Tables</text>
+  <text x="287" y="249" text-anchor="middle" font-size="8.5" fill="#166534">~3.5M rows</text>
+  <text x="287" y="263" text-anchor="middle" font-size="8" fill="#4ade80">funnel + supporting</text>
+
+  <!-- Spec tables -->
+  <rect x="375" y="215" width="145" height="65" rx="6" fill="#f0f9ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="447" y="235" text-anchor="middle" font-size="10" font-weight="600" fill="#1e40af">Spec Tables</text>
+  <text x="447" y="249" text-anchor="middle" font-size="8.5" fill="#1e40af">N per spec</text>
+  <text x="447" y="263" text-anchor="middle" font-size="8" fill="#60a5fa">codecs + TTL + dims-first key</text>
+
+  <!-- context_store -->
+  <rect x="535" y="215" width="145" height="65" rx="6" fill="#fefce8" stroke="#fde047" stroke-width="1"/>
+  <text x="607" y="235" text-anchor="middle" font-size="10" font-weight="600" fill="#854d0e">context_store</text>
+  <text x="607" y="249" text-anchor="middle" font-size="8.5" fill="#854d0e">versioned knowledge</text>
+  <text x="607" y="263" text-anchor="middle" font-size="8" fill="#ca8a04">append-only, per-entity</text>
+
+  <!-- App tables row -->
+  <rect x="215" y="300" width="225" height="55" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="327" y="318" text-anchor="middle" font-size="9.5" font-weight="600" fill="#475569">Application State</text>
+  <text x="327" y="333" text-anchor="middle" font-size="8" fill="#64748b">runs_log · conversations · messages</text>
+  <text x="327" y="345" text-anchor="middle" font-size="8" fill="#64748b">insight_cache · dashboards · run_summary</text>
+
+  <!-- Human gates -->
+  <rect x="460" y="300" width="220" height="55" rx="6" fill="#fef2f2" stroke="#fca5a5" stroke-width="1"/>
+  <text x="570" y="318" text-anchor="middle" font-size="9.5" font-weight="600" fill="#991b1b">Human Approval Gates</text>
+  <text x="570" y="333" text-anchor="middle" font-size="8" fill="#b91c1c">⛔ DDL gate (Instrumentation)</text>
+  <text x="570" y="345" text-anchor="middle" font-size="8" fill="#b91c1c">⛔ Context gate (Context update)</text>
+
+  <!-- Quality checks -->
+  <rect x="215" y="370" width="465" height="45" rx="6" fill="#faf5ff" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="447" y="389" text-anchor="middle" font-size="9.5" font-weight="600" fill="#6b21a8">Code-Enforced Quality</text>
+  <text x="447" y="403" text-anchor="middle" font-size="8" fill="#7c3aed">Citation check · Wilson precision · Execution-backed verification · Sanity gate · SQL guard (readonly=1)</text>
+
+  <!-- Langfuse -->
+  <rect x="740" y="150" width="130" height="140" rx="10" fill="#fff7ed" stroke="#fb923c" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="805" y="178" text-anchor="middle" font-size="12" font-weight="700" fill="#c2410c">Langfuse</text>
+  <text x="805" y="198" text-anchor="middle" font-size="9" fill="#ea580c">Every step traced</text>
+  <text x="805" y="215" text-anchor="middle" font-size="8" fill="#ea580c">LLM generations</text>
+  <text x="805" y="228" text-anchor="middle" font-size="8" fill="#ea580c">SQL executions</text>
+  <text x="805" y="241" text-anchor="middle" font-size="8" fill="#ea580c">Approval decisions</text>
+  <text x="805" y="254" text-anchor="middle" font-size="8" fill="#ea580c">Self-heal retries</text>
+  <text x="805" y="271" text-anchor="middle" font-size="8" fill="#ea580c">Numeric scores</text>
+
+  <!-- Webapp -->
+  <rect x="740" y="420" width="130" height="130" rx="10" fill="#f0fdf4" stroke="#4ade80" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="805" y="448" text-anchor="middle" font-size="12" font-weight="700" fill="#166534">Webapp</text>
+  <text x="805" y="468" text-anchor="middle" font-size="9" fill="#15803d">React + Vite</text>
+  <text x="805" y="488" text-anchor="middle" font-size="8" fill="#15803d">Chat (Analytics)</text>
+  <text x="805" y="501" text-anchor="middle" font-size="8" fill="#15803d">Instrumentation</text>
+  <text x="805" y="514" text-anchor="middle" font-size="8" fill="#15803d">Observability</text>
+  <text x="805" y="527" text-anchor="middle" font-size="8" fill="#15803d">Dashboards</text>
+  <text x="805" y="540" text-anchor="middle" font-size="8" fill="#15803d">SSE live streaming</text>
+
+  <!-- Claude LLM -->
+  <rect x="740" y="310" width="130" height="70" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="805" y="338" text-anchor="middle" font-size="12" font-weight="700" fill="#1d4ed8">Claude</text>
+  <text x="805" y="355" text-anchor="middle" font-size="9" fill="#2563eb">Sonnet 5</text>
+  <text x="805" y="368" text-anchor="middle" font-size="8" fill="#3b82f6">Anthropic API / SDK</text>
+
+  <!-- Arrows: Input → Agent 1 -->
+  <line x1="170" y1="90" x2="218" y2="90" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Agent 1 → Agent 2 -->
+  <line x1="420" y1="90" x2="468" y2="90" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="444" y="82" text-anchor="middle" font-size="7.5" fill="#64748b">handoff</text>
+
+  <!-- Agent 1 → ClickHouse (tables) -->
+  <line x1="320" y1="125" x2="320" y2="173" stroke="#2a9d90" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="332" y="152" font-size="7.5" fill="#2a9d90">CREATE</text>
+
+  <!-- Agent 2 → context_store -->
+  <line x1="570" y1="125" x2="570" y2="173" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="582" y="152" font-size="7.5" fill="#475569">write</text>
+
+  <!-- PM → Analytics -->
+  <line x1="170" y1="515" x2="218" y2="515" stroke="#8b5cf6" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Analytics → ClickHouse (reads) -->
+  <line x1="320" y1="478" x2="320" y2="437" stroke="#e76e50" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="332" y="460" font-size="7.5" fill="#e76e50">read-only</text>
+
+  <!-- context_store → Analytics (reads) -->
+  <path d="M 607 280 L 607 460 L 422 460 L 422 478" stroke="#ca8a04" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow)" fill="none"/>
+  <text x="520" y="470" font-size="7" fill="#ca8a04">reads context</text>
+
+  <!-- All agents → Langfuse -->
+  <line x1="420" y1="70" x2="738" y2="185" stroke="#fb923c" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <line x1="670" y1="90" x2="738" y2="170" stroke="#fb923c" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <line x1="420" y1="510" x2="738" y2="280" stroke="#fb923c" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+
+  <!-- All agents → Claude -->
+  <path d="M 420 100 L 450 100 L 450 140 L 730 340 L 738 340" stroke="#3b82f6" stroke-width="1" stroke-dasharray="3 3" fill="none" marker-end="url(#arrow-blue)"/>
+  <path d="M 420 500 L 460 500 L 460 460 L 730 355 L 738 355" stroke="#3b82f6" stroke-width="1" stroke-dasharray="3 3" fill="none" marker-end="url(#arrow-blue)"/>
+
+  <!-- Analytics → Webapp -->
+  <line x1="420" y1="530" x2="738" y2="500" stroke="#4ade80" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <text x="580" y="522" font-size="7.5" fill="#15803d">SSE stream</text>
+
+  <!-- Legend -->
+  <rect x="30" y="570" width="840" height="40" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <line x1="60" y1="590" x2="90" y2="590" stroke="#64748b" stroke-width="1.5"/>
+  <text x="95" y="594" font-size="9" fill="#64748b">data flow</text>
+  <line x1="170" y1="590" x2="200" y2="590" stroke="#64748b" stroke-width="1" stroke-dasharray="4 3"/>
+  <text x="205" y="594" font-size="9" fill="#64748b">reads / traces</text>
+  <rect x="310" y="583" width="12" height="12" rx="2" fill="#e6f4f1" stroke="#2a9d90" stroke-width="1"/>
+  <text x="327" y="594" font-size="9" fill="#64748b">Instrumentation</text>
+  <rect x="425" y="583" width="12" height="12" rx="2" fill="#e9eef2" stroke="#475569" stroke-width="1"/>
+  <text x="442" y="594" font-size="9" fill="#64748b">Context</text>
+  <rect x="510" y="583" width="12" height="12" rx="2" fill="#fdeae4" stroke="#e76e50" stroke-width="1"/>
+  <text x="527" y="594" font-size="9" fill="#64748b">Analytics</text>
+  <rect x="600" y="583" width="12" height="12" rx="2" fill="#fef2f2" stroke="#fca5a5" stroke-width="1"/>
+  <text x="617" y="594" font-size="9" fill="#64748b">Human gates</text>
+  <rect x="710" y="583" width="12" height="12" rx="2" fill="#faf5ff" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="727" y="594" font-size="9" fill="#64748b">Code quality checks</text>
+</svg>

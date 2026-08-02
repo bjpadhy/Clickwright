@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 750" font-family="Inter, system-ui, sans-serif">
+  <defs>
+    <filter id="s" x="-3%" y="-3%" width="106%" height="110%">
+      <feDropShadow dx="0" dy="1.5" stdDeviation="2.5" flood-opacity="0.07"/>
+    </filter>
+    <marker id="a" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="7" markerHeight="5" orient="auto">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="750" rx="12" fill="#fafafa"/>
+  <text x="480" y="32" text-anchor="middle" font-size="16" font-weight="700" fill="#18181b">Pipeline Flow — Three Agents, Sequential Handoff</text>
+
+  <!-- ═══ AGENT 1 ═══ -->
+  <rect x="20" y="50" width="295" height="660" rx="10" fill="#f0fdf9" stroke="#2a9d90" stroke-width="1.5" filter="url(#s)"/>
+  <text x="167" y="74" text-anchor="middle" font-size="13" font-weight="700" fill="#1a6e64">① Instrumentation Agent</text>
+
+  <!-- Steps -->
+  <rect x="40" y="90" width="255" height="34" rx="6" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <circle cx="56" cy="107" r="5" fill="#2a9d90"/><text x="70" y="111" font-size="9.5" fill="#334155" font-weight="500">Profile events</text>
+  <text x="280" y="111" text-anchor="end" font-size="8" fill="#94a3b8">code · types, nulls, cardinality</text>
+
+  <rect x="40" y="132" width="255" height="34" rx="6" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <circle cx="56" cy="149" r="5" fill="#2a9d90"/><text x="70" y="153" font-size="9.5" fill="#334155" font-weight="500">Load context + reconcile</text>
+  <text x="280" y="153" text-anchor="end" font-size="8" fill="#94a3b8">concurrent reads</text>
+
+  <rect x="40" y="174" width="255" height="34" rx="6" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <circle cx="56" cy="191" r="5" fill="#2a9d90"/><text x="70" y="195" font-size="9.5" fill="#334155" font-weight="500">Deterministic baseline</text>
+  <text x="280" y="195" text-anchor="end" font-size="8" fill="#94a3b8">code · correct DDL</text>
+
+  <rect x="40" y="216" width="255" height="44" rx="6" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <circle cx="56" cy="235" r="5" fill="#3b82f6"/><text x="70" y="231" font-size="9.5" fill="#1e40af" font-weight="600">Schema design (LLM)</text>
+  <text x="70" y="245" font-size="8" fill="#3b82f6">codecs · ordering key · cross-table coherence</text>
+  <text x="280" y="252" text-anchor="end" font-size="7.5" fill="#93c5fd">falls back to baseline</text>
+
+  <rect x="40" y="268" width="255" height="34" rx="6" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <circle cx="56" cy="285" r="5" fill="#2a9d90"/><text x="70" y="289" font-size="9.5" fill="#334155" font-weight="500">Validate (EXPLAIN AST)</text>
+  <text x="280" y="289" text-anchor="end" font-size="8" fill="#94a3b8">code · self-heal ≤3</text>
+
+  <rect x="40" y="310" width="255" height="34" rx="6" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="167" y="331" text-anchor="middle" font-size="10" font-weight="700" fill="#b91c1c">⛔ Human Approval Gate</text>
+
+  <rect x="40" y="352" width="255" height="34" rx="6" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <circle cx="56" cy="369" r="5" fill="#2a9d90"/><text x="70" y="373" font-size="9.5" fill="#334155" font-weight="500">Execute DDL</text>
+  <text x="280" y="373" text-anchor="end" font-size="8" fill="#94a3b8">CREATE TABLE</text>
+
+  <rect x="40" y="394" width="255" height="44" rx="6" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <circle cx="56" cy="413" r="5" fill="#2a9d90"/><text x="70" y="411" font-size="9.5" fill="#334155" font-weight="500">Load data (batch INSERT)</text>
+  <text x="70" y="427" font-size="8" fill="#64748b">DML retry separate from schema retry</text>
+
+  <rect x="40" y="446" width="255" height="34" rx="6" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <circle cx="56" cy="463" r="5" fill="#22c55e"/><text x="70" y="467" font-size="9.5" fill="#334155" font-weight="500">Verify row counts</text>
+  <text x="280" y="467" text-anchor="end" font-size="8" fill="#22c55e">✓ match file</text>
+
+  <!-- ═══ AGENT 2 ═══ -->
+  <rect x="332" y="50" width="295" height="430" rx="10" fill="#f1f5f9" stroke="#475569" stroke-width="1.5" filter="url(#s)"/>
+  <text x="479" y="74" text-anchor="middle" font-size="13" font-weight="700" fill="#1e293b">② Context Agent</text>
+
+  <rect x="352" y="90" width="255" height="44" rx="6" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <circle cx="368" cy="109" r="5" fill="#475569"/><text x="382" y="107" font-size="9.5" fill="#334155" font-weight="500">Table docs (code)</text>
+  <text x="382" y="121" font-size="8" fill="#64748b">synthesized from profile + executed DDL</text>
+
+  <rect x="352" y="142" width="120" height="44" rx="6" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <circle cx="368" cy="161" r="5" fill="#3b82f6"/><text x="382" y="157" font-size="8.5" fill="#1e40af" font-weight="600">Feature half</text>
+  <text x="382" y="171" font-size="7.5" fill="#3b82f6">spec + metrics</text>
+
+  <rect x="487" y="142" width="120" height="44" rx="6" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <circle cx="503" cy="161" r="5" fill="#3b82f6"/><text x="517" y="157" font-size="8.5" fill="#1e40af" font-weight="600">Convention half</text>
+  <text x="517" y="171" font-size="7.5" fill="#3b82f6">contradictions</text>
+
+  <text x="479" y="135" text-anchor="middle" font-size="7.5" fill="#94a3b8">concurrent LLM calls</text>
+
+  <rect x="352" y="196" width="255" height="34" rx="6" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <circle cx="368" cy="213" r="5" fill="#475569"/><text x="382" y="217" font-size="9.5" fill="#334155" font-weight="500">Validate entries</text>
+  <text x="592" y="217" text-anchor="end" font-size="8" fill="#94a3b8">namespaces, completeness</text>
+
+  <rect x="352" y="238" width="255" height="34" rx="6" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="479" y="259" text-anchor="middle" font-size="10" font-weight="700" fill="#b91c1c">⛔ Human Approval Gate</text>
+
+  <rect x="352" y="280" width="255" height="34" rx="6" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <circle cx="368" cy="297" r="5" fill="#22c55e"/><text x="382" y="301" font-size="9.5" fill="#334155" font-weight="500">Write as version n+1</text>
+  <text x="592" y="301" text-anchor="end" font-size="8" fill="#22c55e">✓ append-only</text>
+
+  <!-- context_store visual -->
+  <rect x="362" y="330" width="235" height="60" rx="6" fill="#fefce8" stroke="#fde047" stroke-width="1"/>
+  <text x="479" y="350" text-anchor="middle" font-size="10" font-weight="600" fill="#854d0e">context_store</text>
+  <text x="479" y="365" text-anchor="middle" font-size="8" fill="#a16207">table: · metric: · convention: · spec:</text>
+  <text x="479" y="378" text-anchor="middle" font-size="8" fill="#a16207">known_issue: · join_map: · guide: · entity:</text>
+
+  <!-- Arrow from context_store down to Analytics -->
+  <line x1="479" y1="390" x2="479" y2="500" stroke="#a16207" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#a)"/>
+  <text x="485" y="450" font-size="7.5" fill="#a16207">reads</text>
+
+  <!-- ═══ AGENT 3 ═══ -->
+  <rect x="332" y="510" width="608" height="200" rx="10" fill="#fef7f0" stroke="#e76e50" stroke-width="1.5" filter="url(#s)"/>
+  <text x="636" y="534" text-anchor="middle" font-size="13" font-weight="700" fill="#a03c22">③ Analytics Agent</text>
+
+  <!-- Steps in a 2-column layout -->
+  <rect x="352" y="546" width="175" height="30" rx="5" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <text x="439" y="565" text-anchor="middle" font-size="8.5" fill="#334155" font-weight="500">Context + schemas + cache</text>
+
+  <rect x="540" y="546" width="175" height="30" rx="5" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <text x="627" y="565" text-anchor="middle" font-size="8.5" fill="#334155" font-weight="500">Pre-plan knowledge lookup</text>
+
+  <rect x="728" y="546" width="195" height="30" rx="5" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="825" y="565" text-anchor="middle" font-size="8.5" fill="#1e40af" font-weight="600">Plan ≤4 tasks (LLM)</text>
+
+  <rect x="352" y="584" width="280" height="30" rx="5" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="492" y="603" text-anchor="middle" font-size="8.5" fill="#1e40af" font-weight="600">SQL per task (LLM, concurrent) → guard → execute readonly</text>
+
+  <rect x="645" y="584" width="145" height="30" rx="5" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <text x="717" y="603" text-anchor="middle" font-size="8.5" fill="#334155" font-weight="500">Full-set digest (code)</text>
+
+  <rect x="800" y="584" width="123" height="30" rx="5" fill="#fff" stroke="#d1d5db" stroke-width="1"/>
+  <text x="861" y="603" text-anchor="middle" font-size="8.5" fill="#334155" font-weight="500">Sanity gate (code)</text>
+
+  <rect x="352" y="622" width="145" height="30" rx="5" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="424" y="641" text-anchor="middle" font-size="8.5" fill="#1e40af" font-weight="600">Verify (LLM, async)</text>
+
+  <rect x="510" y="622" width="145" height="30" rx="5" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="582" y="641" text-anchor="middle" font-size="8.5" fill="#1e40af" font-weight="600">Narrate insight (LLM)</text>
+
+  <rect x="668" y="622" width="130" height="30" rx="5" fill="#faf5ff" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="733" y="641" text-anchor="middle" font-size="8.5" fill="#6b21a8" font-weight="500">Citation check (code)</text>
+
+  <rect x="810" y="622" width="113" height="30" rx="5" fill="#faf5ff" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="866" y="641" text-anchor="middle" font-size="8.5" fill="#6b21a8" font-weight="500">Quality gate</text>
+
+  <!-- Output -->
+  <rect x="352" y="664" width="571" height="34" rx="6" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="636" y="685" text-anchor="middle" font-size="10" font-weight="700" fill="#166534">✓ Cited Insight → headline · findings · chart · table · confidence · precision · verification</text>
+
+  <!-- Handoff arrows -->
+  <line x1="295" y1="107" x2="295" y2="460" stroke="#2a9d90" stroke-width="1" stroke-dasharray="4 3"/>
+  <path d="M 295 460 L 330 460 L 330 90 L 350 90" stroke="#475569" stroke-width="1.5" marker-end="url(#a)" fill="none"/>
+  <text x="312" y="455" font-size="7.5" fill="#475569" transform="rotate(-90 312 455)">handoff</text>
+
+  <!-- Legend -->
+  <rect x="20" y="718" width="920" height="28" rx="5" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <circle cx="50" cy="732" r="5" fill="#2a9d90"/><text x="60" y="736" font-size="8.5" fill="#64748b">code step</text>
+  <circle cx="130" cy="732" r="5" fill="#3b82f6"/><text x="140" y="736" font-size="8.5" fill="#64748b">LLM call</text>
+  <rect x="210" y="726" width="10" height="10" rx="2" fill="#fef2f2" stroke="#fca5a5" stroke-width="1"/>
+  <text x="225" y="736" font-size="8.5" fill="#64748b">human gate</text>
+  <rect x="310" y="726" width="10" height="10" rx="2" fill="#faf5ff" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="325" y="736" font-size="8.5" fill="#64748b">quality check</text>
+  <circle cx="420" cy="732" r="5" fill="#22c55e"/><text x="430" y="736" font-size="8.5" fill="#64748b">verified output</text>
+</svg>

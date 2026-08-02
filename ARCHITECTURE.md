@@ -4,254 +4,121 @@
 
 Clickwright is an agentic analytics pipeline for Atlys. A PM uploads a feature spec; three agents — Instrumentation, Context, and Analytics — collaborate through a shared ClickHouse-backed knowledge store to produce live tables, documented context, and cited insights. Every decision is traced in Langfuse.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Clickwright                                 │
-│                                                                     │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐                      │
-│  │  ① Instr │───▶│② Context │    │③ Analtic │                      │
-│  │   Agent  │    │  Agent   │◀───│  Agent   │                      │
-│  └────┬─────┘    └────┬─────┘    └────┬─────┘                      │
-│       │               │               │                             │
-│       ▼               ▼               ▼                             │
-│  ┌─────────────────────────────────────────────┐                   │
-│  │              ClickHouse Cloud                │                   │
-│  │  ┌──────────┐ ┌───────────┐ ┌────────────┐  │                  │
-│  │  │ Event    │ │ context   │ │ insight    │  │                   │
-│  │  │ Tables   │ │ _store    │ │ _cache     │  │                   │
-│  │  └──────────┘ └───────────┘ └────────────┘  │                  │
-│  └─────────────────────────────────────────────┘                   │
-│       │                                                             │
-│       ▼                                                             │
-│  ┌──────────┐    ┌──────────┐                                      │
-│  │ Langfuse │    │  Webapp   │                                      │
-│  │ (traces) │    │  (React)  │                                      │
-│  └──────────┘    └──────────┘                                      │
-└─────────────────────────────────────────────────────────────────────┘
-```
+## System Architecture
 
-## Agent Architecture
+![System Architecture](docs/architecture-overview.svg)
 
-The three agents never call each other directly. All shared state flows through `context_store` in ClickHouse. This makes each agent independently testable and the pipeline recoverable after any failure.
+The three agents never call each other directly. All shared state flows through `context_store` in ClickHouse — this makes each agent independently testable and the pipeline recoverable after any failure.
 
-### Agent Handoff
-
-```
-spec.md + events.ndjson
-         │
-         ▼
-┌─────────────────┐     DDL approved      ┌─────────────────┐
-│  ① Instrumenta- │─────────────────────▶│  ② Context      │
-│  tion Agent     │  tables + profile     │  Agent (write)  │
-│                 │  passed as input      │                 │
-│  Profile → DDL  │                       │  Synthesize     │
-│  → Execute →    │                       │  table docs +   │
-│  Load → Verify  │                       │  metrics +      │
-└─────────────────┘                       │  detect changes │
-                                          └────────┬────────┘
-                                                   │ writes to
-                                                   ▼
-                                          ┌─────────────────┐
-                                          │  context_store   │
-                                          │  (ClickHouse)    │
-                                          └────────┬────────┘
-                                                   │ reads from
-         PM question                               ▼
-              │                           ┌─────────────────┐
-              └──────────────────────────▶│  ③ Analytics    │
-                                          │  Agent          │
-                                          │                 │
-                                          │  Plan → SQL →   │
-                                          │  Verify →       │
-                                          │  Narrate        │
-                                          └─────────────────┘
-```
+**Agent handoff:** Instrumentation → Context is a direct function call (the context agent receives the instrumentation result as input). Analytics reads from `context_store` independently — it has no dependency on when instrumentation ran.
 
 ## Pipeline Detail
+
+![Pipeline Detail](docs/pipeline-detail.svg)
 
 ### ① Instrumentation Agent
 
 Transforms a feature spec into live, optimized ClickHouse tables.
 
-```
-spec.md + events.ndjson
-    │
-    ├─ Profile (code) ──────── field types, null rates, cardinality, ranges
-    │
-    ├─ Context Load ─┐
-    ├─ Reconcile ────┘──────── conventions + live table list (concurrent)
-    │
-    ├─ Baseline Schema (code)  correct-but-plain DDL from measurements
-    │
-    ├─ Schema Design (LLM) ──  ONE call for ALL tables in the spec
-    │   │                      ├─ codecs (Delta+ZSTD, T64+ZSTD)
-    │   │                      ├─ ordering key (low-card dims first)
-    │   │                      ├─ cross-table type coherence
-    │   │                      └─ falls back to baseline on failure
-    │   │
-    │   └─ Validate (code) ─── columns match profile, EXPLAIN AST passes
-    │
-    ├─ ⛔ HUMAN APPROVAL GATE
-    │
-    ├─ Execute DDL ─────────── CREATE TABLE statements
-    │
-    ├─ Load Data ───────────── batch INSERT (5K rows/batch)
-    │   └─ DML retry ──────── transient errors retry load only,
-    │                          schema errors trigger redesign
-    │
-    └─ Verify ──────────────── row count matches source file
-```
+| Step | Type | What it does |
+|------|------|-------------|
+| Profile | Code | Per-event field types, null rates, cardinality, numeric ranges |
+| Context + reconcile | Code (concurrent) | Load conventions + check live schema matches docs |
+| Baseline schema | Code | Correct-but-plain DDL from measurements (the fallback) |
+| Schema design | LLM (1 call) | Optimizes ALL tables together — codecs, ordering keys, type coherence |
+| Validate | Code | Every profiled column present, none invented, EXPLAIN AST passes |
+| **Approval gate** | Human | Approve or reject with feedback → regenerate |
+| Execute + load | Code | CREATE TABLE → batch INSERT (5K/batch) with DML-specific retry |
+| Verify | Code | Row count in table must match source file |
 
 ### ② Context Agent
 
 Maintains the shared knowledge store that all agents read from.
 
-```
-                    ┌─────────────────────────────────┐
-                    │        context_store             │
-                    │                                  │
-   Read side        │  overview:*    convention:*      │
-   (getContext)     │  join_map:*    guide:*           │  Write side
-   ─────────────▶   │  table:*       metric:*          │  ◀──────────
-   Any agent calls  │  funnel:*      spec:*            │  Only after
-   this to get      │  entity:*      known_issue:*     │  instrumentation
-   prompt-ready     │                                  │
-   knowledge        │  Append-only, versioned          │
-                    │  Latest = LIMIT 1 BY entity      │
-                    └─────────────────────────────────┘
-
-   Write flow:
-   ┌──────────────┐   ┌────────────────┐   ┌──────────┐
-   │ table:* docs │ + │ Feature half   │ + │Convention│  All run
-   │ (code — from │   │ (LLM — spec    │   │half (LLM)│  CONCURRENTLY
-   │ measurements)│   │ summary +      │   │— only if │
-   │              │   │ metrics)       │   │deviations│
-   └──────┬───────┘   └───────┬────────┘   └────┬─────┘
-          │                   │                  │
-          └───────────┬───────┘──────────────────┘
-                      ▼
-              ⛔ HUMAN APPROVAL GATE
-                      │
-                      ▼
-              INSERT as version n+1
-```
+| Step | Type | What it does |
+|------|------|-------------|
+| Table docs | Code | Synthesized from measured profile + executed DDL — no LLM needed |
+| Feature half | LLM | `spec:` summary + `metric:`/`funnel:` definitions the PM's questions need |
+| Convention half | LLM (concurrent, conditional) | Revisions to existing conventions + contradiction warnings — skipped when no deviations |
+| Validate | Code | Namespaces, one entry per created table, size checks |
+| **Approval gate** | Human | Approve proposed entries |
+| Write | Code | Append as version n+1 — code owns versions, run_ids, timestamps |
 
 ### ③ Analytics Agent
 
 Turns a PM's question into a cited, verified insight.
 
-```
-"What's our funnel conversion by platform?"
-    │
-    ├─ Context Load (concurrent) ── knowledge + schemas + cache check
-    │
-    ├─ Pre-plan Lookup (code) ───── relevant known issues + metrics
-    │
-    ├─ Plan (LLM) ──────────────── ≤4 tasks, proactive segmentation
-    │   └─ depends_on ──────────── sequential tasks for funnels
-    │
-    ├─ SQL per task (concurrent) ── each: LLM write → code guard →
-    │   │                           readonly execute → retry ≤3
-    │   └─ Prior SQL memory ─────── follow-ups reuse prior queries
-    │
-    ├─ Result Digest (code) ─────── full-set stats in ClickHouse
-    │                               (exact rates, not sample extrapolation)
-    │
-    ├─ Sanity Gate (code) ──────── drop empties, flag impossible rates
-    │
-    ├─ Verify (LLM, async) ─────── independent query cross-checks
-    │                               the headline figure
-    │
-    ├─ Knowledge Lookup (LLM) ──── known issues that explain anomalies
-    │   + Precision (code) ──────── Wilson intervals on every rate
-    │   + Related Insights (DB) ─── past answers from other conversations
-    │   (all three run concurrently)
-    │
-    ├─ Narrate (LLM) ───────────── headline + findings + chart + table
-    │
-    ├─ Citation Check (code) ────── every number must be in SQL results
-    │                               or a verified arithmetic of two that are
-    │
-    └─ Quality Gate ─────────────── deterministic when code checks pass;
-                                    LLM only when anomalies need review
-```
+| Step | Type | What it does |
+|------|------|-------------|
+| Context load | Code (concurrent) | Knowledge bundle + schemas + cache check |
+| Pre-plan lookup | Code | Surface relevant known issues + metrics before planning |
+| Plan | LLM | ≤4 aggregate tasks with proactive segmentation |
+| SQL per task | LLM (concurrent) | Write → guard (readonly=1) → execute → retry ≤3 |
+| Result digest | Code | Full-set stats computed in ClickHouse (exact rates, not extrapolation) |
+| Sanity gate | Code | Drop empties, flag >100% rates, low-n warnings |
+| Verify | LLM (async) | Independent query cross-checks the headline figure |
+| Knowledge lookup | LLM | Known issues that explain anomalies |
+| Precision | Code | Wilson intervals on every rate |
+| Narrate | LLM | Headline + findings + chart + segment table |
+| Citation check | Code | Every number must trace to SQL results |
+| Quality gate | Code/LLM | Deterministic when code checks pass; LLM only for edge cases |
 
-## Data Flow
+## Context Store Schema
 
-```
-┌────────────────────────────────────────────────────────────────┐
-│                      ClickHouse Cloud                          │
-│                                                                │
-│  PROVIDED (read-only)          CREATED BY SPECS                │
-│  ┌────────────────────┐        ┌─────────────────────┐        │
-│  │ 8 base event tables│        │ N tables per spec   │        │
-│  │ ~3.5M rows         │        │ (express_checkout_   │        │
-│  │ ORDER BY (id,ts,   │        │  shown, otp_entered, │        │
-│  │   user_id)         │        │  ...)                │        │
-│  └────────────────────┘        │ ORDER BY (dim,       │        │
-│                                │   join_key, ts)      │        │
-│  APPLICATION STATE             │ + codecs + TTL       │        │
-│  ┌────────────────────┐        └─────────────────────┘        │
-│  │ context_store      │ ◀── append-only knowledge             │
-│  │ runs_log           │ ◀── event stream per run              │
-│  │ run_summary        │ ◀── one row per completed run         │
-│  │ conversations      │ ◀── chat state                        │
-│  │ messages           │ ◀── chat turns (stores full Insight)  │
-│  │ insight_cache      │ ◀── answer cache (question+context)   │
-│  │ dashboards         │ ◀── saved SQL visualizations          │
-│  └────────────────────┘                                       │
-└────────────────────────────────────────────────────────────────┘
-```
+The knowledge store is an append-only, versioned ClickHouse table. Reads resolve the latest version per entity via `ORDER BY entity ASC, version DESC LIMIT 1 BY entity`.
+
+| Namespace | What it stores |
+|-----------|---------------|
+| `overview:` | Business context |
+| `convention:` | Rules every query must follow (hygiene filters, os bucketing, currency) |
+| `join_map:` | How tables join (user_id, application_id paths) |
+| `guide:` | Funnel analysis methodology |
+| `table:` | Per-table docs: columns, join keys, gotchas |
+| `metric:` | Metric definitions with exact numerator/denominator |
+| `funnel:` | Funnel stage definitions |
+| `spec:` | Feature summaries from instrumented specs |
+| `known_issue:` | Data quirks (K1–K7) |
+
+## Quality & Correctness Stack
+
+Every insight passes through multiple deterministic checks before reaching the PM:
+
+1. **SQL guard** — readonly=1, banned-keyword filter, single-statement, LIMIT cap
+2. **Result digest** — full-population stats computed in ClickHouse, not extrapolated from samples
+3. **Sanity gate** — empty results dropped, rates >100% flagged, n<50 warned
+4. **Citation check** — every number in prose must exist in SQL results (or be a verified arithmetic of two that do)
+5. **Wilson precision** — 95% confidence intervals on every rate, from the actual denominator
+6. **Execution-backed verification** — an independently written query cross-checks the headline figure
+7. **Established figures** — follow-up answers carry prior figures + denominators to prevent contradiction
 
 ## Tracing (Langfuse)
 
-Every pipeline run and every chat answer is a Langfuse trace.
+Every pipeline run and chat answer is a Langfuse trace with numeric scores:
 
-```
-Trace: pipeline:01_express_checkout
-├─ span: instrumentation
-│   ├─ span: profile
-│   ├─ span: context_load          ┐
-│   ├─ span: schema_reconciliation ┘ concurrent
-│   ├─ span: ddl_synthesis
-│   ├─ span: schema_design_attempt_1
-│   │   └─ generation: schema_design (LLM)
-│   ├─ span: dry_run
-│   ├─ span: approval_attempt_1
-│   ├─ span: ddl_execution_attempt_1
-│   │   ├─ rows_loaded: express_checkout_shown (1650)
-│   │   ├─ rows_loaded: otp_entered (1007)
-│   │   └─ ...
-│   └─ scores: self_heal_attempts=1, rows_verified=1
-└─ span: context_update
-    ├─ span: update_generation_attempt_1
-    │   ├─ generation: context_write_feature (LLM)   ┐
-    │   └─ generation: context_write_conventions (LLM)┘ concurrent
-    ├─ span: update_approval_attempt_1
-    └─ scores: context_entries_written=8
-```
-
-Traces carry numeric scores (self-heal attempts, rows verified, cache hits, sanity flags, citation failures) that appear as sortable columns in the Langfuse dashboard.
+| Score | What it measures |
+|-------|-----------------|
+| `self_heal_attempts` | How many DDL/SQL retries before success |
+| `rows_verified` | 1 if all row counts matched |
+| `context_entries_written` | How many knowledge entries were added |
+| `sanity_flags` | Number of flagged results |
+| `citation_failures` | How many narration retries for uncited numbers |
+| `cache_hit` | 1 if served from insight_cache |
 
 ## LLM Provider
 
 **Model:** Claude Sonnet 5 (configurable via `CLICKWRIGHT_MODEL`)
 
-**Why Claude:** The pipeline needs structured JSON output with strict schema adherence (DDL, task plans, insight cards), strong SQL generation for ClickHouse dialect, and the ability to follow complex multi-section prompts. Claude's instruction-following and JSON mode reliability made it the best fit.
+**Why Claude:** Structured JSON output with strict schema adherence, strong ClickHouse SQL generation, and reliable multi-section prompt following. Effort pinned to `medium` — prompts are tightly specified and schema-validated.
 
-**Two auth modes:**
-- `ANTHROPIC_API_KEY` → direct Anthropic Messages API
-- No key → Claude Agent SDK with machine's OAuth login (company plan)
-
-**Effort level:** Pinned to `medium` — the prompts are tightly specified and schema-validated, so extended thinking adds latency without improving output.
+**Auth:** `ANTHROPIC_API_KEY` (direct API) or Claude Code OAuth login (company plan).
 
 ## Tech Stack
 
 | Component | Technology | Why |
 |---|---|---|
-| Database | ClickHouse Cloud | The competition platform; also ideal for event analytics |
-| Backend | Node.js + TypeScript | Fast iteration, strong typing, async-native |
-| LLM | Claude (Anthropic) | Best structured-output reliability |
-| Tracing | Langfuse | Required by competition; self-hosted on ClickHouse |
-| Frontend | React + Vite + Tailwind | Rapid UI development |
+| Database | ClickHouse Cloud | Competition platform; ideal for event analytics at scale |
+| Backend | Node.js + TypeScript | Async-native, strong typing, fast iteration |
+| LLM | Claude (Anthropic) | Best structured-output reliability for SQL + JSON |
+| Tracing | Langfuse Cloud | Full observability; every span, generation, and score queryable |
+| Frontend | React + Vite + Tailwind | Component library with SSE streaming support |
 | Validation | Zod | Runtime schema validation on every LLM output |

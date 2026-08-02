@@ -37,7 +37,7 @@ import {
   initDashboardTables, saveDashboard, listDashboards, runDashboard, deleteDashboard,
 } from "./dashboards.js";
 import { initInsightCache } from "../agents/analytics.js";
-import { closeDb, query } from "../core/db.js";
+import { closeDb, command, query } from "../core/db.js";
 import { env } from "../core/env.js";
 import { flushTraces } from "../core/tracing.js";
 import { observeRouter } from "../observe/routes.js";
@@ -156,24 +156,47 @@ app.get("/api/specs", async (_req, res) => {
   res.json(specs);
 });
 
-/** History that survives restarts — reconstructed from runs_log. */
+/** History that survives restarts. Uses run_summary (one row per run) when
+ *  populated; falls back to the GROUP BY over runs_log for older data. */
 app.get("/api/history", async (_req, res) => {
+  // Try the fast path first — run_summary is O(runs), not O(events).
+  const summary = await query<{
+    run_id: string; spec: string; started: string; finished: string;
+    status: string; events: string; duration_ms: string;
+  }>(`
+    SELECT run_id, spec, toString(started) AS started, toString(finished) AS finished,
+           status, toString(events) AS events, toString(duration_ms) AS duration_ms
+    FROM run_summary ORDER BY started DESC LIMIT 200
+  `).catch(() => [] as Array<{
+    run_id: string; spec: string; started: string; finished: string;
+    status: string; events: string; duration_ms: string;
+  }>);
+
+  if (summary.length > 0) {
+    return res.json(
+      summary.map((r) => ({
+        run_id: r.run_id,
+        spec: r.spec,
+        started: r.started,
+        finished: r.finished,
+        last_status: r.status,
+        events: Number(r.events),
+        durationMs: Number(r.duration_ms),
+      })),
+    );
+  }
+
+  // Fallback: reconstruct from runs_log (pre-existing runs without summaries).
   const rows = await query<{
     run_id: string; spec: string; started: string; finished: string;
     last_status: string; events: string;
   }>(`
     SELECT run_id, any(spec) AS spec,
            toString(min(ts)) AS started, toString(max(ts)) AS finished,
-           -- non-status rows must weigh LESS than any status row, otherwise ties
-           -- make argMax return a step name (e.g. "profile") as the status
            argMax(name, if(type = 'status', toInt64(seq) + 1, -1)) AS last_status,
            toString(count()) AS events,
-           -- end-to-end wall clock of the run, gates included
            toString(dateDiff('millisecond', min(ts), max(ts))) AS durationMs
     FROM runs_log GROUP BY run_id ORDER BY started DESC
-    -- The screen shows recent runs; without a bound this returned every run ever
-    -- and grew the payload forever. runs_log also carries a TTL (see runs.ts) so
-    -- the scan behind this GROUP BY stays bounded too.
     LIMIT 200
   `);
   res.json(
@@ -315,6 +338,12 @@ await manager.init();
 await initChatTables();
 await initDashboardTables();
 await initInsightCache();
+// Materialized category column — ClickHouse derives it from entity on insert,
+// so existing rows get it on the next merge and new rows have it immediately.
+await command(
+  `ALTER TABLE context_store ADD COLUMN IF NOT EXISTS category LowCardinality(String) ` +
+  `MATERIALIZED splitByChar(':', entity)[1]`
+).catch(() => {});
 const server = app.listen(PORT, () => {
   console.log(`Clickwright backend listening on http://localhost:${PORT}`);
 });

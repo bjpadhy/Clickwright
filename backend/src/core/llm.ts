@@ -198,7 +198,14 @@ export async function complete(
     emitRunEvent({
       type: "log",
       name: "llm_done",
-      payload: { call: name, elapsedMs: Date.now() - startedAt, outputChars: text.length },
+      payload: {
+        call: name,
+        elapsedMs: Date.now() - startedAt,
+        outputChars: text.length,
+        inputTokens: usage.input,
+        outputTokens: usage.output,
+        ...(usageEstimated ? { usageEstimated: true } : {}),
+      },
     });
     generation.end({
       output: text,

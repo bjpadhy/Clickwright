@@ -144,18 +144,36 @@ export class RunManager {
         ts      DateTime64(3),
         type    LowCardinality(String),
         name    String,
-        payload String
+        payload String,
+        phase   String DEFAULT ''
       ) ENGINE = MergeTree ORDER BY (run_id, seq)
       TTL toDateTime(ts) + INTERVAL 90 DAY
       COMMENT 'Clickwright run events — powers the UI live stepper, replay, and history'
     `);
     await command(`ALTER TABLE runs_log ADD COLUMN IF NOT EXISTS spec String AFTER run_id`);
+    await command(`ALTER TABLE runs_log ADD COLUMN IF NOT EXISTS phase String DEFAULT '' AFTER payload`);
     // Roughly 113 events (~73KB) per run, appended forever. /api/history
     // aggregates this whole table, so without a retention bound both the scan
     // and the storage grow without limit. 90 days keeps every run anyone would
     // reasonably look back at. Applied to already-created tables too, since the
     // CREATE above is a no-op once the table exists.
     await command(`ALTER TABLE runs_log MODIFY TTL toDateTime(ts) + INTERVAL 90 DAY`);
+
+    // Materialized view: one summary row per run, written on completion. Makes
+    // /api/history O(runs) instead of O(events) — no more GROUP BY over the
+    // entire runs_log on every page load.
+    await command(`
+      CREATE TABLE IF NOT EXISTS run_summary (
+        run_id     String,
+        spec       String,
+        started    DateTime64(3),
+        finished   DateTime64(3),
+        status     LowCardinality(String),
+        events     UInt32,
+        duration_ms UInt64
+      ) ENGINE = ReplacingMergeTree(finished) ORDER BY run_id
+      COMMENT 'One row per run — populated on run completion for fast history queries'
+    `);
   }
 
   list(): Array<Omit<RunRecord, "events" | "subscribers" | "resolveApproval">> {
@@ -278,6 +296,7 @@ export class RunManager {
       type: stored.type,
       name: stored.name,
       payload: JSON.stringify(stored.payload),
+      phase: stored.phase,
     });
 
     // Flush at once for anything someone may be about to read: a gate the UI is
@@ -303,6 +322,19 @@ export class RunManager {
   private status(run: RunRecord, status: RunRecord["status"], extra: Record<string, unknown> = {}): void {
     run.status = status;
     this.push(run, { type: "status", name: status, payload: extra });
+    // Write a summary row on terminal states for fast history queries.
+    if (status === "succeeded" || status === "failed") {
+      const now = new Date().toISOString().replace("T", " ").replace("Z", "");
+      insert("run_summary", [{
+        run_id: run.id,
+        spec: run.spec,
+        started: run.startedAt?.replace("T", " ").replace("Z", "") ?? now,
+        finished: now,
+        status,
+        events: run.events.length,
+        duration_ms: run.durationMs ?? 0,
+      }]).catch(() => {});
+    }
   }
 
   /** Park until the HTTP layer resolves the gate. */

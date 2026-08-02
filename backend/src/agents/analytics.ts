@@ -154,6 +154,8 @@ export interface Insight {
     rowCount: number;
     totalRows?: number;
   }>;
+  /** Tasks that were planned but dropped (SQL failures, empty results, blocked). */
+  droppedTasks?: string[];
   /** True when served from insight_cache (no LLM calls, ~ms). */
   cached?: boolean;
 }
@@ -168,6 +170,10 @@ const PlanSchema = z.object({
         question: z.string().min(1),
         tables: z.array(z.string()).min(1),
         dimensions: z.array(z.string()).optional(),
+        /** When set, this task runs AFTER the named task and receives its result
+         *  summary — use for funnel drop-off analysis or comparisons that need
+         *  a prior stage's count as input. */
+        depends_on: z.string().optional(),
       }),
     )
     .max(4),
@@ -672,6 +678,9 @@ export interface AnalyticsInput {
     /** The actual SQL queries from the most recent agent turn — lets the SQL
      *  writer extend or refine them instead of writing from scratch. */
     priorSql?: Array<{ task: string; title: string; query: string }>;
+    /** Tasks that were planned but could not be executed — the planner should
+     *  avoid repeating the same impossible task on follow-ups. */
+    droppedTasks?: string[];
   }>;
 }
 
@@ -755,23 +764,57 @@ export async function runAnalytics(
       }
     }
 
-    const historyText =
-      input.history && input.history.length > 0
-        ? input.history
-            .slice(-6)
-            .map((h) => {
-              let line = `${h.role}: ${h.text}`;
-              if (h.figures) line += `\n    already reported: ${h.figures}`;
-              if (h.sqlContext) line += `\n    prior approach: ${h.sqlContext}`;
-              return line;
-            })
-            .join("\n")
-        : "(none)";
+    // ── Fix 5: Smart history compression ──
+    // Recent turns (last 4) get full detail; older turns compress to headline
+    // + figures only. This expands the effective window from 6 to 12 turns
+    // without bloating the prompt.
+    const historyText = (() => {
+      if (!input.history?.length) return "(none)";
+      const all = input.history;
+      const recent = all.slice(-4);
+      const older = all.slice(0, -4).slice(-8); // up to 8 older turns, compressed
+      const compress = (h: typeof all[0]) =>
+        `${h.role}: ${h.text}${h.figures ? ` [${h.figures}]` : ""}`;
+      const expand = (h: typeof all[0]) => {
+        let line = `${h.role}: ${h.text}`;
+        if (h.figures) line += `\n    already reported: ${h.figures}`;
+        if (h.sqlContext) line += `\n    prior approach: ${h.sqlContext}`;
+        if (h.droppedTasks?.length)
+          line += `\n    failed tasks: ${h.droppedTasks.join("; ")}`;
+        return line;
+      };
+      const parts: string[] = [];
+      if (older.length) {
+        parts.push("(earlier turns, compressed)");
+        parts.push(...older.map(compress));
+        parts.push("(recent turns, full detail)");
+      }
+      parts.push(...recent.map(expand));
+      return parts.join("\n");
+    })();
+
+    // ── pre-planning knowledge lookup (term-match, no LLM) ──
+    // Surface known issues and metric definitions relevant to the question BEFORE
+    // planning, so the planner can account for data quirks and use the right
+    // definitions. This is a fast term-match, not the LLM lookup that runs later.
+    const prePlanKnowledge = await step(span, "pre_plan_lookup", {}, async () => {
+      const preBundle = await getContext({ topic: input.question });
+      const relevant = preBundle.entries
+        .filter((e) => {
+          const cat = e.entity.split(":")[0] ?? "";
+          return cat === "known_issue" || cat === "metric" || cat === "funnel";
+        })
+        .map((e) => `${e.entity}: ${e.definition_md.split("\n")[0]?.slice(0, 200)}`)
+        .slice(0, 6);
+      return relevant.length
+        ? `\n## Relevant known issues and definitions for this question\n${relevant.join("\n")}`
+        : "";
+    });
 
     // ── plan ──
     const plan: Plan = await step(span, "plan", {}, async (planSpan) => {
       const prompt = await loadPrompt("analytics_plan_tasks", {
-        knowledge: bundle.markdown,
+        knowledge: bundle.markdown + prePlanKnowledge,
         // Planning needs to distinguish dimensions from metrics and spot time
         // columns. Replace verbose types with short tags: DateTime→[time],
         // LowCardinality(String)→[dim], numeric types→[num], keep the rest as-is
@@ -850,65 +893,65 @@ export async function runAnalytics(
       : "";
 
     let sqlAttemptsTotal = 0;
-    const results: TaskResult[] = await Promise.all(
-      plan.tasks.map((task) =>
-        step(span, `task_${task.id}`, { title: task.title }, async (taskSpan) => {
-          let feedback = "";
-          let lastTransient = "";
-          for (let attempt = 1; attempt <= MAX_SQL_ATTEMPTS; attempt++) {
-            sqlAttemptsTotal++;
-            try {
-              const executed = await step(
-                taskSpan,
-                `sql_attempt_${attempt}`,
-                { task: task.title, feedback },
-                async (sqlSpan) => {
-                  const prompt = await loadPrompt("analytics_write_sql", {
-                    context: sqlRulesMarkdown,
-                    schemas: schemaSubset(schemas, task.tables),
-                    task: JSON.stringify(task),
-                    prior_sql: priorSqlText
-                      ? `\n<prior_sql>\nQueries from the previous answer in this conversation. Reuse their tables,\nfilters and denominator logic where the task overlaps — consistency across\nturns matters more than a novel approach.\n${priorSqlText}\n</prior_sql>\n`
-                      : "",
-                    feedback: feedback
-                      ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
-                      : "",
-                  });
-                  const parts = guardSqlParts(await llm(sqlSpan, `sql_${task.id}`, prompt));
-                  const sql = capForFetch(parts);
-                  const rows = await queryReadonly(sql);
-                  recordQuery(sqlSpan, `result_${task.id}`, sql, rows);
-                  return {
-                    id: task.id,
-                    title: task.title,
-                    sql,
-                    semanticSql: parts.validated,
-                    coreSql: parts.core,
-                    authoredLimit: parts.authoredLimit,
-                    rows,
-                    totalRows: rows.length,
-                    digest: null,
-                    digestNote: "",
-                    flags: [],
-                  } as TaskResult;
-                },
-              );
-              // Profiling happens outside the attempt, so a failed profile can never
-              // be mistaken for bad SQL and send a working query back for rewriting.
-              return await attachDigest(taskSpan, executed);
-            } catch (error) {
-              if (isTransientDbError(error)) {
-                // infrastructure, not the SQL: back off and regenerate without
-                // blaming the model, but say so if we exhaust the attempts
-                feedback = "";
-                lastTransient = error instanceof Error ? error.message : String(error);
-                await new Promise((r) => setTimeout(r, 1000 * attempt));
-                continue;
-              }
-              feedback = `Your SQL failed: ${error instanceof Error ? error.message : String(error)}`;
+    const completedResults = new Map<string, TaskResult>();
+
+    /** Execute one task with self-healing retries. */
+    const executeTask = (task: Plan["tasks"][0], depContext: string) =>
+      step(span, `task_${task.id}`, { title: task.title }, async (taskSpan) => {
+        let feedback = "";
+        let lastTransient = "";
+        for (let attempt = 1; attempt <= MAX_SQL_ATTEMPTS; attempt++) {
+          sqlAttemptsTotal++;
+          try {
+            const executed = await step(
+              taskSpan,
+              `sql_attempt_${attempt}`,
+              { task: task.title, feedback },
+              async (sqlSpan) => {
+                const prompt = await loadPrompt("analytics_write_sql", {
+                  context: sqlRulesMarkdown,
+                  schemas: schemaSubset(schemas, task.tables),
+                  task: JSON.stringify(task),
+                  prior_sql: (priorSqlText || depContext)
+                    ? `\n<prior_sql>\n${depContext ? `Results from earlier tasks in this plan that this task builds on:\n${depContext}\n\n` : ""}${priorSqlText ? `Queries from the previous answer in this conversation. Reuse their tables,\nfilters and denominator logic where the task overlaps — consistency across\nturns matters more than a novel approach.\n${priorSqlText}` : ""}\n</prior_sql>\n`
+                    : "",
+                  feedback: feedback
+                    ? `\n# Feedback on your previous attempt — fix this\n${feedback}\n`
+                    : "",
+                });
+                const parts = guardSqlParts(await llm(sqlSpan, `sql_${task.id}`, prompt));
+                const sql = capForFetch(parts);
+                const rows = await queryReadonly(sql);
+                recordQuery(sqlSpan, `result_${task.id}`, sql, rows);
+                return {
+                  id: task.id,
+                  title: task.title,
+                  sql,
+                  semanticSql: parts.validated,
+                  coreSql: parts.core,
+                  authoredLimit: parts.authoredLimit,
+                  rows,
+                  totalRows: rows.length,
+                  digest: null,
+                  digestNote: "",
+                  flags: [],
+                } as TaskResult;
+              },
+            );
+            const result = await attachDigest(taskSpan, executed);
+            completedResults.set(task.id, result);
+            return result;
+          } catch (error) {
+            if (isTransientDbError(error)) {
+              feedback = "";
+              lastTransient = error instanceof Error ? error.message : String(error);
+              await new Promise((r) => setTimeout(r, 1000 * attempt));
+              continue;
             }
+            feedback = `Your SQL failed: ${error instanceof Error ? error.message : String(error)}`;
           }
-          return {
+        }
+          const failed: TaskResult = {
             id: task.id,
             title: task.title,
             sql: "",
@@ -921,10 +964,29 @@ export async function runAnalytics(
             digestNote: "",
             flags: [],
             dropped: `gave up after ${MAX_SQL_ATTEMPTS} attempts: ${feedback || lastTransient || "unknown error"}`,
-          } as TaskResult;
-        }),
-      ),
+          };
+          completedResults.set(task.id, failed);
+          return failed;
+        });
+
+    // Split tasks: independent ones run in parallel, dependent ones run after
+    // their dependency completes so they can reference its results.
+    const independent = plan.tasks.filter((t) => !t.depends_on);
+    const dependent = plan.tasks.filter((t) => t.depends_on);
+
+    const results: TaskResult[] = await Promise.all(
+      independent.map((task) => executeTask(task, "")),
     );
+
+    // Dependent tasks run sequentially, each receiving a summary of its
+    // dependency's result so the SQL writer can reference concrete counts.
+    for (const task of dependent) {
+      const dep = completedResults.get(task.depends_on!);
+      const depContext = dep && dep.rows.length > 0
+        ? `-- ${dep.id} (${dep.title}) returned ${dep.totalRows} rows. First row: ${JSON.stringify(dep.rows[0])}`
+        : "";
+      results.push(await executeTask(task, depContext));
+    }
 
     // ── sanity gate ──
     const { kept, notes } = await step(span, "sanity_gate", {}, async () =>
@@ -979,15 +1041,44 @@ export async function runAnalytics(
         ).catch(() => null)
       : Promise.resolve(null);
 
-    // ── knowledge lookup + precision — independent, run concurrently ──
-    // lookupContext uses an LLM call; precision is pure math. Neither depends
-    // on the other, and both feed into narration — so overlapping them shaves
-    // the lookup's wall clock off the critical path.
+    // ── knowledge lookup + precision + cross-conversation context ──
+    // All three are independent: lookupContext uses an LLM call, precision is
+    // pure math, and the cross-conv lookup is a simple DB query.
     const lookupDigest = kept
       .map((r) => `${r.title}: ${JSON.stringify(r.rows.slice(0, 3))}`)
       .join("\n")
       .slice(0, 1500);
-    const [lookup, { precision, headlinePrecision }] = await Promise.all([
+
+    // Cross-conversation context: find related past insights the PM has seen
+    // in other conversations, so the narrator can reference or contrast them.
+    const relatedInsightsPromise = step(span, "related_insights", {}, async () => {
+      try {
+        // Extract key terms from the question for a lightweight search
+        const terms = input.question.toLowerCase()
+          .split(/[^a-z0-9]+/).filter((t) => t.length > 3)
+          .slice(0, 5);
+        if (terms.length === 0) return "";
+        const likeClause = terms.map((t) => `question ILIKE '%${t}%'`).join(" OR ");
+        const rows = await query<{ question: string; insight_json: string }>(
+          `SELECT question, insight_json FROM insight_cache
+           WHERE (${likeClause}) AND cache_key != {currentKey:String}
+           ORDER BY created_at DESC LIMIT 3`,
+          { currentKey: key },
+        );
+        if (rows.length === 0) return "";
+        const summaries = rows.map((r) => {
+          try {
+            const ins = JSON.parse(r.insight_json) as Insight;
+            return `- "${r.question}" → ${ins.headline}`;
+          } catch { return null; }
+        }).filter(Boolean);
+        return summaries.length
+          ? `\n## Related past insights (from other conversations)\n${summaries.join("\n")}`
+          : "";
+      } catch { return ""; }
+    });
+
+    const [lookup, { precision, headlinePrecision }, relatedContext] = await Promise.all([
       lookupContext(span, `${input.question}\n${lookupDigest}`, opts.llm),
       step(span, "precision", {}, async () => {
         // What the answer's main claims rest on: the listed rows and, when the result
@@ -1015,6 +1106,7 @@ export async function runAnalytics(
           headlinePrecision: widestPerColumn(headline),
         };
       }),
+      relatedInsightsPromise,
     ]);
 
     const precisionText =
@@ -1121,7 +1213,7 @@ export async function runAnalytics(
               sanity: sanityNotes.join("\n") || "(clean)",
               method: methodNotes || "(no queries succeeded)",
               precision: precisionText,
-              lookup: lookup.markdown || "(nothing relevant retrieved)",
+              lookup: (lookup.markdown || "(nothing relevant retrieved)") + relatedContext,
               context_version: contextVersion,
               history: input.history?.length ? `\n# Conversation so far\n${historyText}\n` : "",
               feedback: feedback
@@ -1255,6 +1347,9 @@ export async function runAnalytics(
           }
         : null,
       contextVersion,
+      droppedTasks: [...failedTasks, ...results.filter((r) => r.dropped && !failedTasks.includes(r))]
+        .map((r) => `${r.title}: ${r.dropped}`)
+        .filter(Boolean),
       // Every executed query, so a reader can see both what was sampled and how the
       // whole result set was measured.
       sql: results.flatMap((r) => [

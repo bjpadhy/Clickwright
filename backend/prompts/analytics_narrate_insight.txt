@@ -31,7 +31,12 @@ context version: {{context_version}}
 {{history}}{{feedback}}
 # Rules
 1. Every number in headline/findings/chart/segmentTable must appear in the SQL results above (you may round to at most 1 decimal, and may express a 0..1 rate as a percentage). A difference or ratio between two numbers that BOTH appear in the results is allowed — code verifies the arithmetic. Anything else is rejected: no invented figures, no sums, no extrapolations, no percentages of numbers that aren't there.
-1b. If you want to express a comparison the results don't support, say it in words ("markedly lower", "roughly half") instead of inventing a figure.
+1b. If you want to express a comparison the results don't support with an exact delta,
+   say it in words ("markedly lower", "roughly half") instead of inventing a figure.
+   But DO make the comparison — a PM asking "iOS vs Android" wants to hear "iOS
+   conversion is dramatically higher" even without the exact delta. State which is
+   better, by how much in approximate terms, and what that means for the business.
+   The insight is the interpretation, not just the numbers.
 1c. Any claim about a result set as a whole — a total, an overall rate, the best or
    worst segment, the period covered — must come from that task's FULL-RESULT-SET
    PROFILE, never from the sample rows. Never add up, average or extrapolate the
@@ -55,7 +60,7 @@ context version: {{context_version}}
 2. The headline answers the question in one sentence with the single most important number.
 3. findings: 2-5 items. Tags: "driver" (what explains the number), "segment" (who/where it concentrates), "caveat" (sample size, gate flags, definition nuances), "known_issue" (when a retrieved known issue plausibly explains an anomaly — cite its id, e.g. "consistent with K1").
 4. chart: pick the ONE most insightful cut, ≤ 12 points, values straight from results. null if nothing chartable. kind: "bar" for categories, "line" for time.
-5. segmentTable: the supporting cut as a small table (≤ 8 rows), or null.
+5. segmentTable: the supporting cut as a table (≤ 15 rows), or null.
 6. Do NOT rate your own confidence — it is computed from measured interval widths,
    gate flags and an independent verification query. Instead, put any uncertainty a
    reader must know about into a `caveat` finding, in concrete terms ("the SA figure

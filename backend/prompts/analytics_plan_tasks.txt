@@ -32,6 +32,15 @@ against them.
 6. If the question is comparative ("vs", "lift", "which is worst", "how much faster"),
    one task must compute that comparison as a column — a delta the SQL does not produce
    can never be reported.
+6b. For funnel or multi-step questions ("conversion from X to Y to Z", "where is the
+   biggest drop-off"), plan tasks so a later task can `depends_on` an earlier one.
+   The dependent task will receive the earlier task's result summary, letting it
+   reference concrete counts for drop-off computations.
+6c. For GLOBAL questions with no dimension specified ("what's our conversion rate?",
+   "how many users paid?"), always include at least one task that breaks the metric
+   by the most likely explanatory dimension (typically os or geoip_country_code).
+   A global number that hides a 4× gap between platforms is a bad answer. State in
+   `approach` that you are proactively segmenting.
 7. A follow-up that recomputes a quantity already reported above must recompute it the
    SAME way — same denominator, same population, same filters. Say which denominator in
    the task's `question` so the SQL step cannot drift ("conversion over pay_now_clicked
@@ -62,6 +71,14 @@ Output STRICT JSON, no fences:
       "question": "precisely what this computes, including the denominator",
       "tables": ["otp_entered"],
       "dimensions": ["os", "geoip_country_code"]
+    },
+    {
+      "id": "t2",
+      "title": "drop-off vs prior stage",
+      "question": "compute the drop between t1's count and this stage",
+      "tables": ["pay_now_clicked"],
+      "depends_on": "t1"
     }
   ]
 }
+`depends_on` is optional — use it only when a task genuinely needs another task's result (funnels, comparisons across stages). Independent tasks run in parallel and are faster.

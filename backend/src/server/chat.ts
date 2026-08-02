@@ -350,7 +350,7 @@ export async function streamAnswer(
       ),
       query<{ role: string; question: string; insight_json: string }>(
         `SELECT role, question, insight_json FROM messages
-         WHERE conv_id = {conv:String} ORDER BY seq DESC LIMIT 6`,
+         WHERE conv_id = {conv:String} ORDER BY seq DESC LIMIT 12`,
         { conv: convId },
       ),
     ]);
@@ -389,6 +389,7 @@ export async function streamAnswer(
           title: s.title,
           query: s.query,
         })),
+        droppedTasks: insight?.droppedTasks ?? [],
       };
     });
 

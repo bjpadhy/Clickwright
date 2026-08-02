@@ -91,9 +91,30 @@ Every insight passes through multiple deterministic checks before reaching the P
 6. **Execution-backed verification** — an independently written query cross-checks the headline figure
 7. **Established figures** — follow-up answers carry prior figures + denominators to prevent contradiction
 
-## Tracing (Langfuse)
+## Tracing (Langfuse) — Deep Integration
 
-Every pipeline run and chat answer is a Langfuse trace with numeric scores:
+Langfuse is not a bolt-on — it is wired into the core execution primitive that every agent operation passes through. The `step()` function in `core/tracing.ts` wraps every unit of work: it creates a Langfuse span on entry, records output (or error) on exit, and emits SSE events for the live UI. No agent code touches Langfuse directly — all tracing flows through this single function.
+
+![Langfuse Integration](docs/langfuse-integration.svg)
+
+### How it's wired
+
+| Integration point | File | What it records |
+|---|---|---|
+| `step(parent, name, input, fn)` | `core/tracing.ts:119` | Every agent operation — creates a Langfuse span with input, captures output or error, measures elapsed time |
+| `recordQuery(parent, name, sql, rows)` | `core/tracing.ts:152` | Every SQL execution — the query text and a result sample (≤50 rows) as a child span |
+| `complete(parent, name, prompt, opts)` | `core/llm.ts:134` | Every LLM call — records as a Langfuse generation with prompt, completion, model, and token usage |
+| `scoreRun(ctx, name, value, comment)` | `core/tracing.ts:101` | Numeric scores attached to the trace — appear as sortable columns in the Langfuse dashboard |
+| `startRun(name, input, opts)` | `core/tracing.ts:77` | Creates the root trace per pipeline run or chat answer, with session grouping and git release tag |
+
+### What gets captured in every trace
+
+- **LLM generations** — prompt, completion, model, token count, cost, latency
+- **SQL executions** — query text, row count, result sample — the audit trail for every number
+- **Approval decisions** — approved/rejected, human feedback, identity
+- **Failed attempts** — kept as evidence that self-healing is real, not deleted
+- **Timing** — per-span elapsed, so bottlenecks are visible
+- **Scores** — numeric values that appear as sortable columns:
 
 | Score | What it measures |
 |-------|-----------------|
@@ -103,6 +124,11 @@ Every pipeline run and chat answer is a Langfuse trace with numeric scores:
 | `sanity_flags` | Number of flagged results |
 | `citation_failures` | How many narration retries for uncited numbers |
 | `cache_hit` | 1 if served from insight_cache |
+| `rows_analyzed_total` | How many rows the answer actually covers |
+
+### Why this matters
+
+Every number in an insight traces backward: **narration span → SQL span → query text → ClickHouse result → verified by an independent query**. A wrong number is findable in the Langfuse trace in 30 seconds. Failed attempts are evidence, not noise — they prove the self-healing loop ran and recovered.
 
 ## LLM Provider
 

@@ -20,7 +20,7 @@ against them.
 <question>
 {{question}}
 </question>
-
+{{feedback}}
 <rules>
 1. One to four tasks. Each is exactly one aggregate query's worth of work — if a task
    needs two GROUP BYs to answer, it is two tasks.

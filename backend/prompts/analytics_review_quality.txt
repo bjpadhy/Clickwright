@@ -8,7 +8,7 @@ You are the quality gate of Clickwright's Analytics Agent. Judge this insight ag
 
 # The SQL results it was built from
 {{results}}
-
+{{feedback}}
 # Rubric — judge each
 - actionable: does it tell the PM something they can decide or act on (not just restate data)?
 - cites_numbers: does the headline carry a concrete number, and do findings reference the data?

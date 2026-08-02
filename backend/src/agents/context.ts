@@ -256,7 +256,7 @@ const CONVENTION_SCOPE =
   "contradictions. Emit NO `table:`, `spec:`, `metric:`, `funnel:` or `entity:` entries. " +
   "If nothing existing was disproven, return an empty entries array.";
 
-const MAX_UPDATE_ATTEMPTS = 5;
+const MAX_UPDATE_ATTEMPTS = 3;
 
 export interface ContextUpdateResult {
   entries: ContextEntry[];
@@ -273,20 +273,33 @@ export async function updateContext(
   } = {},
 ): Promise<ContextUpdateResult> {
   const approve = opts.approve ?? autoApproveContext;
+  // The feature half typically produces 200-500 tokens (a spec summary + 1-3
+  // metric definitions). 3000 is generous; 8000 was burning output budget on
+  // thinking tokens that dominate wall-clock.
   const llm =
     opts.llm ??
     ((p: Ctx, n: string, prompt: string) =>
-      complete(p, n, prompt, { maxTokens: 8000 }));
+      complete(p, n, prompt, { maxTokens: 3000 }));
 
   return step(trace, "context_update", { spec: input.specName }, async (span) => {
     // The updater must know what already exists (to avoid duplicates) but only
     // needs FULL text of the entries it might revise — conventions and known
     // issues. Everything else goes in as one-liners.
-    const current = await getContext({
-      include: ["*"],
-      brief: ["table", "metric", "funnel", "entity", "spec", "overview", "guide"],
-      require: ["convention:envelope", "convention:data_hygiene"],
-    });
+    // Two context bundles — one per half. The feature half only needs to see
+    // existing metrics/funnels/specs (to avoid duplicates) and table names.
+    // Conventions are irrelevant to it. This halves its prompt size.
+    const [current, featureContext] = await Promise.all([
+      getContext({
+        include: ["*"],
+        brief: ["table", "metric", "funnel", "entity", "spec", "overview", "guide"],
+        require: ["convention:envelope", "convention:data_hygiene"],
+      }),
+      getContext({
+        core: [],
+        include: ["metric", "funnel", "spec", "entity"],
+        brief: ["metric", "funnel", "spec", "entity"],
+      }),
+    ]);
     const existingEntities = new Set(current.entries.map((e) => e.entity));
     const createdTables = new Set(input.instrumentation.tables.map((t) => t.name));
 
@@ -308,7 +321,7 @@ export async function updateContext(
             // knowledge. Output tokens dominate latency, so splitting the
             // generation roughly halves this step's wall clock.
             const vars = {
-              context: current.markdown,
+              context: "", // overridden per-half with tailored context
               spec: input.specText,
               tables_summary: tablesSummary,
               new_fields: input.instrumentation.newEnvelopeFields.join(", ") || "(none)",
@@ -335,9 +348,10 @@ export async function updateContext(
             // Two disjoint halves, generated CONCURRENTLY. Neither needs the other's
             // output and each owns a distinct set of entities, so splitting halves the
             // wall clock (output tokens dominate) without changing what is produced.
-            const half = (scope: string, callName: string) =>
+            const half = (scope: string, callName: string, contextMd: string) =>
               loadPrompt("context_write_knowledge", {
                 ...vars,
+                context: contextMd,
                 scope,
                 table_entries: tableEntriesText,
               })
@@ -353,9 +367,11 @@ export async function updateContext(
             const needsConventionReview = hasDeviations || hasNewFields;
 
             const [feature, conventions] = await Promise.all([
-              half(FEATURE_SCOPE, "context_write_feature"),
+              // Feature half: small context (just existing metrics/specs/entities)
+              half(FEATURE_SCOPE, "context_write_feature", featureContext.markdown),
               needsConventionReview
-                ? half(CONVENTION_SCOPE, "context_write_conventions")
+                // Conventions half: full context (needs convention text to check contradictions)
+                ? half(CONVENTION_SCOPE, "context_write_conventions", current.markdown)
                 : Promise.resolve({ entries: [] as z.infer<typeof UpdateProposalSchema>["entries"], warnings: [] as string[] }),
             ]);
             const parsed = UpdateProposalSchema.parse({

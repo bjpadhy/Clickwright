@@ -98,7 +98,21 @@ export async function queryReadonly<T = Record<string, unknown>>(
       // readonly=1 and log_comment coexist — verified against the live service.
       // The analytics agent runs the most interesting queries in the system; if
       // they were untagged they would show as unattributed on the Observe screen.
-      clickhouse_settings: tagged({ readonly: "1", max_execution_time: 30 }),
+      clickhouse_settings: tagged({
+        readonly: "1",
+        max_execution_time: 30,
+        // A server-side backstop on the row cap the SQL guard writes into the
+        // statement. The guard can be walked past — a top-level UNION whose
+        // second arm carries a small `LIMIT n OFFSET m` leaves the first arm's
+        // large one unclamped — and the consequence was tens of thousands of
+        // rows streaming into Node and into the prompts. Headroom over the
+        // 1,000-row guard so nothing legitimate reaches it, and `throw` rather
+        // than `break`: a query that gets this far is a guard bug, and the task
+        // should fail loudly and be dropped, not return a silently short result
+        // that reads like the whole answer.
+        max_result_rows: "5000",
+        result_overflow_mode: "throw",
+      }),
     });
     return result.json<T>();
   });

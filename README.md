@@ -105,4 +105,13 @@ docker compose up -d --build   # http://localhost:8787
 
 ## Confidence
 
-- [docs/CONFIDENCE_WALKTHROUGH.md](docs/CONFIDENCE_WALKTHROUGH.md) — what the confidence score measures, walked through four real questions whose score moves with the evidence
+Every answer carries a score from 0.05 to 1.00 and a band — high at 0.75 and above,
+medium from 0.45, low below that — computed in code and never asked of the model. It
+starts at 1.00; three ceilings can cap it (a failed verification at 0.44, nothing
+verified at 0.70, nothing bounded at 0.60) and each weakness in the evidence subtracts a
+named amount. The deltas sum exactly to the score, so the card reads as a receipt.
+
+[docs/CONFIDENCE_WALKTHROUGH.md](docs/CONFIDENCE_WALKTHROUGH.md) walks four real
+questions asked in one conversation against the live service, with every signal as the
+run produced it. Between the third and the second, only the asker's specificity
+changes, and it is worth 0.16.

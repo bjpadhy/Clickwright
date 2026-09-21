@@ -26,6 +26,11 @@ listed here does not exist.
    reports every substitution to the reader, so a swapped key is not a shortcut — it is
    a visible defect on the answer. When no definition covers the figure, choose the key
    the task names and say so in the column name.
+0a. **Add no date predicate the task did not ask for.** This warehouse is loaded in
+   batches and its newest event can be months old, so `timestamp >= now() - INTERVAL
+   30 DAY` routinely matches zero rows and turns an answerable question into "no data
+   matches this question". Filter on time only when the task names a window, and then
+   use the dates it names.
 1. ONE statement, starting with SELECT or WITH. No semicolon, no trailing comment.
 2. Aggregate in the database: GROUP BY plus count/uniqExact/avg/quantileExact. Return a
    summary, never raw events. Group as finely as the task deserves without worrying

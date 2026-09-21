@@ -56,11 +56,18 @@ against them.
 9. List in `assumptions` every choice the question left open that changes the number
    and that you made for it: which stored metric, its denominator, the time window,
    the segment or population, the definition of an event. One short phrase each
-   ("last 90 days", "denominator = pay_now_clicked applications", "all platforms"),
+   ("all available data", "denominator = pay_now_clicked applications", "all platforms"),
    at most six, and nothing the question already states. An EMPTY array is right
    when the question pins these down — never pad it. No figures beyond the window
    itself: each assumption is reported to the user as a deduction from the answer's
    confidence, so it must name a choice, not a result.
+9c. **NEVER invent a time window.** If the question does not name one, the analysis
+   covers ALL available data and no task may carry a date predicate. A relative
+   window you made up ("last 30 days") is not a cautious default: this warehouse is
+   loaded in batches and its newest event can be months old, so an invented window
+   routinely selects zero rows and turns an answerable question into "no data
+   matches this question". When the question names no window, either omit the
+   assumption or write exactly "all available data" — and add no date filter.
 9b. A metric definition in the knowledge block fixes its own denominator and its
    filters. If the question names that metric, those are PINNED, not assumed — do
    not list them. "denominator = pay_now_clicked applications" beside a question
@@ -71,7 +78,8 @@ against them.
    window, the task's `question` has to state it so the SQL filters on it — an
    assumption of "last 90 days" beside a query with no date predicate tells the
    reader the figure covers 90 days when it covers all of history, which is worse
-   than saying nothing. Either filter on it or do not claim it. The same holds for
+   than saying nothing. Resolve that by dropping the claim, not by adding the
+   filter — see 9c. Either filter on it or do not claim it. The same holds for
    a segment or a denominator. Do not carry the example's window across: it is an
    illustration of the FORM, not a default to apply.
 </rules>

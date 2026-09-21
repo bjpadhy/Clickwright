@@ -531,6 +531,10 @@ export interface ProfileInput {
   authoredLimit: number | null;
   /** Rows already fetched — used only if DESCRIBE cannot type the result. */
   rows: Record<string, unknown>[];
+  /** Skip the two extremes queries. They name the best and worst rows of a set
+   * too large to show; when every row is already in front of the reader they
+   * cost two round trips to repeat what is on screen. */
+  skipExtremes?: boolean;
 }
 
 /**
@@ -584,7 +588,7 @@ export async function profileResult(parent: Ctx, input: ProfileInput): Promise<R
       typesFromSample,
     };
 
-    const metric = pickExtremesMetric(columns, plan.emissions);
+    const metric = input.skipExtremes ? null : pickExtremesMetric(columns, plan.emissions);
     if (metric) {
       const tieBreakers = extremesTieBreakers(columns, metric);
       const topSql = buildExtremesSql(scope, metric, "DESC", tieBreakers);

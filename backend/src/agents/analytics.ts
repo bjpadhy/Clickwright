@@ -1120,12 +1120,22 @@ function widestPerColumn(
 /**
  * What each call is allowed to spend, and whether it must return JSON.
  *
- * Every call used to ask for `max_tokens: 8000` whatever it was for, so a
- * 200-token plan reserved the same budget as a whole narration; on a thinking
- * model the unused budget is spent, not saved. These are sized from the largest
- * real output of each call in the exported traces, roughly doubled. `json`
- * turns on the provider's JSON mode where it exists (Gemini), which removes the
- * fenced-prose failure that costs a retry.
+ * `max_tokens` is a CAP, not a reservation. An earlier round of this comment
+ * claimed "on a thinking model the unused budget is spent, not saved" and sized
+ * every call to its largest observed output, roughly doubled. That claim is
+ * wrong, and measuring it settled the question: asked to reply with one word
+ * under a 65,536-token cap, the model returns `completion_tokens: 1`. Nothing
+ * is spent for headroom.
+ *
+ * Sizing to the visible answer cost a great deal. Across one four-question
+ * walkthrough there were 13 truncations, every one of them a retry or a lost
+ * check, while the largest SUCCESSFUL output of any call was 637 tokens — the
+ * budgets were not being filled by answers, they were being filled by thinking
+ * before the answer began. So these are now sized for reasoning plus output
+ * with real headroom, and the ceiling to respect is the model's, not ours.
+ *
+ * `json` turns on the provider's JSON mode where it exists (Gemini), which
+ * removes the fenced-prose failure that costs a retry.
  *
  * EVERY BUDGET MUST ALSO COVER REASONING/THINKING TOKENS. The first sizing was
  * measured against the Agent-SDK path, which ignores `maxTokens` altogether; on
@@ -1141,12 +1151,12 @@ function widestPerColumn(
  * `context_lookup` returns a bare array and stays on the default.
  */
 export const CALL_OPTIONS: Readonly<Record<string, CompleteOptions>> = Object.freeze({
-  plan: { maxTokens: 4000, json: true },
-  sql: { maxTokens: 4000 },
-  verify: { maxTokens: 4000, json: true },
-  narrate: { maxTokens: 8000, json: true },
-  quality: { maxTokens: 2000, json: true },
-  default: { maxTokens: 8000 },
+  plan: { maxTokens: 16000, json: true },
+  sql: { maxTokens: 16000 },
+  verify: { maxTokens: 16000, json: true },
+  narrate: { maxTokens: 32000, json: true },
+  quality: { maxTokens: 12000, json: true },
+  default: { maxTokens: 16000 },
 });
 
 /**
@@ -1308,7 +1318,20 @@ const MAX_QUALITY_ATTEMPTS = 2;
  * confidence calculation.
  */
 async function attachDigest(parent: Ctx, r: TaskResult): Promise<TaskResult> {
-  if (r.rows.length <= NARRATION_ROWS) return r;
+  // One row is already its own population; anything more gets profiled.
+  //
+  // This used to skip every result of 24 rows or fewer, on the reasoning that
+  // all its rows are shown so there is nothing left to summarise. But the digest
+  // does not only summarise — it computes the WHOLE-POPULATION figure, and that
+  // is not derivable from the shown rows: the citation checker allows a
+  // difference or a ratio between two cited numbers, deliberately not a sum. So
+  // "what is the standard checkout conversion rate?", planned as a four-row
+  // breakdown by device, had no overall rate anywhere in its results. The
+  // narrator reached for the one it had seen earlier in the conversation, the
+  // citation check rejected it, and the question produced no answer. The same
+  // gap left `headlineColumns` empty, so confidence scored a thin segment
+  // instead of the population.
+  if (r.rows.length <= 1) return r;
   // The SQL writer's "cannot compute" sentinel is a message, not a result set.
   if (r.rows[0] && "blocked" in r.rows[0]) return r;
   try {
@@ -1317,6 +1340,8 @@ async function attachDigest(parent: Ctx, r: TaskResult): Promise<TaskResult> {
       core: r.coreSql,
       authoredLimit: r.authoredLimit,
       rows: r.rows,
+      // Every row is already in front of the reader; the extremes would repeat them.
+      skipExtremes: r.rows.length <= NARRATION_ROWS,
     });
     return { ...r, digest, totalRows: digest.totalRows };
   } catch (error) {

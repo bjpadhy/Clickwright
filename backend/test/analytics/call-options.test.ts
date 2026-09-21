@@ -20,17 +20,20 @@ test("each call gets a budget that covers its reasoning as well as its output", 
   // On the Anthropic API path (`output_config.effort`) and on Gemini, thinking
   // tokens are spent out of the SAME max_tokens as the answer. Sized to the
   // visible output alone, `quality` truncated into the all-pass stub and `verify`
-  // truncated to `agreed: null`, which made "high" confidence unreachable.
-  assert.deepEqual(callOptions("plan"), { maxTokens: 4000, json: true });
-  assert.deepEqual(callOptions("verify"), { maxTokens: 4000, json: true });
-  assert.deepEqual(callOptions("narrate"), { maxTokens: 8000, json: true });
-  assert.deepEqual(callOptions("quality"), { maxTokens: 2000, json: true });
+  // truncated to `agreed: null`, which made "high" confidence unreachable — 13
+  // truncations across one four-question walkthrough. Headroom is free: the cap
+  // is a cap, not a reservation (a one-word answer under a 65,536 cap reports
+  // completion_tokens: 1), so these are sized for reasoning plus output.
+  assert.deepEqual(callOptions("plan"), { maxTokens: 16000, json: true });
+  assert.deepEqual(callOptions("verify"), { maxTokens: 16000, json: true });
+  assert.deepEqual(callOptions("narrate"), { maxTokens: 32000, json: true });
+  assert.deepEqual(callOptions("quality"), { maxTokens: 12000, json: true });
 });
 
 test("no call is budgeted below the room a reasoning pass needs", () => {
   for (const name of ["plan", "sql_t1", "verify", "narrate", "quality", "context_lookup"]) {
     assert.ok(
-      (callOptions(name).maxTokens ?? 0) >= 2000,
+      (callOptions(name).maxTokens ?? 0) >= 12000,
       `${name} is too tight to survive a thinking model`,
     );
   }
@@ -39,15 +42,15 @@ test("no call is budgeted below the room a reasoning pass needs", () => {
 test("every per-task SQL call shares one budget and never asks for JSON", () => {
   // The SQL writer returns a bare statement; JSON mode would wrap it in an object.
   for (const name of ["sql_t1", "sql_t2", "sql_funnel_step"]) {
-    assert.deepEqual(callOptions(name), { maxTokens: 4000 }, name);
+    assert.deepEqual(callOptions(name), { maxTokens: 16000 }, name);
     assert.equal("json" in callOptions(name), false, name);
   }
 });
 
 test("an unknown call name falls back to the old budget rather than a tight one", () => {
   // A new call site that nobody added here must not be silently truncated.
-  assert.deepEqual(callOptions("context_lookup"), { maxTokens: 8000 });
-  assert.deepEqual(callOptions("something_new"), { maxTokens: 8000 });
+  assert.deepEqual(callOptions("context_lookup"), { maxTokens: 16000 });
+  assert.deepEqual(callOptions("something_new"), { maxTokens: 16000 });
 });
 
 test("the budget table cannot be mutated by a caller", () => {

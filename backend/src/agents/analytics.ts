@@ -28,6 +28,7 @@ import {
   RATE_RE,
   deriveConfidence,
   namedMetrics,
+  unstatedAssumptions,
   precisionForRow,
   type ConfidenceInput,
   type ConfidenceSignal,
@@ -2195,7 +2196,10 @@ export async function runAnalytics(
           droppedTasks: droppedCount,
           plannedTasks: plan.tasks.length,
           citationRetries: citationFailures,
-          assumptions: plan.assumptions,
+          // Only what the question left open. An assumption the asker already
+          // stated is not a gap, and charging for it made a fully-specified
+          // question score lower than a vague one.
+          assumptions: unstatedAssumptions(input.question, plan.assumptions),
           namedMetrics: namedMetrics(input.question, bundle.entries.map((e) => e.entity)),
         };
         return deriveConfidence(confidenceInput);

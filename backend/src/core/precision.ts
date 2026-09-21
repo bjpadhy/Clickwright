@@ -487,6 +487,48 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * itself appears literally. Sorted, so the same question always yields the same
  * list. Whole words only — "conversions" does not name `conversion_rate`.
  */
+/** Words too common to prove an assumption was already stated in the question. */
+const ASSUMPTION_STOPWORDS = new Set([
+  "the", "and", "for", "all", "any", "with", "from", "into", "over", "per", "are",
+  "was", "were", "use", "used", "using", "only", "both", "each", "that", "this",
+  "than", "then", "data", "rows", "row", "value", "values", "applied", "apply",
+  "include", "included", "including", "excluding", "assumed", "assume", "set",
+]);
+
+/**
+ * Drop the "assumptions" the question already answered.
+ *
+ * Each assumption costs the answer 0.08 of confidence, which is the whole point:
+ * it shows a PM exactly what to pin down to get a firmer number. That only works
+ * if pinning it down actually removes the charge. The planner is told not to list
+ * anything the question states (rule 9 of the plan prompt) and does it anyway —
+ * asked for the rate "between 2026-01-01 and 2026-07-01, all platforms, payments
+ * confirmed over pay_now_clicked applications", it returned all three back as
+ * assumptions and the fully-specified question scored LOWER than the vague one.
+ * Enforced here in code, deterministically, rather than hoped for in a prompt.
+ *
+ * Conservative by construction: an assumption is dropped only when every
+ * distinctive word in it appears in the question. Anything that cannot be
+ * checked — an assumption with no distinctive words, or one naming a value the
+ * question expressed differently ("SG" for "Singapore") — is KEPT and still
+ * charged. This can under-drop; it cannot silently erase a real assumption.
+ */
+export function unstatedAssumptions(question: string, assumptions: string[]): string[] {
+  const asked = ` ${question.toLowerCase().replace(/[^a-z0-9_.-]+/g, " ")} `;
+  return assumptions.filter((a) => {
+    // "denominator = pay_now_clicked applications" is a claim about the part
+    // AFTER the equals; the label is our vocabulary, not the asker's.
+    const claim = a.includes("=") ? a.slice(a.lastIndexOf("=") + 1) : a;
+    const words = claim
+      .toLowerCase()
+      .replace(/[^a-z0-9_.-]+/g, " ")
+      .split(" ")
+      .filter((w) => w.length >= 3 && !ASSUMPTION_STOPWORDS.has(w));
+    if (words.length === 0) return true; // nothing to check against — charge it
+    return !words.every((w) => asked.includes(` ${w} `) || asked.includes(`${w} `));
+  });
+}
+
 export function namedMetrics(question: string, entities: string[]): string[] {
   const q = question.toLowerCase();
   const matched = new Map<string, Set<string>>();

@@ -369,11 +369,18 @@ export async function streamAnswer(
   // Registered so a shutdown closes this stream instead of leaving the client
   // on a dead socket — the same treatment run streams already had.
   const unregister = registerStream({ end: () => res.end() });
-  req.on("close", () => {
+  // `res`, NOT `req`. For a POST, the REQUEST stream emits "close" as soon as its
+  // body has been read — which for every question is immediately after
+  // express.json() consumes it. Listening there marked the client gone before the
+  // first step event and the whole answer was silently dropped: the reader saw
+  // `start` and then nothing. The response socket closing is the real signal that
+  // the reader has left.
+  const onClientGone = () => {
     clientGone = true;
     clearInterval(keepalive);
     unregister();
-  });
+  };
+  res.on("close", onClientGone);
   // trace/url must be visible to catch and finally; everything that can throw
   // goes inside the try, or a pre-flight failure leaves the keepalive interval
   // writing to a half-open response forever with no terminal event sent.

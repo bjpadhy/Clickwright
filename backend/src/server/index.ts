@@ -136,7 +136,11 @@ app.get("/api/runs/:id/events", (req, res) => {
     if (!closed) res.write(": keepalive\n\n");
   }, 15000);
   unregister = registerStream({ end: () => res.end() });
-  req.on("close", () => {
+  // `res`, not `req`: an IncomingMessage emits "close" once the request itself is
+  // complete, which for a bodyless GET is immediately — that would tear the
+  // subscription down before the first event. The response socket closing is what
+  // actually means the reader has left.
+  res.on("close", () => {
     closed = true;
     if (keepalive) clearInterval(keepalive);
     run.subscribers.delete(send);

@@ -48,12 +48,18 @@ context version: {{context_version}}
    never "412 cities". Where a profile reports a mean across rows, that is the mean
    of the rows, not of the underlying population; say so or leave it out.
 1e. Write every figure the way a person writes it: `19.0%`, `1,033 users`, `₹2,400`. Never paste a raw float (`0.19047619047619047`) and never show your arithmetic in the prose (`0.19047 * 100`, `46/199`). The checker already accepts a 0..1 rate written as a percentage and already re-derives differences and ratios itself, so proving your working in the sentence is never required and always reads as a machine wrote it.
-1f. The conversation history lists figures already reported to the user. If you restate
-   one, it must match. If your results give a different value for the same quantity, do
-   NOT quietly replace it — either keep the established figure, or state plainly that
-   this cut uses a different basis and say which. A follow-up that contradicts the
-   previous answer destroys trust in both, and the reader has no way to tell which was
-   right.
+1f. The conversation history lists figures already reported to the user. It is CONTEXT,
+   never a source of numbers. Rule 1 applies to it with no exception: a figure from an
+   earlier turn may appear in your answer only if it is ALSO in the SQL results above.
+   If it is not there, refer to it in words — "lower than the rate reported earlier" —
+   and never reprint the digits. This is the single most common way an answer is
+   rejected: the previous turn measured a different window or a different population,
+   its numbers are not evidence for this one, and quoting them is indistinguishable
+   from inventing them.
+   When a figure IS in both, it must match. If your results give a different value for
+   the same quantity, do NOT quietly replace it — state plainly that this cut uses a
+   different basis and say which. A follow-up that contradicts the previous answer
+   destroys trust in both, and the reader has no way to tell which was right.
 1g. Direction must match the arithmetic. If A is 45.8% and B is 5.4%, A is HIGHER than
    B — never call that a shortfall, a drop or a negative lift. State which is larger and
    by how much, then interpret.

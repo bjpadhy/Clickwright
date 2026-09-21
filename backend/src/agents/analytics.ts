@@ -2049,6 +2049,7 @@ export async function runAnalytics(
     let narration: Narration | null = null;
     let citationFailures = 0;
     let feedback = "";
+    let uncitedAtEnd: string[] = [];
     for (let attempt = 1; attempt <= MAX_NARRATE_ATTEMPTS; attempt++) {
       try {
         narration = await step(
@@ -2084,6 +2085,7 @@ export async function runAnalytics(
             const uncited = findUncitedNumbers(texts, pool, datePool, askedNumbers);
             if (uncited.length > 0) {
               citationFailures++;
+              uncitedAtEnd = uncited;
               throw new Error(
                 `these numbers are not in the SQL results and are not a difference/ratio of two numbers that are: ${uncited.join(", ")}. ` +
                   `Rewrite using only values present in the results (or a difference/ratio of two such values), or describe the comparison in words instead of a figure.`,
@@ -2095,11 +2097,50 @@ export async function runAnalytics(
         break;
       } catch (error) {
         feedback = shapeFeedback(error);
-        if (attempt === MAX_NARRATE_ATTEMPTS)
-          throw new Error(`narration failed citation/schema checks ${attempt} times: ${feedback}`);
+        if (attempt === MAX_NARRATE_ATTEMPTS) {
+          warn(span, "narration_uncitable", feedback);
+        }
       }
     }
-    if (!narration) throw new Error("unreachable: narration missing");
+
+    // ── the summary could not be written, but the analysis still ran ──
+    // Throwing here lost the whole turn to an error toast, discarding queries
+    // that had already executed and verified. The usual cause is the narrator
+    // quoting a figure from an EARLIER turn of the conversation, which is not
+    // evidence for this one (see rule 1f of the narration prompt); the guard is
+    // right to reject it, but the PM should still get the queries, the rows and
+    // the intervals rather than nothing at all.
+    if (!narration) {
+      await verificationPromise;
+      const uncitedList = uncitedAtEnd.length > 0 ? uncitedAtEnd.join(", ") : "none recorded";
+      return {
+        headline: "The queries ran, but the summary could not be written.",
+        whatsHappening: `${kept.length} quer${kept.length === 1 ? "y" : "ies"} executed and returned rows — the evidence below is real and is what the SQL produced. Only the prose around it failed.`,
+        whyItHappens:
+          `Every number in an answer has to appear in that answer's own query results. ` +
+          `Three attempts each carried a figure that did not: ${uncitedList}. ` +
+          `The most common cause is a number quoted from an earlier turn of this conversation, which measured a different window or population.`,
+        evidence: { title: "", chart: null, segmentTable: null },
+        groundedInContext: "",
+        recommendedAction:
+          "Ask the question again on its own, without relying on the previous turn — or read the queries and rows below directly.",
+        confidence: {
+          value: "low",
+          score: 0.05,
+          note: "no narration passed the citation check",
+          signals: [],
+        },
+        precision,
+        verification: null,
+        contextVersion,
+        sql: kept.map((r) => ({
+          task: r.id,
+          title: r.title,
+          query: r.sql,
+          rowCount: r.rows.length,
+        })),
+      };
+    }
 
     // the verification started before the lookup has had the whole narration to finish in
     const verification = await verificationPromise;

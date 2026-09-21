@@ -593,10 +593,17 @@ export function deriveConfidence(input: ConfidenceInput): Confidence {
   if (small.length > 0) {
     const ns = small.map((p) => p.n ?? 0);
     const range = small.length === 1 ? `n=${ns[0]}` : `n ${Math.min(...ns)}–${Math.max(...ns)}`;
+    // Distinct column NAMES, not one per row. Confidence is fed every row so it
+    // can count how many segments are thin, but a breakdown of 79 cities is 79
+    // rows of two metrics — listing the names row by row wrote "adoption_rate,
+    // adoption_rate, adoption_rate…" 79 times into the note a PM reads.
+    const columns = [...new Set(small.map((p) => p.column))];
+    const named = columns.slice(0, 4).join(", ");
+    const rest = columns.length > 4 ? ` +${columns.length - 4} more` : "";
     deduct(
       "small_segments",
       Math.min(SMALL_SEGMENTS_CAP, small.length * SMALL_SEGMENT_PENALTY),
-      `${small.length} small segment${small.length === 1 ? "" : "s"} (${small.map((p) => p.column).join(", ")}; ${range}) — indicative only`,
+      `${small.length} small segment${small.length === 1 ? "" : "s"} (${named}${rest}; ${range}) — indicative only`,
     );
   }
 

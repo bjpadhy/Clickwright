@@ -87,8 +87,11 @@ Also judge, from the SQL alone:
 <constraints>
 - ONE statement, starting with SELECT or WITH. No semicolon. No SETTINGS.
 - Only columns present in the schema block.
-- Return ONE row with a column named `verified_value` holding the recomputed figure,
-  plus a `verified_n` column with its denominator when the figure is a rate.
+- Return EXACTLY ONE ROW with a column named `verified_value` holding the recomputed
+  figure, plus a `verified_n` column with its denominator when the figure is a rate.
+  NO GROUP BY. Mirroring their breakdown gives one number per segment and none for
+  the figure you were asked to reproduce, so there is nothing to compare and the
+  check is wasted. Aggregate over the whole population in one row.
 - Aggregate in the database; never return raw rows.
 - `expected_to_match` is one of the names in <their_columns>, copied exactly. Prefer
   a `full_*_rate` population figure when one exists — it is what the reader acts on.

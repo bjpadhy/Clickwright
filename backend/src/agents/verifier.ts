@@ -315,6 +315,26 @@ export async function verifyTask(
       const read = readVerifiedValue(rows);
       verifiedValue = read.value;
       inconclusive = read.inconclusive;
+      if (inconclusive) {
+        // It grouped the figure instead of recomputing it. That is the same
+        // class of one-line mistake as a query that will not run, and just as
+        // recoverable when the writer is told: measured live, the verifier
+        // mirrored the analysis query's GROUP BY and returned 40 rows, so a
+        // correct and bounded answer lost 0.30 to "not independently verified".
+        const retry = await retryVerificationQuery(
+          span,
+          llm,
+          guard,
+          buildPrompt,
+          `it returned ${rows.length} rows. A verification returns exactly ONE row holding ONE number: aggregate over the whole population with no GROUP BY.`,
+        );
+        if (retry && retry.value !== null && !retry.inconclusive) {
+          plan = retry.plan;
+          ran = retry.sql;
+          verifiedValue = retry.value;
+          inconclusive = "";
+        }
+      }
     } catch (error) {
       // One retry, with the database's own words as feedback. A verification
       // that fails to RUN costs the answer 0.30 and the "not independently

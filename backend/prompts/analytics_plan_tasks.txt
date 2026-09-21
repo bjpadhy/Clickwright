@@ -61,6 +61,13 @@ against them.
    when the question pins these down — never pad it. No figures beyond the window
    itself: each assumption is reported to the user as a deduction from the answer's
    confidence, so it must name a choice, not a result.
+9a. Every assumption must be one the tasks ACTUALLY APPLY. If you assume a time
+   window, the task's `question` has to state it so the SQL filters on it — an
+   assumption of "last 90 days" beside a query with no date predicate tells the
+   reader the figure covers 90 days when it covers all of history, which is worse
+   than saying nothing. Either filter on it or do not claim it. The same holds for
+   a segment or a denominator. Do not carry the example's window across: it is an
+   illustration of the FORM, not a default to apply.
 </rules>
 
 <avoid>
@@ -72,7 +79,7 @@ against them.
 Output STRICT JSON, no fences:
 {
   "approach": "two sentences: how you answer it, and which stored definitions you apply",
-  "assumptions": ["last 90 days", "denominator = pay_now_clicked applications"],
+  "assumptions": ["denominator = pay_now_clicked applications", "all platforms"],
   "tasks": [
     {
       "id": "t1",

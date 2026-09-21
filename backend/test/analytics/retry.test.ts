@@ -120,10 +120,31 @@ test("analytics_verify_query renders the result's column names into the prompt",
     digest: "D",
     definitions: "DEF",
     schemas: "S",
+    feedback: "",
   });
   assert.match(rendered, /<their_columns>/);
   assert.match(rendered, /full_applied_rate/);
   assert.match(rendered, /expected_to_match` is one of the names in <their_columns>, copied exactly/);
+});
+
+test("analytics_verify_query renders the database's rejection back to the verifier", async () => {
+  // A verification query that will not RUN costs the answer 0.30 and the "not
+  // independently verified" chip. One retry, carrying ClickHouse's own words,
+  // recovers the one-line mistakes — the live case aggregated the other query's
+  // output column names, which are columns of no table.
+  const rendered = await loadPrompt("analytics_verify_query", {
+    question: "Q",
+    task: "T",
+    sql: "SELECT 1",
+    result: "[]",
+    columns: "[]",
+    digest: "D",
+    definitions: "DEF",
+    schemas: "S",
+    feedback: "\n# Your previous query did not run — fix it\nColumn 'pay_now_n' is not under aggregate function\n",
+  });
+  assert.match(rendered, /did not run/);
+  assert.match(rendered, /pay_now_n/);
 });
 
 test("analytics_review_quality renders retry feedback into the prompt", async () => {

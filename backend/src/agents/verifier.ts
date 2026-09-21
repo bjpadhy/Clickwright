@@ -193,6 +193,69 @@ export interface VerifyInput {
   schemas: string;
 }
 
+/**
+ * The one number a verification query produced, or why there is not one.
+ *
+ * The verifier is asked for ONE row holding one number. When it returns many it
+ * has grouped the figure instead of recomputing it, and taking row 0 compares
+ * the population against whichever segment sorted first: a 14,026-application
+ * rate of 47.9% was "disagreed" with by a 198-application slice of 41.9%, which
+ * capped a correct answer at 0.44 and told the reader one of the two was wrong.
+ * Rows that all agree still name one figure; rows that differ name none.
+ */
+function readVerifiedValue(rows: Record<string, unknown>[]): {
+  value: number | null;
+  inconclusive: string;
+} {
+  // `in`, not `??`. A SQL NULL from `avgIf(...) AS verified_value` made the `??`
+  // fall through to the FIRST column of the row — typically the count beside it
+  // — so a verification that simply found nothing compared a count against a
+  // rate and reported "these disagree". An absent column still falls back; a
+  // NULL one stays null and the verdict is inconclusive, which is the truth.
+  const valueOf = (r: Record<string, unknown>): number | null =>
+    numeric("verified_value" in r ? r["verified_value"] : Object.values(r)[0]);
+  const first = rows[0];
+  if (!first) return { value: null, inconclusive: "" };
+  if (rows.length === 1) return { value: valueOf(first), inconclusive: "" };
+  const values = rows.map(valueOf);
+  const head = values[0];
+  if (head !== null && head !== undefined && values.every((v) => v !== null && agrees(v, head))) {
+    return { value: head, inconclusive: "" };
+  }
+  return {
+    value: null,
+    inconclusive: `the verification query returned ${rows.length} rows with different values — it grouped the figure instead of recomputing it, so there is nothing to compare against`,
+  };
+}
+
+/** One more attempt at a verification query that would not execute. */
+async function retryVerificationQuery(
+  span: Ctx,
+  llm: (parent: Ctx, name: string, prompt: string) => Promise<string>,
+  guard: (sql: string) => string,
+  buildPrompt: (feedback: string) => Promise<string>,
+  message: string,
+): Promise<
+  | { plan: z.infer<typeof VerificationSchema>; sql: string; value: number | null; inconclusive: string }
+  | null
+> {
+  try {
+    const feedback =
+      `\n# Your previous query did not run — fix it\nClickHouse rejected it:\n${message.slice(0, 300)}\n` +
+      `Your query reads the BASE TABLES in the schema block. The other query's output column names are not tables and not columns; recompute the figure from source, aggregate everything you select, and return ONE row.\n`;
+    const text = await llm(span, "verify", await buildPrompt(feedback));
+    const plan = VerificationSchema.parse(JSON.parse(stripFences(text)));
+    const sql = guard(plan.verification_sql);
+    const rows = await queryReadonly<Record<string, unknown>>(sql);
+    recordQuery(span, "verification_result_retry", sql, rows);
+    const { value, inconclusive } = readVerifiedValue(rows);
+    return { plan, sql, value, inconclusive };
+  } catch {
+    // the retry is a bonus; its failure must not replace the original reason
+    return null;
+  }
+}
+
 export async function verifyTask(
   parent: Ctx,
   input: VerifyInput,
@@ -207,16 +270,19 @@ export async function verifyTask(
     // `resolveExpectedColumn` searches all of them.
     const sample = input.rows.slice(0, VERIFY_SAMPLE_ROWS);
     const columns = numericColumns(input.digestRow, ...sample);
-    const prompt = await loadPrompt("analytics_verify_query", {
-      question: input.question,
-      task: `${input.taskTitle} — ${input.taskQuestion}`,
-      sql: input.sql,
-      result: JSON.stringify(sample),
-      columns: JSON.stringify(columns),
-      digest: input.digest,
-      definitions: input.definitions,
-      schemas: input.schemas,
-    });
+    const buildPrompt = (feedback: string): Promise<string> =>
+      loadPrompt("analytics_verify_query", {
+        question: input.question,
+        task: `${input.taskTitle} — ${input.taskQuestion}`,
+        sql: input.sql,
+        result: JSON.stringify(sample),
+        columns: JSON.stringify(columns),
+        digest: input.digest,
+        definitions: input.definitions,
+        schemas: input.schemas,
+        feedback,
+      });
+    const prompt = await buildPrompt("");
 
     let plan: z.infer<typeof VerificationSchema>;
     try {
@@ -246,48 +312,39 @@ export async function verifyTask(
       ran = guard(plan.verification_sql);
       const rows = await queryReadonly<Record<string, unknown>>(ran);
       recordQuery(span, "verification_result", ran, rows);
-      // `in`, not `??`. A SQL NULL from `avgIf(...) AS verified_value` made the
-      // `??` fall through to the FIRST column of the row — typically the count
-      // beside it — so a verification that simply found nothing compared a
-      // count against a rate, reported "these disagree", and capped confidence
-      // at 0.44. An absent column still falls back; a NULL one stays null and
-      // the verdict is inconclusive, which is the truth.
-      const valueOf = (r: Record<string, unknown>): number | null =>
-        numeric("verified_value" in r ? r["verified_value"] : Object.values(r)[0]);
-      const first = rows[0];
-      if (rows.length === 1 && first) {
-        verifiedValue = valueOf(first);
-      } else if (rows.length > 1 && first) {
-        // The verifier is asked for ONE row holding one number. When it returns
-        // many it has grouped the figure instead of recomputing it, and taking
-        // row 0 compares the population against whichever segment happened to
-        // sort first: a 14,026-application rate of 47.9% was "disagreed" with by
-        // a 198-application slice of 41.9%, which capped a correct, repeatedly
-        // reproduced answer at 0.44 and told the reader one of the two was
-        // wrong. Neither was. Rows that all agree still name one figure; rows
-        // that differ name none, and that is inconclusive, not a failure.
-        const values = rows.map(valueOf);
-        const head = values[0];
-        if (head !== null && head !== undefined && values.every((v) => v !== null && agrees(v, head))) {
-          verifiedValue = head;
-        } else {
-          inconclusive = `the verification query returned ${rows.length} rows with different values — it grouped the figure instead of recomputing it, so there is nothing to compare against`;
-        }
-      }
+      const read = readVerifiedValue(rows);
+      verifiedValue = read.value;
+      inconclusive = read.inconclusive;
     } catch (error) {
-      return {
-        agreed: null,
-        originalValue: null,
-        verifiedValue: null,
-        relativeDelta: null,
-        sql: ran,
-        recomputes: plan.recomputes,
-        expectedToMatch: plan.expected_to_match,
-        definitionOk: plan.definition_ok,
-        answersQuestion: plan.answers_question,
-        concern: plan.concern,
-        note: `verification query failed: ${error instanceof Error ? (error.message.split("\n")[0] ?? error.message).slice(0, 140) : String(error)}`,
-      } satisfies VerificationResult;
+      // One retry, with the database's own words as feedback. A verification
+      // that fails to RUN costs the answer 0.30 and the "not independently
+      // verified" chip, and the failures are mostly one-line SQL mistakes the
+      // writer can fix when told — the live case was
+      // `sum(purchase_n) / sum(pay_now_n)` over the other query's output column
+      // names, which are not columns of any table. Cheaper than losing the
+      // check: one extra call, and only when the first query did not execute.
+      const message =
+        error instanceof Error ? (error.message.split("\n")[0] ?? error.message) : String(error);
+      const retry = await retryVerificationQuery(span, llm, guard, buildPrompt, message);
+      if (!retry) {
+        return {
+          agreed: null,
+          originalValue: null,
+          verifiedValue: null,
+          relativeDelta: null,
+          sql: ran,
+          recomputes: plan.recomputes,
+          expectedToMatch: plan.expected_to_match,
+          definitionOk: plan.definition_ok,
+          answersQuestion: plan.answers_question,
+          concern: plan.concern,
+          note: `verification query failed: ${message.slice(0, 140)}`,
+        } satisfies VerificationResult;
+      }
+      plan = retry.plan;
+      ran = retry.sql;
+      verifiedValue = retry.value;
+      inconclusive = retry.inconclusive;
     }
 
     // the figure it claims to reproduce, from the original result

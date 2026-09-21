@@ -46,6 +46,7 @@ denominator or filter than these specify, their number answers a different quest
 <schema>
 {{schemas}}
 </schema>
+{{feedback}}
 
 <task>
 Write ONE independent query that recomputes the same quantity by a DIFFERENT route,

@@ -271,13 +271,17 @@ app.get("/api/history", async (_req, res) => {
   // twice (once as it was at an earlier write). argMax collapses them on the
   // sort key — cheaper than FINAL, which merges at query time on every load.
   const summary = await query<{
-    run_id: string; spec: string; started: string; finished: string;
+    run_id: string; spec: string; started: string; finished_at: string;
     status: string; events: string; duration_ms: string;
   }>(`
     SELECT run_id,
            argMax(spec, finished)                  AS spec,
            toString(argMax(started, finished))     AS started,
-           toString(max(finished))                 AS finished,
+           -- Aliased finished_at, NOT finished: an alias matching the column name
+           -- makes ClickHouse resolve the argMax arguments above to the alias and
+           -- reject the whole query as a nested aggregate (ILLEGAL_AGGREGATION),
+           -- which the catch below then swallowed into a silent permanent fallback.
+           toString(max(finished))                 AS finished_at,
            argMax(status, finished)                AS status,
            toString(argMax(events, finished))      AS events,
            toString(argMax(duration_ms, finished)) AS duration_ms
@@ -285,10 +289,19 @@ app.get("/api/history", async (_req, res) => {
     GROUP BY run_id
     ORDER BY started DESC
     LIMIT 200
-  `).catch(() => [] as Array<{
-    run_id: string; spec: string; started: string; finished: string;
-    status: string; events: string; duration_ms: string;
-  }>);
+  `).catch((error: unknown) => {
+    // Log it: this path failing silently is how it went unnoticed that every
+    // request was taking the O(events) fallback.
+    console.warn(
+      `[history] run_summary fast path failed, using runs_log fallback: ${
+        error instanceof Error ? error.message.split("\n")[0] : String(error)
+      }`,
+    );
+    return [] as Array<{
+      run_id: string; spec: string; started: string; finished_at: string;
+      status: string; events: string; duration_ms: string;
+    }>;
+  });
 
   if (summary.length > 0) {
     return res.json(
@@ -296,7 +309,7 @@ app.get("/api/history", async (_req, res) => {
         run_id: r.run_id,
         spec: r.spec,
         started: r.started,
-        finished: r.finished,
+        finished: r.finished_at,
         last_status: r.status,
         events: Number(r.events),
         durationMs: Number(r.duration_ms),

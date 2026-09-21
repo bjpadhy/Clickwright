@@ -1436,12 +1436,22 @@ export async function runAnalytics(
             include: ["metric"],
           }),
         ]);
-        // SQL generation needs conventions + join_map only — extracted from the
+        // Conventions, join maps AND metric definitions — extracted from the
         // already-fetched bundle instead of a second getContext round-trip.
+        //
+        // Metrics were excluded here as a prompt-size saving, which meant we
+        // audited the SQL writer against rules we had withheld from it. The
+        // independent auditor is given the metric definitions
+        // (`verifyDefinitions` below) and it used them: every answer in a live
+        // run came back carrying "the SQL uses user_id instead of
+        // application_id, which contradicts the metric definition" — a real
+        // wrong number, since one user with two applications is counted once
+        // instead of twice, and a standing 0.10 off the confidence of a query
+        // that had never been shown the rule it was breaking.
         const sqlRulesMarkdown = b.entries
           .filter((e) => {
             const cat = e.entity.split(":")[0] ?? "";
-            return cat === "convention" || cat === "join_map";
+            return cat === "convention" || cat === "join_map" || cat === "metric";
           })
           .map((e) => e.definition_md)
           .join("\n\n");

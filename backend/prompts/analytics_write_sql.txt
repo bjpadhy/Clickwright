@@ -16,6 +16,16 @@ listed here does not exist.
 </task>
 {{prior_sql}}{{feedback}}
 <rules>
+0. **A metric definition in <conventions> is the formula, not a hint.** If one gives an
+   expression — "uniqExact(application_id) in purchase_completed divided by
+   uniqExact(application_id) in pay_now_clicked, both with the data-hygiene filters" —
+   reproduce it with THAT key column, THAT denominator and THOSE filters. Counting
+   uniqExact(user_id) where the definition says application_id answers a different
+   question and returns a different number: one user with two applications counts once
+   instead of twice. An independent auditor checks the query against the definition and
+   reports every substitution to the reader, so a swapped key is not a shortcut — it is
+   a visible defect on the answer. When no definition covers the figure, choose the key
+   the task names and say so in the column name.
 1. ONE statement, starting with SELECT or WITH. No semicolon, no trailing comment.
 2. Aggregate in the database: GROUP BY plus count/uniqExact/avg/quantileExact. Return a
    summary, never raw events. Group as finely as the task deserves without worrying

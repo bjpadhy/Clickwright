@@ -131,6 +131,102 @@ function divisorOf(expression: string): string | null {
  * is the point: the digest and per-row precision must never disagree about what
  * a rate divides by.
  */
+/**
+ * Calls that change a divisor's type or its null handling without changing
+ * WHICH column supplies the value. `NULLIF(d, 0)` is the correct way to write a
+ * safe division, and a query that used it was treated as having no denominator
+ * at all — so the rate could not be bounded, the digest could not compute a
+ * whole-population rate, and a correct, verified answer was reported to the PM
+ * as low confidence. Measured on one question across two runs: the model wrote
+ * `purchase_n / pay_now_n` and scored 0.79, then wrote
+ * `purchase_n / NULLIF(p.pay_now_n, 0)` for the same figure and scored 0.31.
+ */
+const DIVISOR_WRAPPERS = new Set([
+  "nullif",
+  "coalesce",
+  "ifnull",
+  "assumenotnull",
+  "cast",
+  "greatest",
+  "max2",
+  "tofloat64",
+  "tofloat32",
+  "touint64",
+  "touint32",
+  "touint16",
+  "touint8",
+  "toint64",
+  "toint32",
+  "todecimal64",
+  "todecimal32",
+  "tonullable",
+]);
+
+/** Does the bracket opened at `open` close on the expression's last character? */
+function spansWholeExpression(expression: string, open: number): boolean {
+  let depth = 0;
+  for (let i = open; i < expression.length; i += 1) {
+    const ch = expression[i];
+    if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return i === expression.length - 1;
+    }
+  }
+  return false;
+}
+
+/** Split on commas that are not inside brackets. */
+function topLevelArguments(inner: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i];
+    if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    else if (ch === "," && depth === 0) {
+      out.push(inner.slice(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(inner.slice(start));
+  return out;
+}
+
+/** Peel one wrapper, or null when there is nothing to peel. */
+function unwrapOnce(expression: string): string | null {
+  const e = expression.trim();
+  if (e.startsWith("(") && spansWholeExpression(e, 0)) return e.slice(1, -1);
+  const call = /^([a-z_][a-z0-9_]*)\s*\(/i.exec(e);
+  if (!call?.[1]) return null;
+  if (!DIVISOR_WRAPPERS.has(call[1].toLowerCase())) return null;
+  const open = e.indexOf("(", call[1].length);
+  if (open < 0 || !spansWholeExpression(e, open)) return null;
+  const first = topLevelArguments(e.slice(open + 1, e.length - 1))[0] ?? "";
+  // CAST(d AS Float64) — the type is part of the first argument
+  const operand = first.replace(/\s+as\s+[a-z0-9_(), ]+$/i, "").trim();
+  return operand.length > 0 ? operand : null;
+}
+
+/** A divisor reduced to the operand that actually names a column. */
+export function unwrapDivisor(expression: string): string {
+  let current = expression.trim();
+  for (let guard = 0; guard < 8; guard += 1) {
+    const next = unwrapOnce(current);
+    if (next === null) break;
+    current = next.trim();
+  }
+  return current;
+}
+
+/** `p.pay_now_n` and `pay_now_n` are the same column; a table alias is plumbing. */
+function stripQualifier(identifier: string): string {
+  return /^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$/i.test(identifier)
+    ? (identifier.split(".").pop() ?? identifier)
+    : identifier;
+}
+
 export function denominatorColumnsFromSql(
   rateColumn: string,
   sql: string,
@@ -138,23 +234,27 @@ export function denominatorColumnsFromSql(
 ): string[] {
   const item = selectItemFor(rateColumn, sql);
   if (!item) return [];
-  const divisor = divisorOf(item);
-  if (!divisor) return [];
+  const rawDivisor = divisorOf(item);
+  if (!rawDivisor) return [];
+  // Peel the null guards and casts first: they change how the division behaves,
+  // never which column it reads.
+  const divisor = unwrapDivisor(rawDivisor.replace(/`/g, ""));
 
   const out: string[] = [];
   const present = new Set(columns);
 
-  // the divisor is itself one of the returned columns
-  const bare = divisor.replace(/`/g, "").trim();
-  const column = /^[a-z_][a-z0-9_]*$/i.test(bare) ? bare : bare.split(".").pop() ?? "";
+  // the divisor is itself one of the returned columns, with or without its
+  // table alias
+  const column = stripQualifier(divisor.trim());
   if (column && column !== rateColumn && present.has(column)) out.push(column);
 
   // the divisor is an expression that some other column also selects
-  const target = normalize(divisor);
+  const canonical = (s: string) => stripQualifier(normalize(unwrapDivisor(s.replace(/`/g, ""))));
+  const target = canonical(divisor);
   for (const candidate of columns) {
     if (candidate === rateColumn || out.includes(candidate)) continue;
     const candidateItem = selectItemFor(candidate, sql);
-    if (candidateItem && normalize(candidateItem) === target) out.push(candidate);
+    if (candidateItem && canonical(candidateItem) === target) out.push(candidate);
   }
   return out;
 }

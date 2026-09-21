@@ -240,22 +240,39 @@ export async function verifyTask(
     }
 
     let verifiedValue: number | null = null;
+    let inconclusive = "";
     let ran = "";
     try {
       ran = guard(plan.verification_sql);
       const rows = await queryReadonly<Record<string, unknown>>(ran);
       recordQuery(span, "verification_result", ran, rows);
+      // `in`, not `??`. A SQL NULL from `avgIf(...) AS verified_value` made the
+      // `??` fall through to the FIRST column of the row — typically the count
+      // beside it — so a verification that simply found nothing compared a
+      // count against a rate, reported "these disagree", and capped confidence
+      // at 0.44. An absent column still falls back; a NULL one stays null and
+      // the verdict is inconclusive, which is the truth.
+      const valueOf = (r: Record<string, unknown>): number | null =>
+        numeric("verified_value" in r ? r["verified_value"] : Object.values(r)[0]);
       const first = rows[0];
-      if (first) {
-        // `in`, not `??`. A SQL NULL from `avgIf(...) AS verified_value` made the
-        // `??` fall through to the FIRST column of the row — typically the count
-        // beside it — so a verification that simply found nothing compared a
-        // count against a rate, reported "these disagree", and capped confidence
-        // at 0.44. An absent column still falls back; a NULL one stays null and
-        // the verdict is inconclusive, which is the truth.
-        const raw =
-          "verified_value" in first ? first["verified_value"] : Object.values(first)[0];
-        verifiedValue = numeric(raw);
+      if (rows.length === 1 && first) {
+        verifiedValue = valueOf(first);
+      } else if (rows.length > 1 && first) {
+        // The verifier is asked for ONE row holding one number. When it returns
+        // many it has grouped the figure instead of recomputing it, and taking
+        // row 0 compares the population against whichever segment happened to
+        // sort first: a 14,026-application rate of 47.9% was "disagreed" with by
+        // a 198-application slice of 41.9%, which capped a correct, repeatedly
+        // reproduced answer at 0.44 and told the reader one of the two was
+        // wrong. Neither was. Rows that all agree still name one figure; rows
+        // that differ name none, and that is inconclusive, not a failure.
+        const values = rows.map(valueOf);
+        const head = values[0];
+        if (head !== null && head !== undefined && values.every((v) => v !== null && agrees(v, head))) {
+          verifiedValue = head;
+        } else {
+          inconclusive = `the verification query returned ${rows.length} rows with different values — it grouped the figure instead of recomputing it, so there is nothing to compare against`;
+        }
       }
     } catch (error) {
       return {
@@ -290,7 +307,9 @@ export async function verifyTask(
         answersQuestion: plan.answers_question,
         concern: plan.concern,
         note:
-          verifiedValue === null
+          inconclusive
+            ? `${inconclusive} — verification inconclusive, not passed`
+            : verifiedValue === null
             ? `the verification query returned no numeric verified_value — verification inconclusive, not passed`
             : `no comparable figure (expected_to_match="${plan.expected_to_match}" is not a column of their result; available: ${available}) — verification inconclusive, not passed`,
       } satisfies VerificationResult;

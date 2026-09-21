@@ -40,6 +40,14 @@ mistaken denominator or a join that fanned rows out shows up here most clearly.
 <definitions>
 The authoritative metric definitions and conventions. If their SQL used a different
 denominator or filter than these specify, their number answers a different question.
+
+THESE BIND YOU TOO. "A different route" means a different way to compute the SAME
+definition — not a different denominator, a different key column or a different
+hygiene filter. If a definition names `uniqExact(application_id)`, count that; if it
+names the data-hygiene predicates, apply them. A disagreement is reported to the
+reader as "one of these two numbers is wrong" and takes more off the answer than any
+other signal, so a verification that quietly measures something else does not catch
+an error, it manufactures one.
 {{definitions}}
 </definitions>
 

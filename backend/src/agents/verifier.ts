@@ -120,9 +120,26 @@ export function resolveExpectedColumn(
   const haystack = [...(digestRow ? [digestRow] : []), ...rows];
 
   if (expected) {
-    for (const row of haystack) {
-      const v = numeric(row[expected]);
+    // The digest row first: it carries the whole-population figure, which is
+    // what an independent verification query recomputes.
+    if (digestRow) {
+      const v = numeric(digestRow[expected]);
       if (v !== null) return { column: expected, value: v, matchedBy: "name" };
+    }
+    // With no digest — a result of 24 rows or fewer is never profiled — the
+    // named column exists once PER ROW. Taking the first row compared the
+    // verifier's population figure against one arbitrary city and reported that
+    // the two "disagree", which now caps confidence at 0.44 and tells the PM the
+    // answer failed its own audit. Only compare when the rows leave one
+    // unambiguous figure; otherwise fall through to the value match below, which
+    // resolves by agreement, and failing that to inconclusive. Unverified
+    // (ceiling 0.70) is the honest verdict when we cannot tell what was compared.
+    const values = rows
+      .map((row) => numeric(row[expected]))
+      .filter((v): v is number => v !== null);
+    const first = values[0];
+    if (first !== undefined && values.every((v) => agrees(v, first))) {
+      return { column: expected, value: first, matchedBy: "name" };
     }
   }
 

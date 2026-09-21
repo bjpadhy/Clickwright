@@ -249,19 +249,26 @@ export async function loadPrompt(
     template = await readFile(path.join(PROMPT_DIR, `${name}.txt`), "utf8");
     promptCache.set(name, template);
   }
-  const rendered = Object.entries(vars).reduce(
+  // An unfilled placeholder means the prompt and its call site have drifted apart;
+  // sending "{{spec}}" to the model would degrade output invisibly.
+  //
+  // Checked against the TEMPLATE, before substitution, not against the rendered
+  // text. Scanning the output could not tell a drifted template from a user who
+  // typed braces: asking "what does {{count}} mean?" put that straight into the
+  // prompt, tripped this guard on all three plan attempts and killed the
+  // question. Template drift is the thing worth failing on; user data is not.
+  const missing = [...new Set(template.match(/\{\{\w+\}\}/g) ?? [])].filter(
+    (ph) => !(ph.slice(2, -2) in vars),
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `prompt ${name} has unfilled placeholders: ${missing.join(", ")} — the call site is missing these variables`,
+    );
+  }
+  return Object.entries(vars).reduce(
     (text, [key, value]) => text.replaceAll(`{{${key}}}`, value),
     template,
   );
-  // An unfilled placeholder means the prompt and its call site have drifted apart;
-  // sending "{{spec}}" to the model would degrade output invisibly.
-  const leftover = [...new Set(rendered.match(/\{\{\w+\}\}/g) ?? [])];
-  if (leftover.length > 0) {
-    throw new Error(
-      `prompt ${name} has unfilled placeholders: ${leftover.join(", ")} — the call site is missing these variables`,
-    );
-  }
-  return rendered;
 }
 
 export type CompleteOptions = {

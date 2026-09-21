@@ -128,3 +128,42 @@ test("a column that is null in the first row but numeric later is still listed",
   assert.deepEqual(numericColumns(rows[0]), ["revenue"]);
   assert.deepEqual(numericColumns(undefined, ...rows), ["revenue", "applies"]);
 });
+
+// ── a segmented result has no single figure to compare ─────────────
+
+test("a per-row column across differing rows does not manufacture a disagreement", () => {
+  // 24 rows or fewer are never profiled, so there is no digest and the named
+  // column exists once per city. Comparing row 0 reported "these disagree" and
+  // capped confidence at 0.44 on an answer that was never actually checked.
+  const rows = [
+    { city: "Bengaluru", checkout_rate: 0.41 },
+    { city: "Mumbai", checkout_rate: 0.33 },
+    { city: "Kohima", checkout_rate: 0.5 },
+  ];
+  assert.equal(resolveExpectedColumn("checkout_rate", null, undefined, rows).matchedBy, null);
+});
+
+test("a per-row column the rows agree on is still compared", () => {
+  const rows = [
+    { city: "Bengaluru", checkout_rate: 0.41 },
+    { city: "Mumbai", checkout_rate: 0.41 },
+  ];
+  const r = resolveExpectedColumn("checkout_rate", null, undefined, rows);
+  assert.equal(r.column, "checkout_rate");
+  assert.equal(r.value, 0.41);
+});
+
+test("the digest's population figure still wins over the sample rows", () => {
+  const rows = [{ checkout_rate: 0.41 }, { checkout_rate: 0.33 }];
+  const r = resolveExpectedColumn("full_checkout_rate", null, { full_checkout_rate: 0.352 }, rows);
+  assert.equal(r.value, 0.352);
+  assert.equal(r.matchedBy, "name");
+});
+
+test("a NULL verified_value does not compare the count beside it", () => {
+  // `avgIf(...) AS verified_value` returning NULL made `??` fall through to the
+  // first column of the row, comparing a count against a rate.
+  const row: Record<string, unknown> = { verified_n: 1420, verified_value: null };
+  const raw = "verified_value" in row ? row["verified_value"] : Object.values(row)[0];
+  assert.equal(raw, null);
+});

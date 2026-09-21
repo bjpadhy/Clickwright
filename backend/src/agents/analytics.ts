@@ -2164,6 +2164,11 @@ export async function runAnalytics(
     // hatch for the bench, not a new default. `selfEvident` is unchanged — it
     // already skips the call for an answer that passed every code check.
     const gateDisabled = !flagOn("qualityGate");
+    // Set when the reviewer itself could not be used. The advisory all-pass stub
+    // below is the right behaviour — an unusable reviewer must not kill an answer
+    // that already passed the schema and citation checks — but reporting it as
+    // "reviewed by the gate" made the trace claim a review that never ran.
+    let gateUnusable = false;
     if (gateDisabled) {
       emitRunEvent({
         type: "log",
@@ -2197,6 +2202,7 @@ export async function runAnalytics(
             // The gate is advisory: an unusable reviewer must not kill an answer
             // that already passed schema and citation checks. Ship it unrevised,
             // and record that the review never happened.
+            gateUnusable = true;
             emitRunEvent({
               type: "log",
               name: "quality_gate_unusable",
@@ -2228,7 +2234,15 @@ export async function runAnalytics(
         });
         const text = await llm(rSpan, "narrate", prompt);
         const parsed = NarrationSchema.parse(JSON.parse(stripFences(text)));
-        const uncited = findUncitedNumbers(narrativeTexts(parsed), pool, datePool, askedNumbers);
+        // The same surface as the main loop: a revision that introduces a
+        // fabricated chart value must fail like a first attempt would. Checking
+        // only the prose let one through.
+        const revisedTexts = [
+          ...narrativeTexts(parsed),
+          ...(parsed.evidence.chart?.series.map((s) => String(s.value)) ?? []),
+          ...(parsed.evidence.segmentTable?.rows.flat().map(String) ?? []),
+        ];
+        const uncited = findUncitedNumbers(revisedTexts, pool, datePool, askedNumbers);
         if (uncited.length > 0) {
           // keep the answer that already passed every check rather than failing
           // the request over a cosmetic revision
@@ -2346,7 +2360,13 @@ export async function runAnalytics(
       span,
       "quality_gate_passed",
       quality.verdict === "pass" ? 1 : 0,
-      gateDisabled ? "gate disabled (ANALYTICS_QUALITY_GATE=0)" : selfEvident ? "skipped — code checks cover the rubric" : "reviewed by the gate",
+      gateDisabled
+        ? "gate disabled (ANALYTICS_QUALITY_GATE=0)"
+        : selfEvident
+          ? "skipped — code checks cover the rubric"
+          : gateUnusable
+            ? "not reviewed — the reviewer returned nothing usable; shipped on the code checks alone"
+            : "reviewed by the gate",
     );
     scoreRun(
       span,

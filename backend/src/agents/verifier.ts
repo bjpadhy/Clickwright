@@ -8,12 +8,16 @@
  * that every other check accepts.
  *
  * Disagreement is not treated as proof the original is wrong; it is proof that
- * one of the two is, which is reported honestly and drops confidence to low.
+ * one of the two is, which is reported honestly and caps confidence well below
+ * medium. An INCONCLUSIVE result (nothing to compare) caps it below high — so
+ * this module works hard to find the figure the verifier meant: by the column
+ * name it gave, else by the one column that holds the same value.
  */
 import { z } from "zod";
 import { queryReadonly } from "../core/db.js";
 import { step, recordQuery, type Ctx } from "../core/tracing.js";
 import { loadPrompt, stripFences } from "../core/llm.js";
+import { COUNT_RE, RATE_RE } from "../core/precision.js";
 
 const VerificationSchema = z.object({
   verification_sql: z.string().min(20),
@@ -36,6 +40,12 @@ export interface VerificationResult {
   relativeDelta: number | null;
   sql: string;
   recomputes: string;
+  /** The column of THEIR result that was compared: the verifier's
+   * `expected_to_match` when it named a real column, the column resolved by
+   * value when it did not. Before a comparison happened it is whatever the
+   * verifier wrote (`""` when it never produced a plan). Confidence uses it to
+   * pick the headline figure, so after a comparison it is always a real column. */
+  expectedToMatch: string;
   definitionOk: boolean;
   answersQuestion: boolean;
   concern: string;
@@ -48,6 +58,105 @@ function agrees(a: number, b: number): boolean {
   const scale = Math.max(Math.abs(a), Math.abs(b), 1e-9);
   return Math.abs(a - b) <= Math.max(absTol, scale * 0.02);
 }
+
+/** A cell as a number, or null — ClickHouse ships UInt64 as strings, so strings
+ * are parsed, but `null`, `""` and booleans are not figures. */
+function numeric(raw: unknown): number | null {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string" && raw.trim() !== "") {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** The numeric columns of the rows given, in first-seen order, deduplicated. */
+export function numericColumns(...rows: (Record<string, unknown> | undefined)[]): string[] {
+  const out: string[] = [];
+  for (const row of rows) {
+    if (!row) continue;
+    for (const [column, raw] of Object.entries(row)) {
+      if (numeric(raw) !== null && !out.includes(column)) out.push(column);
+    }
+  }
+  return out;
+}
+
+type FigureKind = "rate" | "magnitude";
+const kindOfValue = (v: number): FigureKind => (v >= 0 && v <= 1.0001 ? "rate" : "magnitude");
+/** A column's kind from its NAME first — a count of 1 is not a 100% rate — and
+ * from its value only when the name says nothing. */
+function kindOfColumn(column: string, value: number): FigureKind {
+  if (RATE_RE.test(column)) return "rate";
+  if (COUNT_RE.test(column) || /(^|_)(sum|total|amount|avg|mean|median|p\d{2})$/i.test(column)) return "magnitude";
+  return kindOfValue(value);
+}
+
+export type ResolvedColumn =
+  | { column: string; value: number; matchedBy: "name" | "value" }
+  | { column: null; value: null; matchedBy: null };
+
+const UNRESOLVED: ResolvedColumn = { column: null, value: null, matchedBy: null };
+
+/**
+ * Which figure of THEIR result the verifier reproduced.
+ *
+ * 1. By NAME: `expected` is a column holding a number — whole-set profile first,
+ *    since a population figure is the one worth checking, then the rows.
+ * 2. By VALUE: the verifier named a column that does not exist (it wrote
+ *    "total_discount" where the profile says `full_discount_sum`) — so the one
+ *    column of the same kind (rate vs magnitude) whose value agrees with the
+ *    recomputed figure is taken. Two such columns is ambiguous → unresolved: a
+ *    guess between them would be a coin-flip dressed as verification.
+ * 3. A single-row result with exactly one figure: that figure, whatever it is
+ *    called — there is nothing else the verifier could have meant.
+ */
+export function resolveExpectedColumn(
+  expected: string,
+  verifiedValue: number | null,
+  digestRow: Record<string, unknown> | undefined,
+  rows: Record<string, unknown>[],
+): ResolvedColumn {
+  const haystack = [...(digestRow ? [digestRow] : []), ...rows];
+
+  if (expected) {
+    for (const row of haystack) {
+      const v = numeric(row[expected]);
+      if (v !== null) return { column: expected, value: v, matchedBy: "name" };
+    }
+  }
+
+  if (verifiedValue !== null) {
+    const kind = kindOfValue(verifiedValue);
+    const matches = new Map<string, number>();
+    for (const row of haystack) {
+      for (const [column, raw] of Object.entries(row)) {
+        const v = numeric(raw);
+        if (v === null || matches.has(column)) continue;
+        if (kindOfColumn(column, v) !== kind) continue;
+        if (agrees(v, verifiedValue)) matches.set(column, v);
+      }
+    }
+    if (matches.size === 1) {
+      const [column, value] = [...matches.entries()][0]!;
+      return { column, value, matchedBy: "value" };
+    }
+    if (matches.size > 1) return UNRESOLVED;
+  }
+
+  if (rows.length === 1 && rows[0]) {
+    const only = Object.entries(rows[0])
+      .map(([column, raw]) => [column, numeric(raw)] as const)
+      .filter((entry): entry is readonly [string, number] => entry[1] !== null);
+    if (only.length === 1) return { column: only[0]![0], value: only[0]![1], matchedBy: "value" };
+  }
+
+  return UNRESOLVED;
+}
+
+/** How many result rows the verifier is shown — and therefore how many are
+ * scanned for the column names it is told it may target. */
+const VERIFY_SAMPLE_ROWS = 12;
 
 export interface VerifyInput {
   question: string;
@@ -74,11 +183,19 @@ export async function verifyTask(
   llm: (parent: Ctx, name: string, prompt: string) => Promise<string>,
 ): Promise<VerificationResult | null> {
   return step(parent, "verify", { task: input.taskTitle }, async (span) => {
+    // The names the verifier may target, spelled out — three of four live probes
+    // came back inconclusive because it named a column that was not there.
+    // The same rows the verifier is shown: a column that is null in row 0 but
+    // numeric further down is still a column it may target, and
+    // `resolveExpectedColumn` searches all of them.
+    const sample = input.rows.slice(0, VERIFY_SAMPLE_ROWS);
+    const columns = numericColumns(input.digestRow, ...sample);
     const prompt = await loadPrompt("analytics_verify_query", {
       question: input.question,
       task: `${input.taskTitle} — ${input.taskQuestion}`,
       sql: input.sql,
-      result: JSON.stringify(input.rows.slice(0, 12)),
+      result: JSON.stringify(sample),
+      columns: JSON.stringify(columns),
       digest: input.digest,
       definitions: input.definitions,
       schemas: input.schemas,
@@ -97,6 +214,7 @@ export async function verifyTask(
         relativeDelta: null,
         sql: "",
         recomputes: "",
+        expectedToMatch: "",
         definitionOk: true,
         answersQuestion: true,
         concern: "",
@@ -112,9 +230,7 @@ export async function verifyTask(
       recordQuery(span, "verification_result", ran, rows);
       const first = rows[0];
       if (first) {
-        const raw = first["verified_value"] ?? Object.values(first)[0];
-        const n = Number(raw);
-        if (Number.isFinite(n)) verifiedValue = n;
+        verifiedValue = numeric(first["verified_value"] ?? Object.values(first)[0]);
       }
     } catch (error) {
       return {
@@ -124,6 +240,7 @@ export async function verifyTask(
         relativeDelta: null,
         sql: ran,
         recomputes: plan.recomputes,
+        expectedToMatch: plan.expected_to_match,
         definitionOk: plan.definition_ok,
         answersQuestion: plan.answers_question,
         concern: plan.concern,
@@ -131,42 +248,36 @@ export async function verifyTask(
       } satisfies VerificationResult;
     }
 
-    // the figure it claims to reproduce, from the original result — the whole-set
-    // profile first, since a population figure is the one worth checking
-    const col = plan.expected_to_match;
-    let originalValue: number | null = null;
-    for (const row of [...(input.digestRow ? [input.digestRow] : []), ...input.rows]) {
-      const v = Number((row as Record<string, unknown>)[col]);
-      if (Number.isFinite(v)) {
-        originalValue = v;
-        break;
-      }
-    }
-    if (originalValue === null && input.rows.length === 1) {
-      const firstRow = input.rows[0];
-      const only = firstRow
-        ? Object.values(firstRow).map(Number).filter((v) => Number.isFinite(v))
-        : [];
-      if (only.length === 1 && only[0] !== undefined) originalValue = only[0];
-    }
+    // the figure it claims to reproduce, from the original result
+    const resolved = resolveExpectedColumn(plan.expected_to_match, verifiedValue, input.digestRow, input.rows);
 
-    if (originalValue === null || verifiedValue === null) {
+    if (resolved.matchedBy === null || verifiedValue === null) {
+      const available = columns.length > 0 ? columns.join(", ") : "none";
       return {
         agreed: null,
-        originalValue,
+        originalValue: resolved.value,
         verifiedValue,
         relativeDelta: null,
         sql: ran,
         recomputes: plan.recomputes,
+        expectedToMatch: plan.expected_to_match,
         definitionOk: plan.definition_ok,
         answersQuestion: plan.answers_question,
         concern: plan.concern,
-        note: `no comparable figure (expected_to_match="${col}") — verification inconclusive, not passed`,
+        note:
+          verifiedValue === null
+            ? `the verification query returned no numeric verified_value — verification inconclusive, not passed`
+            : `no comparable figure (expected_to_match="${plan.expected_to_match}" is not a column of their result; available: ${available}) — verification inconclusive, not passed`,
       } satisfies VerificationResult;
     }
 
+    const originalValue = resolved.value;
     const ok = agrees(originalValue, verifiedValue);
     const scale = Math.max(Math.abs(originalValue), Math.abs(verifiedValue), 1e-9);
+    const how =
+      resolved.matchedBy === "value"
+        ? `; matched by value — expected_to_match="${plan.expected_to_match}" is not a column, ${resolved.column} holds the figure`
+        : "";
     return {
       agreed: ok,
       originalValue,
@@ -174,12 +285,13 @@ export async function verifyTask(
       relativeDelta: Math.abs(originalValue - verifiedValue) / scale,
       sql: ran,
       recomputes: plan.recomputes,
+      expectedToMatch: resolved.column,
       definitionOk: plan.definition_ok,
       answersQuestion: plan.answers_question,
       concern: plan.concern,
       note: ok
-        ? `an independently written query reproduced ${col} (${verifiedValue})`
-        : `an independently written query got ${verifiedValue} where the analysis reported ${originalValue} — one of them is wrong`,
+        ? `an independently written query reproduced ${resolved.column} (${verifiedValue})${how}`
+        : `an independently written query got ${verifiedValue} where the analysis reported ${originalValue} (${resolved.column}) — one of them is wrong${how}`,
     } satisfies VerificationResult;
   });
 }

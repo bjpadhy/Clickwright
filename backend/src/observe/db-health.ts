@@ -212,24 +212,179 @@ export async function tableOrigins(): Promise<Set<string>> {
   }
 }
 
-export async function collectStats(baseTables: ReadonlySet<string>): Promise<HealthStats> {
-  const source = await queryLogSource();
-  let queries24h = 0;
-  let p95LatencyMs = 0;
-  let rowsRead24h = 0;
+/**
+ * Everything the page needs from system.query_log, read in ONE pass.
+ *
+ * The stat cards, the latency chart and the slow-query list each used to run
+ * their own 24 h `clusterAllReplicas(system.query_log)` scan — three scans of
+ * the same rows for one page load, on the deployment where that table is the
+ * most expensive thing to read. GROUPING SETS gets all three groupings out of
+ * a single scan: the grand total, one row per hour, and one row per query
+ * shape.
+ *
+ * Rows are told apart without `grouping()` (whose 0/1 convention differs
+ * between engines): a real hour is never epoch 0 and a real shape is never the
+ * empty string, so `hour_ts = 0 AND shape = ''` is the totals row.
+ */
+export interface QueryLogWindow {
+  available: boolean;
+  /** True when the single-pass query worked; false means the per-collector
+   *  fallback ran, which is correct but costs the extra scans. */
+  combined: boolean;
+  stats: { queries: number; p95Ms: number; rowsRead: number };
+  hours: RawLatencyRow[];
+  shapes: SlowQuery[];
+}
 
-  if (source.available) {
-    const [row] = await query<Record<string, unknown>>(`
-      SELECT count()                                  AS queries,
-             round(quantile(0.95)(query_duration_ms)) AS p95_ms,
-             sum(read_rows)                           AS rows_read
+/** The "no measurements" window: zeros with `available: false`, so callers
+ *  report a gap instead of rendering zeros as if they were measured. */
+export function emptyQueryLogWindow(): QueryLogWindow {
+  return {
+    available: false,
+    combined: false,
+    stats: { queries: 0, p95Ms: 0, rowsRead: 0 },
+    hours: [],
+    shapes: [],
+  };
+}
+
+/**
+ * The shape column is truncated in SQL, not in TypeScript: it is what the UI
+ * displays anyway, it caps the response at a few hundred bytes per shape, and
+ * it means two queries identical for their first 240 characters count as the
+ * same shape — which is the grouping a "heaviest shapes" list wants.
+ */
+const SHAPE_EXPR =
+  "substring(replaceRegexpAll(normalizeQuery(query), '\\s+', ' '), 1, 240)";
+
+function shapeRow(r: Record<string, unknown>): SlowQuery {
+  return {
+    shape: truncateQuery(String(r["shape"] ?? "")),
+    maxMs: num(r["max_ms"]),
+    runs: num(r["queries"]),
+    rows: num(r["max_rows"]),
+    agent: parseLogComment(String(r["sample_log_comment"] ?? "")).agent,
+  };
+}
+
+function hourRow(r: Record<string, unknown>): RawLatencyRow {
+  return {
+    hourTs: num(r["hour_ts"]),
+    p95Ms: num(r["p95_ms"]),
+    queries: num(r["queries"]),
+    topKind: String(r["top_kind"] ?? ""),
+    topRows: num(r["top_rows"]),
+    topLogComment: String(r["top_log_comment"] ?? ""),
+  };
+}
+
+/** Shared aggregate list — identical in the combined and fallback queries. */
+const WINDOW_AGGREGATES = `
+           count()                                                      AS queries,
+           round(quantile(0.95)(query_duration_ms))                     AS p95_ms,
+           sum(read_rows)                                               AS rows_read,
+           max(query_duration_ms)                                       AS max_ms,
+           max(greatest(read_rows, written_rows))                       AS max_rows,
+           argMax(query_kind, query_duration_ms)                        AS top_kind,
+           argMax(greatest(read_rows, written_rows), query_duration_ms)  AS top_rows,
+           argMax(log_comment, query_duration_ms)                       AS top_log_comment,
+           any(log_comment)                                             AS sample_log_comment`;
+
+export async function collectQueryLogWindow(slowest = 5): Promise<QueryLogWindow> {
+  const source = await queryLogSource();
+  if (!source.available) return emptyQueryLogWindow();
+
+  const limit = Math.max(1, Math.floor(slowest));
+  const byWorst = (a: SlowQuery, b: SlowQuery) => b.maxMs - a.maxMs;
+
+  try {
+    const rows = await query<Record<string, unknown>>(`
+      SELECT toUnixTimestamp(toStartOfHour(event_time)) AS hour_ts,
+             ${SHAPE_EXPR}                              AS shape,
+${WINDOW_AGGREGATES}
       FROM ${source.expr}
       WHERE ${queryLogFilter(WINDOW_HOURS)}
+      GROUP BY GROUPING SETS ((), (hour_ts), (shape))
     `);
-    queries24h = num(row?.["queries"]);
-    p95LatencyMs = num(row?.["p95_ms"]);
-    rowsRead24h = num(row?.["rows_read"]);
+
+    const window: QueryLogWindow = {
+      available: true,
+      combined: true,
+      stats: { queries: 0, p95Ms: 0, rowsRead: 0 },
+      hours: [],
+      shapes: [],
+    };
+    for (const r of rows) {
+      const hourTs = num(r["hour_ts"]);
+      const shape = String(r["shape"] ?? "");
+      if (hourTs > 0) window.hours.push(hourRow(r));
+      else if (shape) window.shapes.push(shapeRow(r));
+      else {
+        window.stats = {
+          queries: num(r["queries"]),
+          p95Ms: num(r["p95_ms"]),
+          rowsRead: num(r["rows_read"]),
+        };
+      }
+    }
+    window.hours.sort((a, b) => a.hourTs - b.hourTs);
+    window.shapes = window.shapes.sort(byWorst).slice(0, limit);
+    return window;
+  } catch (error) {
+    // GROUPING SETS is the only exotic thing on this page. If a deployment
+    // rejects it, fall back to the original per-collector queries rather than
+    // blanking the whole tab — slower, but the numbers are the same.
+    console.warn(
+      "[observe] single-pass query_log scan unavailable, falling back:",
+      error instanceof Error ? error.message : error,
+    );
+    const [totals, hours, shapes] = await Promise.all([
+      query<Record<string, unknown>>(`
+        SELECT count()                                  AS queries,
+               round(quantile(0.95)(query_duration_ms)) AS p95_ms,
+               sum(read_rows)                           AS rows_read
+        FROM ${source.expr} WHERE ${queryLogFilter(WINDOW_HOURS)}
+      `),
+      query<Record<string, unknown>>(`
+        SELECT toUnixTimestamp(toStartOfHour(event_time))                    AS hour_ts,
+               round(quantile(0.95)(query_duration_ms))                      AS p95_ms,
+               count()                                                       AS queries,
+               argMax(query_kind, query_duration_ms)                         AS top_kind,
+               argMax(greatest(read_rows, written_rows), query_duration_ms)  AS top_rows,
+               argMax(log_comment, query_duration_ms)                        AS top_log_comment
+        FROM ${source.expr} WHERE ${queryLogFilter(WINDOW_HOURS)}
+        GROUP BY hour_ts ORDER BY hour_ts ASC
+      `),
+      query<Record<string, unknown>>(`
+        SELECT ${SHAPE_EXPR}                          AS shape,
+               max(query_duration_ms)                 AS max_ms,
+               count()                                AS queries,
+               max(greatest(read_rows, written_rows)) AS max_rows,
+               any(log_comment)                       AS sample_log_comment
+        FROM ${source.expr} WHERE ${queryLogFilter(WINDOW_HOURS)}
+        GROUP BY shape ORDER BY max_ms DESC LIMIT ${limit}
+      `),
+    ]);
+    const row = totals[0];
+    return {
+      available: true,
+      combined: false,
+      stats: {
+        queries: num(row?.["queries"]),
+        p95Ms: num(row?.["p95_ms"]),
+        rowsRead: num(row?.["rows_read"]),
+      },
+      hours: hours.map(hourRow),
+      shapes: shapes.map(shapeRow),
+    };
   }
+}
+
+export async function collectStats(
+  baseTables: ReadonlySet<string>,
+  window: QueryLogWindow,
+): Promise<HealthStats> {
+  const { queries: queries24h, p95Ms: p95LatencyMs, rowsRead: rowsRead24h } = window.stats;
 
   const tables = await query<{ name: string }>(`
     SELECT name FROM system.tables
@@ -251,32 +406,9 @@ export async function collectStats(baseTables: ReadonlySet<string>): Promise<Hea
   };
 }
 
-export async function collectLatency(nowMs: number): Promise<LatencyBucket[]> {
-  const source = await queryLogSource();
-  if (!source.available) return markSpikes(fillLatencyBuckets([], nowMs));
-
-  const rows = await query<Record<string, unknown>>(`
-    SELECT toUnixTimestamp(toStartOfHour(event_time))                    AS hour_ts,
-           round(quantile(0.95)(query_duration_ms))                      AS p95_ms,
-           count()                                                       AS queries,
-           argMax(query_kind, query_duration_ms)                         AS top_kind,
-           argMax(greatest(read_rows, written_rows), query_duration_ms)  AS top_rows,
-           argMax(log_comment, query_duration_ms)                        AS top_log_comment
-    FROM ${source.expr}
-    WHERE ${queryLogFilter(WINDOW_HOURS)}
-    GROUP BY hour_ts ORDER BY hour_ts ASC
-  `);
-
-  const raw: RawLatencyRow[] = rows.map((r) => ({
-    hourTs: num(r["hour_ts"]),
-    p95Ms: num(r["p95_ms"]),
-    queries: num(r["queries"]),
-    topKind: String(r["top_kind"] ?? ""),
-    topRows: num(r["top_rows"]),
-    topLogComment: String(r["top_log_comment"] ?? ""),
-  }));
-
-  return markSpikes(fillLatencyBuckets(raw, nowMs));
+/** Pure shaping of the shared window's hourly rows into the chart's series. */
+export function collectLatency(nowMs: number, window: QueryLogWindow): LatencyBucket[] {
+  return markSpikes(fillLatencyBuckets(window.hours, nowMs));
 }
 
 export async function collectStorage(
@@ -346,34 +478,17 @@ export async function collectPartsHealth(): Promise<PartsHealth> {
   };
 }
 
-export async function collectSlowestQueries(limit = 5): Promise<SlowQuery[]> {
-  const source = await queryLogSource();
-  if (!source.available) return [];
-
-  // Grouped by normalised shape so one heavy query run five times is one row,
-  // not five identical ones.
-  //
-  // The log_comment alias must NOT be called `log_comment`: ClickHouse resolves
-  // SELECT aliases inside WHERE, and the shared filter references that column, so
-  // the alias would turn it into "aggregate function in WHERE" and fail.
-  const rows = await query<Record<string, unknown>>(`
-    SELECT normalizeQuery(query)                    AS shape,
-           max(query_duration_ms)                   AS ms,
-           count()                                  AS runs,
-           max(greatest(read_rows, written_rows))   AS row_count,
-           any(log_comment)                         AS sample_log_comment
-    FROM ${source.expr}
-    WHERE ${queryLogFilter(WINDOW_HOURS)}
-    GROUP BY shape ORDER BY ms DESC LIMIT ${Math.floor(limit)}
-  `);
-
-  return rows.map((r) => ({
-    shape: truncateQuery(String(r["shape"] ?? "")),
-    maxMs: num(r["ms"]),
-    runs: num(r["runs"]),
-    rows: num(r["row_count"]),
-    agent: parseLogComment(String(r["sample_log_comment"] ?? "")).agent,
-  }));
+/**
+ * Heaviest query shapes, already grouped and ranked by the shared window scan
+ * — one heavy query run five times is one row, not five identical ones.
+ *
+ * (Note for anyone editing the SQL upstream: a log_comment alias must NOT be
+ * called `log_comment`. ClickHouse resolves SELECT aliases inside WHERE, and
+ * the shared filter references that column, so the alias would turn it into
+ * "aggregate function in WHERE" and fail.)
+ */
+export function collectSlowestQueries(window: QueryLogWindow): SlowQuery[] {
+  return window.shapes;
 }
 
 export async function collectRecentQueries(limit = 20): Promise<RecentQuery[]> {

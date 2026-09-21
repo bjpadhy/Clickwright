@@ -63,6 +63,46 @@ export interface InsightEvidence {
   segmentTable: InsightTable | null
 }
 
+/** One named contribution to the confidence score; `1 + Σdelta` is the score. */
+export interface ConfidenceSignal {
+  /** stable id — `headline_interval`, `unverified`, `assumptions`, … */
+  name: string
+  /** signed: deductions negative, the named-metric bonus positive */
+  delta: number
+  /** one line a reader can act on */
+  detail: string
+}
+
+/** A reported figure and how tightly it is bounded (`backend/API.md` § Confidence). */
+export interface InsightPrecision {
+  column: string
+  kind: "proportion" | "mean" | "quantile" | "ratio" | "count" | "unknown"
+  value: number
+  /** denominator; null when none was emitted */
+  n: number | null
+  /** 95% interval — only proportions with a denominator get one */
+  interval: { lo: number; hi: number; halfWidthPp: number } | null
+  /** why there is no interval, when there isn't one */
+  note: string
+}
+
+/** The independent query that recomputed the headline figure, and the verdict. */
+export interface InsightVerification {
+  /** null ⇒ inconclusive — render as unverified, never as passed */
+  agreed: boolean | null
+  originalValue: number | null
+  verifiedValue: number | null
+  sql: string
+  note: string
+  /** the auditor's strongest argument that the figure is wrong; "" when none */
+  concern: string
+  /** did the SQL use the documented denominator and filters */
+  definitionOk: boolean
+  answersQuestion: boolean
+  /** the column of the result that was compared; absent on older cards */
+  expectedToMatch?: string
+}
+
 /**
  * An answer, in the order a PM reads it.
  *
@@ -83,10 +123,23 @@ export interface Insight {
   groundedInContext: string
   /** the decision this implies, and what it should move */
   recommendedAction: string
-  /** Computed in code from measured precision, gate flags and an independent
-   * verification query — never the model's opinion. `score` is the same
-   * judgement on a 0–1 scale, for the meter. */
-  confidence: { value: "high" | "medium" | "low"; score: number; note: string }
+  /** Computed in code from measured precision, gate flags, the planner's
+   * assumptions and an independent verification query — never the model's
+   * opinion. `score` is `1 + Σsignals.delta` on a 0–1 scale; the level is read
+   * off the score (high ≥ 0.75, medium ≥ 0.45). `signals` is absent on cards
+   * stored before the breakdown existed. */
+  confidence: {
+    value: "high" | "medium" | "low"
+    score: number
+    note: string
+    signals?: ConfidenceSignal[]
+  }
+  /** per-figure bounds; absent on older stored cards */
+  precision?: InsightPrecision[]
+  /** null when no task could be verified; absent on older stored cards */
+  verification?: InsightVerification | null
+  /** planned tasks that produced no usable result, with the reason */
+  droppedTasks?: string[]
   /** e.g. "44 entities · max v2" */
   contextVersion: string
   sql: InsightSql[]

@@ -479,6 +479,11 @@ export async function updateContext(
 // store (entity + first line, ~1.5k tokens) and picks the relevant entries —
 // no embeddings needed at this corpus size. Falls back to term matching if
 // the LLM call fails, so a lookup can never crash an analysis.
+//
+// `ANALYTICS_LLM_LOOKUP=0` takes the term-match path directly, inside the same
+// `context_lookup` step: this call sits on the critical path of the
+// Promise.all before narration, so on a slow backend it is the longest leg of
+// it. The deterministic path is the one the fallback already used.
 
 export async function lookupContext(
   parent: Ctx,
@@ -490,11 +495,31 @@ export async function lookupContext(
   ) => Promise<string> = (p, n, prompt) =>
     complete(p, n, prompt, { maxTokens: 500 }),
 ): Promise<ContextBundle> {
-  return step(parent, "context_lookup", { question }, async (span) => {
+  // On unless ANALYTICS_LLM_LOOKUP=0.
+  const useLlm = env.analytics.llmLookup;
+  return step(parent, "context_lookup", { question, retrieval: useLlm ? "llm" : "terms" }, async (span) => {
     const all = await latestEntries();
     const byEntity = new Map(all.map((e) => [e.entity, e]));
 
+    /** Term matching over the same store — the fallback, and the whole lookup
+     * when the LLM path is switched off. Cannot throw: worst case it selects
+     * nothing. */
+    const byTerms = async (): Promise<ContextEntry[]> => {
+      try {
+        const bundle = await getContext({ topic: question });
+        return bundle.entries.filter((e) => !CORE_PREFIXES.includes(category(e.entity)));
+      } catch {
+        // It reads the store, so it can fail transiently. Honour the contract
+        // on both paths: a lookup selects nothing rather than failing the
+        // question around it.
+        return [];
+      }
+    };
+
     let picked: ContextEntry[] = [];
+    if (!useLlm) {
+      picked = await byTerms();
+    } else {
     try {
       const index = all
         .map((e) => `${e.entity} — ${e.definition_md.split("\n")[0]?.slice(0, 160)}`)
@@ -510,10 +535,8 @@ export async function lookupContext(
         .filter((e): e is ContextEntry => e !== undefined);
     } catch {
       // fallback: dumb term matching — better than returning nothing
-      const bundle = await getContext({ topic: question });
-      picked = bundle.entries.filter(
-        (e) => !CORE_PREFIXES.includes(category(e.entity)),
-      );
+      picked = await byTerms();
+    }
     }
 
     const markdown = picked

@@ -64,6 +64,7 @@ const STEP_LABEL: Record<string, string> = {
   sanity_gate: "Sanity-check the results",
   context_lookup: "Look for known issues",
   narrate: "Compose the insight (LLM)",
+  confidence: "Score the answer",
   quality_gate: "Quality gate",
   narrate_revision: "Revise the narration",
 }
@@ -134,6 +135,13 @@ function summarize(key: string, output: unknown): string | null {
     case "narrate_revision": {
       const confidence = record(out?.["confidence"])?.["value"]
       return typeof confidence === "string" ? `confidence ${confidence}` : null
+    }
+    case "confidence": {
+      const value = out?.["value"]
+      const score = out?.["score"]
+      return typeof value === "string" && typeof score === "number"
+        ? `${value} · ${score.toFixed(2)}`
+        : null
     }
     case "quality_gate": {
       const verdict = out?.["verdict"]

@@ -163,16 +163,34 @@ export function InstrumentationProvider({ children }: { children: React.ReactNod
     }
     setEvents([])
     setStreaming(true)
-    return openRunStream(
+
+    // A run emits 100+ events, and a reconnect replays every one of them in a
+    // burst. Publishing each arrival separately meant a state update, a
+    // buildRunModel and a full re-render per event — and the old dedupe
+    // (`current.some(...)` then copy-and-sort) made that quadratic. Events are
+    // collected into a Map keyed by `seq`, which is dense and authoritative,
+    // and published at most once per frame.
+    const received = new Map<number, RunEvent>()
+    let flushHandle: number | null = null
+    const publish = () => {
+      flushHandle = null
+      setEvents([...received.values()].sort((a, b) => a.seq - b.seq))
+    }
+
+    const unsubscribe = openRunStream(
       runId,
-      (event) =>
-        // Reconnects replay the whole buffer; `seq` is dense and authoritative.
-        setEvents((current) => {
-          if (current.some((item) => item.seq === event.seq)) return current
-          return [...current, event].sort((a, b) => a.seq - b.seq)
-        }),
+      (event) => {
+        if (received.has(event.seq)) return
+        received.set(event.seq, event)
+        if (flushHandle === null) flushHandle = window.requestAnimationFrame(publish)
+      },
       (state) => setStreaming(state === "open")
     )
+
+    return () => {
+      if (flushHandle !== null) window.cancelAnimationFrame(flushHandle)
+      unsubscribe()
+    }
   }, [runId])
 
   /* Queue depth only changes server-side, and only matters while queued. */
@@ -283,36 +301,68 @@ export function InstrumentationProvider({ children }: { children: React.ReactNod
     decide(false, note)
   }, [decide, feedback])
 
-  const value: InstrumentationValue = {
-    health,
-    specs,
-    runs,
-    history,
-    offline,
-    runId,
-    run,
-    model,
-    status,
-    queuedBehind,
-    streaming,
-    busy,
-    starting,
-    startRun,
-    newRun,
-    openRun,
-    identity,
-    setIdentity,
-    changeRequestOpen,
-    setChangeRequestOpen,
-    feedback,
-    setFeedback,
-    deciding,
-    approve,
-    requestChanges,
-    refreshHistory,
-    selectedRunId,
-    selectRunId: setSelectedRunId,
-  }
+  // Memoised: this provider wraps the whole app (the nav rail reads it for the
+  // pending-gate dot), so a fresh object per render re-rendered every screen
+  // — including the chat thread — on every run event.
+  const value = React.useMemo<InstrumentationValue>(
+    () => ({
+      health,
+      specs,
+      runs,
+      history,
+      offline,
+      runId,
+      run,
+      model,
+      status,
+      queuedBehind,
+      streaming,
+      busy,
+      starting,
+      startRun,
+      newRun,
+      openRun,
+      identity,
+      setIdentity,
+      changeRequestOpen,
+      setChangeRequestOpen,
+      feedback,
+      setFeedback,
+      deciding,
+      approve,
+      requestChanges,
+      refreshHistory,
+      selectedRunId,
+      selectRunId: setSelectedRunId,
+    }),
+    [
+      health,
+      specs,
+      runs,
+      history,
+      offline,
+      runId,
+      run,
+      model,
+      status,
+      queuedBehind,
+      streaming,
+      busy,
+      starting,
+      startRun,
+      newRun,
+      openRun,
+      identity,
+      setIdentity,
+      changeRequestOpen,
+      feedback,
+      deciding,
+      approve,
+      requestChanges,
+      refreshHistory,
+      selectedRunId,
+    ]
+  )
 
   return (
     <InstrumentationContext value={value}>{children}</InstrumentationContext>

@@ -7,10 +7,12 @@
 #
 #   docker build -f backend/Dockerfile .
 #
-# Debian, not Alpine, deliberately: with no ANTHROPIC_API_KEY the LLM backend is
-# the Claude Agent SDK, which unpacks and runs a bun-compiled binary. Those link
-# against glibc and fail on musl, so Alpine would break agent calls in a way
-# that only shows up at the first model request.
+# Debian, not Alpine, deliberately: with no GEMINI_API_KEY and no
+# ANTHROPIC_API_KEY the LLM backend is the Claude Agent SDK, which unpacks and
+# runs a bun-compiled binary. Those link against glibc and fail on musl, so
+# Alpine would break agent calls in a way that only shows up at the first model
+# request. The Gemini backend is plain fetch and would run anywhere, but the
+# image has to support every backend the env can select.
 FROM node:20.20.2-bookworm-slim
 
 # tsx runs the TypeScript directly, exactly as `npm run serve` does locally —

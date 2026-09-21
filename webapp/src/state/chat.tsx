@@ -45,6 +45,9 @@ interface ChatValue {
   /** the in-flight turn — may belong to a conversation you have navigated away from */
   pending: PendingTurn | null
   streaming: boolean
+  /** Stop waiting on the in-flight turn. The agent keeps going server-side and
+   *  the answer is still persisted — this detaches the UI, it does not undo. */
+  cancel: () => void
 
   suggestions: Suggestion[]
   /** "44 entities · max v2" — what the agent will plan against */
@@ -68,6 +71,17 @@ interface ChatValue {
 
 const ChatContext = React.createContext<ChatValue | null>(null)
 
+/**
+ * How long the client waits for an answer before it stops listening.
+ *
+ * Generously above the worst measured question so a slow-but-working answer is
+ * never cut off. The point is that a stream killed by a proxy, a sleeping
+ * laptop or a backend restart cannot leave the composer disabled forever with
+ * a spinner that will never resolve — the turn is persisted server-side, so
+ * reopening the conversation picks up whatever landed.
+ */
+const TURN_TIMEOUT_MS = 5 * 60_000
+
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
@@ -90,6 +104,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   activeIdRef.current = activeId
   const messagesRef = React.useRef<ChatMessage[]>([])
   messagesRef.current = messages
+  /** Set while a turn is in flight, so `cancel()` can reach into it. */
+  const abortTurnRef = React.useRef<((reason: "user" | "timeout") => void) | null>(null)
 
   const active = React.useMemo(
     () => conversations.find((c) => c.id === activeId) ?? null,
@@ -199,6 +215,29 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         const events: ChatEvent[] = []
         const outcome: { error: string | null } = { error: null }
 
+        // An answer emits step events in bursts — several within a frame while
+        // three SQL tasks run. Appending to the array above is free; publishing
+        // is what costs, because every publish re-renders the thread. So the
+        // publish is coalesced to at most one per frame.
+        let flushHandle: number | null = null
+        const publishEvents = () => {
+          flushHandle = null
+          setPending((p) => (p?.convId === convId ? { ...p, events: events.slice() } : p))
+        }
+
+        // Two ways to stop waiting: the reader asks, or nothing arrives for
+        // five minutes. Either way the server-side turn continues and its
+        // answer is persisted; only this client detaches.
+        const controller = new AbortController()
+        let stopped: "user" | "timeout" | null = null
+        const abort = (reason: "user" | "timeout") => {
+          if (stopped) return
+          stopped = reason
+          controller.abort()
+        }
+        abortTurnRef.current = abort
+        const timeout = window.setTimeout(() => abort("timeout"), TURN_TIMEOUT_MS)
+
         setPending({
           convId,
           question: text,
@@ -214,7 +253,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               setPending((p) => (p?.convId === convId ? { ...p, traceUrl } : p)),
             onEvent: (event) => {
               events.push(event)
-              setPending((p) => (p?.convId === convId ? { ...p, events: [...events] } : p))
+              if (flushHandle === null) flushHandle = window.requestAnimationFrame(publishEvents)
             },
             onInsight: (insight, traceUrl) => {
               // The answer is persisted either way; only merge it into the view
@@ -249,16 +288,27 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               outcome.error = error
               setPending((p) => (p?.convId === convId ? { ...p, error } : p))
             },
-          })
+          }, controller.signal)
         } catch (error) {
-          outcome.error = message(error)
+          outcome.error =
+            stopped === "timeout"
+              ? "No answer after 5 minutes. The agent may still be working — reopen this conversation to pick it up."
+              : stopped === "user"
+                ? "Stopped listening. The answer may still land — reopen this conversation to check."
+                : message(error)
           setPending((p) => (p?.convId === convId ? { ...p, error: outcome.error } : p))
+        } finally {
+          window.clearTimeout(timeout)
+          if (flushHandle !== null) window.cancelAnimationFrame(flushHandle)
+          if (abortTurnRef.current === abort) abortTurnRef.current = null
         }
 
         // `done` has fired — the backend always sends it, success or failure.
         setPending(null)
         if (outcome.error) {
-          toast.error(outcome.error)
+          // Stopping on purpose is not an error worth a red toast.
+          if (stopped === "user") toast(outcome.error)
+          else toast.error(outcome.error)
           // The question was persisted before the agent ran, so re-read it back
           // into view rather than dropping it with the failed turn.
           if (activeIdRef.current === convId)
@@ -347,6 +397,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [conversations, pending, refreshConversations]
   )
 
+  const cancel = React.useCallback(() => {
+    abortTurnRef.current?.("user")
+  }, [])
+
   const askAbout = React.useCallback(
     (question: string) => {
       goto("chat")
@@ -362,27 +416,54 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   )
 
 
-  const value: ChatValue = {
-    conversations,
-    activeId,
-    active,
-    messages,
-    loadingMessages,
-    pending,
-    streaming,
-    suggestions,
-    contextSummary,
-    offline,
-    input,
-    setInput,
-    send,
-    select,
-    newConversation,
-    toggleStar,
-    remove,
-    askAbout,
-    stepLog,
-  }
+  // Memoised: a new object here re-renders every consumer — including every
+  // InsightCard and Recharts chart in the thread — on each of the ~100 step
+  // events an answer emits.
+  const value = React.useMemo<ChatValue>(
+    () => ({
+      conversations,
+      activeId,
+      active,
+      messages,
+      loadingMessages,
+      pending,
+      streaming,
+      cancel,
+      suggestions,
+      contextSummary,
+      offline,
+      input,
+      setInput,
+      send,
+      select,
+      newConversation,
+      toggleStar,
+      remove,
+      askAbout,
+      stepLog,
+    }),
+    [
+      conversations,
+      activeId,
+      active,
+      messages,
+      loadingMessages,
+      pending,
+      streaming,
+      cancel,
+      suggestions,
+      contextSummary,
+      offline,
+      input,
+      send,
+      select,
+      newConversation,
+      toggleStar,
+      remove,
+      askAbout,
+      stepLog,
+    ]
+  )
 
   return <ChatContext value={value}>{children}</ChatContext>
 }

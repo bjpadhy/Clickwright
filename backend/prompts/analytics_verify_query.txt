@@ -5,6 +5,9 @@ You are auditing another engineer's analysis. Your job is to find out whether th
 </question>
 
 <their_task>
+ONE task out of several the analysis ran for this question. Other tasks cover the
+other parts of it, and you cannot see them — so never fault this SQL for leaving
+out something the question asks that this task was not given.
 {{task}}
 </their_task>
 
@@ -17,6 +20,14 @@ The first rows of their result. When a profile block follows, these are a SAMPLE
 the result set is larger, and the figures a reader acts on are in the profile.
 {{result}}
 </their_result>
+
+<their_columns>
+The numeric columns of their result, by exact name — the whole-set profile's
+`full_*` figures first when there is one. `expected_to_match` must be one of these
+names, copied exactly; a name that is not in this list leaves nothing to compare
+against and the verification counts for nothing.
+{{columns}}
+</their_columns>
 
 <their_full_set_profile>
 Statistics computed by ClickHouse over EVERY row of their result set (not a sample).
@@ -40,7 +51,13 @@ denominator or filter than these specify, their number answers a different quest
 Write ONE independent query that recomputes the same quantity by a DIFFERENT route,
 then state what you expect it to show.
 
-"Different route" means genuinely different, not a reformatting of theirs:
+SAME POPULATION, different route. Copy every filter that decides WHICH rows are in
+scope — the time window, the segment, duplicate/back-fill predicates — exactly as
+their SQL has them. Drop one and you have measured a different population, your
+number will differ for a reason that is not an error, and the check is wasted. If
+their SQL has no time filter, yours must have none either.
+
+"Different route" means a different way to COMPUTE over those same rows:
 - count distinct entities where they counted rows, or vice versa
 - assemble the funnel from the other direction
 - aggregate first then join, where they joined then aggregated
@@ -52,8 +69,10 @@ of you misread the question — and that is exactly what this check exists to su
 Also judge, from the SQL alone:
 - `definition_ok`: does their SQL use the denominator and filters the definitions
   above specify? false if it silently used a different population.
-- `answers_question`: does the quantity they computed actually answer the question
-  asked, or a nearby one?
+- `answers_question`: does the quantity they computed answer THEIR TASK, or a
+  nearby one? Judge the task, not the whole question — sibling tasks cover the rest.
+- `concern`: only about THIS figure's correctness. "They did not also compute X" is
+  not a concern when X belongs to another task.
 </task>
 
 <constraints>
@@ -62,6 +81,8 @@ Also judge, from the SQL alone:
 - Return ONE row with a column named `verified_value` holding the recomputed figure,
   plus a `verified_n` column with its denominator when the figure is a rate.
 - Aggregate in the database; never return raw rows.
+- `expected_to_match` is one of the names in <their_columns>, copied exactly. Prefer
+  a `full_*_rate` population figure when one exists — it is what the reader acts on.
 </constraints>
 
 Output STRICT JSON, no fences:

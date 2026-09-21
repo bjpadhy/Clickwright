@@ -10,15 +10,18 @@
  */
 import { Router } from "express";
 import { withQueryContext } from "../core/query-context.js";
+import { withoutRunSink } from "../core/tracing.js";
 import { queryLogSource } from "./query-log.js";
 import {
   WINDOW_HOURS,
   collectLatency,
   collectPartsHealth,
+  collectQueryLogWindow,
   collectRecentQueries,
   collectSlowestQueries,
   collectStats,
   collectStorage,
+  emptyQueryLogWindow,
   tableOrigins,
 } from "./db-health.js";
 import { changelogToMarkdown, getChangelog } from "./changelog.js";
@@ -47,15 +50,23 @@ export function observeRouter(manager: RunManager): Router {
     try {
       const payload = await withQueryContext({ agent: "observe" }, async () => {
         const source = await queryLogSource();
-        const baseTables = await tableOrigins();
         const nowMs = Date.now();
 
-        const [stats, latency, storage, partsHealth, slowest, recent] = await Promise.all([
-          safely("stats", null, () => collectStats(baseTables)),
-          safely("latency", [], () => collectLatency(nowMs)),
+        // The stat cards, the latency chart and the slow-query list all come
+        // out of ONE query_log scan now (collectQueryLogWindow); storage,
+        // parts and the recent list read different system tables, so they
+        // still run alongside it.
+        const [qlog, baseTables] = await Promise.all([
+          // A degraded window is zeros with available:false — the table counts
+          // in `stats` are read from system.tables and must still render.
+          safely("queryLogWindow", emptyQueryLogWindow(), () => collectQueryLogWindow()),
+          tableOrigins(),
+        ]);
+
+        const [stats, storage, partsHealth, recent] = await Promise.all([
+          safely("stats", null, () => collectStats(baseTables, qlog)),
           safely("storage", { tables: [], totalBytes: 0 }, () => collectStorage(baseTables)),
           safely("partsHealth", null, () => collectPartsHealth()),
-          safely("slowestQueries", [], () => collectSlowestQueries()),
           safely("recentQueries", [], () => collectRecentQueries()),
         ]);
 
@@ -64,11 +75,11 @@ export function observeRouter(manager: RunManager): Router {
           queryLogAvailable: source.available,
           queryLogClustered: source.clustered,
           stats,
-          latencyP95ByHour: latency,
+          latencyP95ByHour: collectLatency(nowMs, qlog),
           storageByTable: storage.tables,
           storageTotalBytes: storage.totalBytes,
           partsHealth,
-          slowestQueries: slowest,
+          slowestQueries: collectSlowestQueries(qlog),
           recentQueries: recent,
         };
       });
@@ -126,7 +137,10 @@ export function observeRouter(manager: RunManager): Router {
     if (scanning) return res.status(409).json({ error: "a scan is already running" });
     scanning = true;
     lastError = null;
-    void runScan()
+    // withoutRunSink: a scan is background work, not part of any run. Without
+    // it the scan's steps leaked into whatever instrumentation run was live —
+    // both onto its SSE stream and into runs_log under its run_id.
+    void withoutRunSink(() => runScan())
       .then((result) => {
         if (result.status === "failed") lastError = result.error ?? "scan failed";
       })

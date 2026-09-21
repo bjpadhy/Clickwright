@@ -30,7 +30,13 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
 
   const goto = React.useCallback((next: NavId) => setNav(next), [])
 
-  const value: ConsoleContextValue = { nav, goto, instrTab, setInstrTab }
+  // A fresh object every render makes every consumer of this context re-render
+  // on every parent render, whether or not navigation changed — and this
+  // provider wraps the entire app.
+  const value = React.useMemo<ConsoleContextValue>(
+    () => ({ nav, goto, instrTab, setInstrTab }),
+    [nav, goto, instrTab]
+  )
 
   return <ConsoleContext value={value}>{children}</ConsoleContext>
 }

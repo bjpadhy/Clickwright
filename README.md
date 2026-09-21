@@ -54,7 +54,7 @@ Three agents, one shared brain — the `context_store` in ClickHouse:
 | Component | Technology | Why |
 |---|---|---|
 | Database | **ClickHouse Cloud** | Event tables, knowledge store, run history, insight cache — all in one engine with codecs, TTL, and optimized ordering keys |
-| LLM | **Claude Sonnet 5** (Anthropic) | Best structured-output reliability for DDL + SQL + JSON; Zod-validated every call |
+| LLM | **Gemini 3.1 Flash Lite** (default) or **Claude Sonnet 5** | Swappable per-deployment via `LLM_PROVIDER`; Gemini for speed on a free key, Claude for structured-output reliability. Zod-validated every call either way |
 | Tracing | **Langfuse Cloud** | Every span, generation, and score queryable; numeric scores as sortable columns |
 | Backend | **Node.js + TypeScript** | Async-native for concurrent task execution; strong typing with Zod runtime validation |
 | Frontend | **React + Vite + Tailwind** | SSE streaming for live pipeline steps; chat UI with insight cards, charts, confidence badges |
@@ -85,7 +85,7 @@ See **[submission/RUN.md](RUN.md)** for full setup instructions.
 **Quick start:**
 ```bash
 cd backend
-cp .env.example .env           # fill in ClickHouse, Langfuse, Anthropic credentials
+cp .env.example .env           # fill in ClickHouse, Langfuse, and a model key (Gemini or Anthropic)
 npm run seed                   # one-time: seed context_store from base_context.md
 docker compose up -d --build   # http://localhost:8787
 ```
@@ -98,4 +98,7 @@ docker compose up -d --build   # http://localhost:8787
 | `CLICKHOUSE_PASSWORD` | Yes | ClickHouse password |
 | `LANGFUSE_PUBLIC_KEY` | Yes | Langfuse project public key |
 | `LANGFUSE_SECRET_KEY` | Yes | Langfuse project secret key |
-| `ANTHROPIC_API_KEY` | Yes* | Anthropic API key (*or use Claude Code OAuth) |
+| `GEMINI_API_KEY` | Yes* | Google AI Studio key (free, no card) — selects the Gemini backend |
+| `GEMINI_MODEL` | No | Default `gemini-3.1-flash-lite`. The newest Gemini models can have very low free-tier daily caps (20/day on `gemini-3.8-flash`, enough for one question), so this may need changing |
+| `ANTHROPIC_API_KEY` | Yes* | Anthropic API key (*one model credential is required: Gemini, this, or Claude Code OAuth) |
+| `LLM_PROVIDER` | No | Force a backend: `gemini` \| `anthropic` \| `anthropic-oauth` |

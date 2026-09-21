@@ -53,6 +53,14 @@ against them.
    answer, and far better than tasks that compute an approximate stand-in for it.
    If the question is ambiguous in a way that changes the answer, say so in `approach`
    and plan for the most defensible reading rather than silently picking one.
+9. List in `assumptions` every choice the question left open that changes the number
+   and that you made for it: which stored metric, its denominator, the time window,
+   the segment or population, the definition of an event. One short phrase each
+   ("last 90 days", "denominator = pay_now_clicked applications", "all platforms"),
+   at most six, and nothing the question already states. An EMPTY array is right
+   when the question pins these down — never pad it. No figures beyond the window
+   itself: each assumption is reported to the user as a deduction from the answer's
+   confidence, so it must name a choice, not a result.
 </rules>
 
 <avoid>
@@ -64,6 +72,7 @@ against them.
 Output STRICT JSON, no fences:
 {
   "approach": "two sentences: how you answer it, and which stored definitions you apply",
+  "assumptions": ["last 90 days", "denominator = pay_now_clicked applications"],
   "tasks": [
     {
       "id": "t1",

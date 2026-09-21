@@ -4,6 +4,7 @@ import type {
   ContextProposal,
   DdlProposal,
   LoadedTable,
+  OptimizationProposal,
   ProposedTable,
   RunStatus,
   TableRationale,
@@ -15,6 +16,7 @@ import { Icon, Spinner } from "@/components/ui-kit/icon"
 import { Markdown } from "@/components/ui-kit/markdown"
 import { Panel, PanelBody, PanelHeader } from "@/components/ui-kit/panel"
 import { cn } from "@/lib/utils"
+import { useTick } from "@/state/ticker"
 import { formatMs, type ExecLine, type StepGroup } from "./run-model"
 
 const STATUS_STYLE: Record<RunStatus, { label: string; className: string }> = {
@@ -33,16 +35,15 @@ export function RunStatusPill({ status }: { status: RunStatus }) {
   return <StatusPill className={style.className}>{style.label}</StatusPill>
 }
 
-/** Wall time since the run started — generation steps go minutes without events. */
+/**
+ * Wall time since the run started — generation steps go minutes without events.
+ *
+ * Reads the app-wide ticker rather than owning an interval: a run with eight
+ * live step rows used to run eight timers on eight different phases of the
+ * second, and the counters visibly disagreed.
+ */
 export function useElapsed(startedAt: string | null, running: boolean): string {
-  const [now, setNow] = React.useState(() => Date.now())
-
-  React.useEffect(() => {
-    if (!running) return
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [running])
-
+  const now = useTick(running)
   if (!startedAt) return ""
   return formatMs(Math.max(0, now - Date.parse(startedAt)))
 }
@@ -413,6 +414,61 @@ function RationaleGrid({ rationale }: { rationale: TableRationale }) {
         </div>
       ))}
     </div>
+  )
+}
+
+/**
+ * The advisor's optimisation, as a human is asked to sign it off.
+ *
+ * Same panel grammar as the DDL gate, different content: an optimisation is a
+ * handful of ALTER/CREATE MATERIALIZED VIEW statements plus the effect the
+ * operator should expect, not a set of table designs. (The two were conflated
+ * before — an optimisation proposal was rendered through the context panel,
+ * which reads fields it does not have.)
+ */
+export function OptimizationProposalPanel({
+  proposal,
+  revision,
+  children,
+}: {
+  proposal: OptimizationProposal
+  /** >1 once a reviewer has sent a proposal back */
+  revision: number
+  children?: React.ReactNode
+}) {
+  return (
+    <Panel className="animate-fade-up">
+      <PanelHeader>
+        <Icon name="ti-wand" size={15} className="text-zinc-600" />
+        <span className="text-[13px] font-semibold">Proposed optimisation</span>
+        <StatusPill className="border-indigo-200 bg-indigo-50 text-indigo-800">
+          from an advisor suggestion
+        </StatusPill>
+        {revision > 1 ? (
+          <StatusPill className="border-orange-200 bg-orange-50 text-orange-800">
+            rev {revision} — reviewer note applied
+          </StatusPill>
+        ) : null}
+        <div className="flex-1" />
+        <span className="font-mono text-[11px] text-zinc-400">
+          {proposal.statements.length} statement{proposal.statements.length === 1 ? "" : "s"}
+        </span>
+      </PanelHeader>
+
+      <div className="flex flex-col gap-2.5 px-4 py-3.5">
+        {proposal.reasoning ? <Markdown text={proposal.reasoning} /> : null}
+        <DdlBlock ddl={proposal.statements.join(";\n\n")} className="max-h-[420px]" />
+        {proposal.expectedEffect ? (
+          <div className="flex gap-2.5 rounded-[9px] bg-zinc-50 px-3 py-2.5">
+            <Icon name="ti-bulb" size={15} className="translate-y-px text-zinc-500" />
+            <div className="min-w-0 text-[12px] leading-[1.55] text-zinc-700">
+              <b>Expected effect.</b> {proposal.expectedEffect}
+            </div>
+          </div>
+        ) : null}
+      </div>
+      {children}
+    </Panel>
   )
 }
 

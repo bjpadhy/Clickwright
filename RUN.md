@@ -8,7 +8,8 @@ start with Configure.
 
 - **ClickHouse Cloud** instance with an HTTPS endpoint, holding the 8 provided event tables
 - **Langfuse Cloud** account (free tier works)
-- **An Anthropic credential** — an API key, or a Claude Code OAuth token
+- **A model credential** — a free Google Gemini API key (recommended: fastest, no
+  card), an Anthropic API key, or a Claude Code OAuth token
 - Then either:
   - **Docker** with Compose v2 (`docker compose version`), or
   - **Node.js 20+** (`nvm use` reads `.nvmrc` → 20.20.2)
@@ -31,15 +32,35 @@ CLICKHOUSE_PASSWORD — from the ClickHouse Cloud console
 CLICKHOUSE_DATABASE — the database holding the 8 event tables
 LANGFUSE_PUBLIC_KEY — from Langfuse project settings
 LANGFUSE_SECRET_KEY — from Langfuse project settings
-ANTHROPIC_API_KEY   — from the Anthropic console
+GEMINI_API_KEY      — Google AI Studio → "Get API key" (free, no card)
+ANTHROPIC_API_KEY   — from the Anthropic console (alternative to Gemini)
 ```
 
-**On the Anthropic credential.** If `ANTHROPIC_API_KEY` is absent (or is still a
-short placeholder), the app falls back to the Claude Agent SDK, which
-authenticates with the machine's Claude Code login. That fallback works locally
-but **not in Docker** — a container cannot complete an interactive login. For
-Docker, set either a real `ANTHROPIC_API_KEY` or a `CLAUDE_CODE_OAUTH_TOKEN`, or
-the app will start cleanly and then fail on the first agent call.
+**On the model credential.** The backend picks a provider in this order:
+
+1. `LLM_PROVIDER` when you set it explicitly (`gemini` | `anthropic` | `anthropic-oauth`)
+2. a real `GEMINI_API_KEY` → **Gemini** over its OpenAI-compatible endpoint
+3. a real `ANTHROPIC_API_KEY` → the **Anthropic API**
+4. neither → the **Claude Agent SDK**, authenticating with the machine's Claude Code login
+
+A short placeholder like the `sk-ant-` shipped in `.env.example` does not count as
+a key. `GET /api/health` reports which backend actually resolved.
+
+Gemini is the recommended default: `gemini-3.1-flash-lite` answers a question in
+roughly a quarter of the time the Agent SDK path takes, and the free tier (≈ 15
+requests/min, 1,500/day — one question is 5–7 calls) is enough for a demo.
+Check `GEMINI_MODEL` before a demo: the newest Gemini models can carry a very low
+free-tier **daily** cap that a single run exhausts (measured 21 Sep 2026:
+`gemini-3.8-flash` allows 20 requests/day), and the run then dies in rate-limit
+retries. Switch `GEMINI_MODEL` to a model on the normal quota if that happens. Google
+may use free-tier prompts to improve its models; the pipeline sends schema, SQL
+and aggregates, never user PII. Upgrading the key to a paid tier removes the rate
+limit if you need two people asking at once.
+
+The Claude Code fallback (option 4) works locally but **not in Docker** — a
+container cannot complete an interactive login. For Docker, set `GEMINI_API_KEY`,
+a real `ANTHROPIC_API_KEY`, or a `CLAUDE_CODE_OAUTH_TOKEN`, or the app will start
+cleanly and then fail on the first agent call.
 
 ## 2. Run
 
@@ -252,13 +273,32 @@ Read by `backend/src/core/env.ts` unless noted.
 | `LANGFUSE_PUBLIC_KEY` | Yes | Langfuse project public key |
 | `LANGFUSE_SECRET_KEY` | Yes | Langfuse project secret key |
 | `LANGFUSE_BASE_URL` | No | Default: `https://cloud.langfuse.com` |
-| `ANTHROPIC_API_KEY` | Yes\* | \*Or `CLAUDE_CODE_OAUTH_TOKEN`. Without either, falls back to the local Claude Code login, which does not exist inside Docker |
-| `CLICKWRIGHT_MODEL` | No | Default: `claude-sonnet-5` |
+| `LLM_PROVIDER` | No | `gemini` \| `anthropic` \| `anthropic-oauth`. Blank: chosen from whichever key is present (see Configure) |
+| `GEMINI_API_KEY` | Yes\* | Free key from Google AI Studio. Selects the Gemini backend |
+| `GEMINI_MODEL` | No | Default: `gemini-3.1-flash-lite`. Newer models may have a much lower free-tier daily cap |
+| `LLM_BASE_URL` | No | OpenAI-compatible root. Default: `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `ANTHROPIC_API_KEY` | Yes\* | \*One model credential is required: `GEMINI_API_KEY`, this, or `CLAUDE_CODE_OAUTH_TOKEN`. With none, falls back to the local Claude Code login, which does not exist inside Docker |
+| `CLICKWRIGHT_MODEL` | No | Default: `claude-sonnet-5`. Anthropic backends only |
+| `LLM_MAX_CONCURRENCY` | No | In-flight LLM calls process-wide. Default: `3` (Gemini free tier), `8` on the Claude Code path |
+| `LLM_TIMEOUT_MS` | No | Per-attempt deadline; a call that hits it is retried. Default: `240000` |
+| `LLM_REASONING_EFFORT` | No | `reasoning_effort` on the OpenAI-compatible path; only sent when set |
+| `LLM_SEED` | No | `seed` on the OpenAI-compatible path; only sent when set (Gemini 400s on unknown fields) |
+| `ANALYTICS_QUALITY_GATE` | No | Default on. `0` skips the LLM quality gate + revision pass |
+| `ANALYTICS_LLM_LOOKUP` | No | Default on. `0` uses only the deterministic term-match knowledge lookup |
+| `ANALYTICS_RELATED_INSIGHTS` | No | Default on. `0` keeps other conversations' cached headlines out of the narrator prompt |
+| `ANALYTICS_ORDER_BY_ALL` | No | Default on. `0` drops `ORDER BY ALL` from the fetch cap (needs ClickHouse ≥ 23.12) |
 | `PORT` | No | Backend port, default `8787` |
 | `BACKEND_URL` | No | Vite dev-proxy target, default `http://localhost:8787`. Local dev only — Docker uses nginx instead |
 
-Startup fails immediately with the missing variable's name if a required one is
-absent or still holds a placeholder.
+A required variable that is absent or still holds a placeholder fails at first
+use, naming the variable — so `npm test` and `--help`-style commands run in a
+clean checkout without an `.env`.
+
+**The four `ANALYTICS_*` flags are performance escape hatches, not features to
+turn on.** All four default to enabled, which is the behaviour every trace and
+screenshot was produced with; each one costs latency, so disable one only if a
+demo needs the last few seconds (`ANALYTICS_QUALITY_GATE=0` saves the most — one
+4–6k call plus a possible re-narration).
 
 ## Troubleshooting
 
@@ -267,6 +307,10 @@ absent or still holds a placeholder.
 | `docker compose up` errors on `env_file` | `backend/.env` does not exist — copy `.env.example` |
 | Webapp never starts under Docker | The backend never went healthy; `docker compose logs backend` shows the ClickHouse error |
 | `Missing env var X` on startup | `X` is absent or still a placeholder in `backend/.env` |
-| Agent calls fail although the app runs | No usable Anthropic credential — see the note in Configure |
+| Agent calls fail although the app runs | No usable model credential — see the note in Configure; `/api/health` shows which backend resolved |
+| `rate-limited (429)` in the step log | Gemini free tier is ≈ 15 requests/min. The call backs off and retries; lower `LLM_MAX_CONCURRENCY` or upgrade the key. If it never clears, `GEMINI_MODEL` is likely on a low daily cap — the 429 body names the quota — so pick another model |
+| `authentication failed (401) — check GEMINI_API_KEY` | The key is wrong, revoked, or from a different Google project |
+| `404 — unknown model` | `GEMINI_MODEL` names a model the key cannot reach; `gemini-3.1-flash-lite` is the safe default |
+| Answers truncate or JSON fails to parse | The output hit `max_tokens`; the trace shows `finish_reason: length`. Try `LLM_REASONING_EFFORT=low` — thinking tokens count against the budget |
 | Chat answers say nothing is instrumented | `npm run seed` was never run, or no spec has been run yet |
 | A spec refuses to run, "already instrumented" | Its tables exist; clear with `reset-spec.ts <spec>`, or `--orphans` if a previous run died mid-way |

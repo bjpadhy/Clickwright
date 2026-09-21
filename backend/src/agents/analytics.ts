@@ -3,7 +3,13 @@
  *
  * plan → SQL per task (guarded, read-only, self-healing ≤3) → sanity gate →
  * knowledge lookup → narrate → citation check (every number must exist in the
- * SQL results) → quality gate. One Langfuse trace per question.
+ * SQL results) → confidence (computed) → quality gate. One Langfuse trace per
+ * question.
+ *
+ * DETERMINISTIC BY CONSTRUCTION: the same question in the same conversation over
+ * the same data replays the same answer. Everything a prompt sees is either the
+ * question, this conversation, the context store or a ClickHouse result — never
+ * another conversation — and the answer cache is keyed on all of it.
  *
  * READ-ONLY BY CONSTRUCTION: context via getContext/lookupContext only (this
  * agent cannot call updateContext — it lacks an instrumentation result), and
@@ -12,11 +18,21 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { command, insert, isTransientDbError, query, queryReadonly } from "../core/db.js";
+import { env } from "../core/env.js";
 import { withQueryContext } from "../core/query-context.js";
 import { step, scoreRun, recordQuery, emitRunEvent, type Ctx } from "../core/tracing.js";
-import { complete, loadPrompt, stripFences } from "../core/llm.js";
+import { complete, loadPrompt, stripFences, type CompleteOptions } from "../core/llm.js";
 import { getContext, lookupContext } from "./context.js";
-import { precisionForRow, deriveConfidence, RATE_RE, type Precision } from "../core/precision.js";
+import {
+  COUNT_RE,
+  RATE_RE,
+  deriveConfidence,
+  namedMetrics,
+  precisionForRow,
+  type ConfidenceInput,
+  type ConfidenceSignal,
+  type Precision,
+} from "../core/precision.js";
 import {
   digestFlags,
   populationRow,
@@ -26,10 +42,21 @@ import {
 } from "../core/result-digest.js";
 import { verifyTask, type VerificationResult } from "./verifier.js";
 
+const sha1 = (text: string): string => createHash("sha1").update(text).digest("hex");
+
+// ── feature switches ────────────────────────────────────────────
+// Every switch is opt-OUT: only an explicit `ANALYTICS_*=0` in the environment
+// turns a feature off, so a missing flag block (or a flag added later) means
+// "on". Read through a helper so the pure guard functions below stay
+// unit-testable whatever the environment holds.
+type AnalyticsFlag = "qualityGate" | "llmLookup" | "relatedInsights" | "orderByAll";
+const flagOn = (name: AnalyticsFlag): boolean => env.analytics?.[name] !== false;
+
 // ── answer cache ────────────────────────────────────────────────
-// A question whose wording and context version are unchanged has the same
-// answer: serve it from ClickHouse in milliseconds instead of re-running the
-// agent. Any context write changes contextVersion, which invalidates naturally.
+// A question whose wording, conversation, context version and underlying data
+// are unchanged has the same answer: serve it from ClickHouse in milliseconds
+// instead of re-running the agent. Any context write or data load changes the
+// key, which invalidates naturally.
 
 export async function initInsightCache(): Promise<void> {
   await command(`
@@ -37,12 +64,17 @@ export async function initInsightCache(): Promise<void> {
       cache_key     String,
       question      String,
       context_key   String,
+      conv_id       String DEFAULT '',
       insight_json  String,
       created_at    DateTime64(3)
     ) ENGINE = ReplacingMergeTree(created_at) ORDER BY cache_key
     TTL toDateTime(created_at) + INTERVAL 30 DAY
-    COMMENT 'Analytics answers keyed by question + context version — repeat asks are instant'
+    COMMENT 'Analytics answers keyed by question + conversation + context version + data version — repeat asks are instant'
   `);
+  // Which conversation an answer belongs to, so "related insights" can be scoped
+  // to it. Rows written before the column existed carry '' and match no
+  // conversation — they simply never surface as related.
+  await command(`ALTER TABLE insight_cache ADD COLUMN IF NOT EXISTS conv_id String DEFAULT ''`);
   // The key includes the context version, so an entry is dead the moment any
   // definition it depended on changes — but nothing removed it. Expiry costs a
   // recompute on the next ask and never changes an answer.
@@ -96,16 +128,42 @@ export function establishedFigures(insight: Insight): string {
  *
  * v3 — sections: whatsHappening, whyItHappens, evidence{}, groundedInContext,
  *      recommendedAction, replacing the tagged `findings` list.
+ * v4 — confidence carries `signals`; the key is scoped to the conversation,
+ *      stamped with the data version, and covers the related-insights text.
  */
-const INSIGHT_FORMAT_VERSION = "v3";
+const INSIGHT_FORMAT_VERSION = "v4";
 
-const cacheKey = (question: string, contextKey: string, historyDigest = "") =>
-  createHash("sha256")
+export interface CacheKeyParts {
+  question: string;
+  /** `${contextVersionDigest}:${dataKey}` — the definitions in force and the
+   * data they ran over. Either moving means the answer may differ. */
+  contextKey: string;
+  /** The conversation the question was asked in; "" for an unscoped ask (a
+   * script or the benchmark). Two conversations never share an entry. */
+  convId?: string;
+  /** The turns before this one, so a follow-up is cached per conversation state. */
+  historyDigest?: string;
+  /** sha1 of the related-insights text the narrator saw, or "" when there was
+   * none — a replay can never disagree with the text that produced it. */
+  relatedDigest?: string;
+}
+
+/** Exported for tests: what has to change for a question to be recomputed. */
+export function cacheKey({
+  question,
+  contextKey,
+  convId = "",
+  historyDigest = "",
+  relatedDigest = "",
+}: CacheKeyParts): string {
+  const normalized = question.trim().toLowerCase().replace(/\s+/g, " ");
+  return createHash("sha256")
     .update(
-      `${INSIGHT_FORMAT_VERSION}::${question.trim().toLowerCase().replace(/\s+/g, " ")}::${contextKey}::${historyDigest}`,
+      `${INSIGHT_FORMAT_VERSION}::${normalized}::${contextKey}::${convId}::${historyDigest}::${relatedDigest}`,
     )
     .digest("hex")
     .slice(0, 32);
+}
 
 async function readCache(key: string): Promise<Insight | null> {
   const rows = await query<{ insight_json: string }>(
@@ -157,8 +215,14 @@ export interface Insight {
   recommendedAction: string;
   /** COMPUTED from measured precision and checks — never the model's opinion.
    * `score` is the same judgement as `value` on a 0–1 scale, so the UI can show
-   * a bar; it is derived from the same measurements, not an extra opinion. */
-  confidence: { value: "high" | "medium" | "low"; score: number; note: string };
+   * a bar; `signals` are the additive deductions and bonuses that produced it,
+   * so a reader can see exactly what to sharpen in the question. */
+  confidence: {
+    value: "high" | "medium" | "low";
+    score: number;
+    note: string;
+    signals: ConfidenceSignal[];
+  };
   /** Per-figure 95% bounds, or a stated reason none could be computed. */
   precision: Precision[];
   /** Result of recomputing a figure with an independently written query. */
@@ -171,6 +235,8 @@ export interface Insight {
     concern: string;
     definitionOk: boolean;
     answersQuestion: boolean;
+    /** The result column the verifier set out to reproduce. */
+    expectedToMatch: string;
   } | null;
   contextVersion: string;
   /** Every query that backed this answer, including the whole-set profiles.
@@ -189,23 +255,68 @@ export interface Insight {
   cached?: boolean;
 }
 
-const PlanSchema = z.object({
+const PlanTaskSchema = z.object({
+  id: z.string().regex(/^[a-z0-9_]+$/i),
+  title: z.string().min(1),
+  question: z.string().min(1),
+  tables: z.array(z.string()).min(1),
+  dimensions: z.array(z.string()).optional(),
+  /** When set, this task runs AFTER the named task and receives its result
+   *  summary — use for funnel drop-off analysis or comparisons that need
+   *  a prior stage's count as input. */
+  depends_on: z.string().optional(),
+});
+
+export const PlanSchema = z.object({
   approach: z.string().min(1),
   tasks: z
-    .array(
-      z.object({
-        id: z.string().regex(/^[a-z0-9_]+$/i),
-        title: z.string().min(1),
-        question: z.string().min(1),
-        tables: z.array(z.string()).min(1),
-        dimensions: z.array(z.string()).optional(),
-        /** When set, this task runs AFTER the named task and receives its result
-         *  summary — use for funnel drop-off analysis or comparisons that need
-         *  a prior stage's count as input. */
-        depends_on: z.string().optional(),
-      }),
-    )
-    .max(4),
+    .array(PlanTaskSchema)
+    .max(4)
+    // A dependency the executor cannot resolve used to surface only as an empty
+    // `depContext` at run time. Validate it here, where the retry loop turns the
+    // problem into feedback the planner can act on.
+    .superRefine((tasks, ctx) => {
+      const earlier = new Set<string>();
+      tasks.forEach((t, i) => {
+        if (earlier.has(t.id)) {
+          ctx.addIssue({ code: "custom", path: [i, "id"], message: `duplicate task id "${t.id}" — ids must be unique` });
+        }
+        if (t.depends_on !== undefined && !earlier.has(t.depends_on)) {
+          ctx.addIssue({
+            code: "custom",
+            path: [i, "depends_on"],
+            message:
+              t.depends_on === t.id
+                ? `task "${t.id}" cannot depend on itself`
+                : `depends_on "${t.depends_on}" must name a task listed BEFORE "${t.id}" (it is missing or comes later)`,
+          });
+        }
+        earlier.add(t.id);
+      });
+    }),
+  /** What the planner had to decide because the question did not say: metric,
+   * denominator, window, segment. Each one costs confidence (see
+   * core/precision.ts) and is reported in the confidence note, so a PM can see
+   * exactly what to pin down. Never shown to the narrator — a "90 days" echo
+   * would fail the citation check.
+   *
+   * NON-REJECTING BY DESIGN: this field is commentary, and the prompt never
+   * states a length or a count, so a 121-character assumption (or a seventh one)
+   * must not cost the question its plan — the retry loop is terminal after three
+   * failures. Anything unusable is clamped here instead: blanks dropped, each
+   * trimmed to 120 characters, at most six kept, and a shape we cannot read at
+   * all falls back to none. `depends_on` above stays the only new hard check. */
+  assumptions: z
+    .array(z.string())
+    .default([])
+    .catch([])
+    .transform((xs) =>
+      xs
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+        .map((s) => s.slice(0, 120))
+        .slice(0, 6),
+    ),
 });
 type Plan = z.infer<typeof PlanSchema>;
 
@@ -277,20 +388,87 @@ const QualitySchema = z.object({
   revision_note: z.string(),
 });
 
+/** The application's own storage — not event data. Excluded from the schema
+ * the model sees and from the data-version stamp, so writing an answer to
+ * insight_cache can never invalidate the cache it was just written to. */
+const INTERNAL_TABLES = [
+  "context_store", "runs_log", "conversations", "messages", "dashboards",
+  "insight_cache", "optimization_suggestions", "schema_changelog", "trace_summaries",
+  // ReplacingMergeTree written by server/runs.ts: its `total_rows` drops when a
+  // background merge collapses duplicates, which moved the data-version stamp
+  // with no data change and invalidated every cached answer at random.
+  "run_summary",
+];
+const INTERNAL_TABLES_SQL = INTERNAL_TABLES.map((t) => `'${t}'`).join(", ");
+
 /** Exact column names+types per table. Injected into plan/SQL prompts: the
  * single biggest accuracy win — the model stops guessing column names, which
  * also removes most retry rounds (so it is a latency win too). */
-async function tableSchemas(): Promise<Map<string, string>> {
+async function loadTableSchemas(): Promise<Map<string, string>> {
   const rows = await query<{ table: string; cols: string }>(`
     SELECT table, arrayStringConcat(groupArray(concat(name, ' ', type)), ', ') AS cols
     FROM system.columns
-    WHERE database = currentDatabase() AND table NOT IN (
-      'context_store', 'runs_log', 'conversations', 'messages', 'dashboards',
-      'insight_cache', 'optimization_suggestions', 'schema_changelog', 'trace_summaries'
-    )
+    WHERE database = currentDatabase() AND table NOT IN (${INTERNAL_TABLES_SQL})
     GROUP BY table ORDER BY table
   `);
   return new Map(rows.map((r) => [r.table, `- ${r.table}: ${r.cols}`]));
+}
+
+const SCHEMA_TTL_MS = 5 * 60_000;
+let schemaCache: { at: number; stamp: string; value: Promise<Map<string, string>> } | null = null;
+
+/**
+ * Memoised `system.columns`: the schema changes only when a run creates a table
+ * or the optimizer alters one, yet every question paid the round trip. Reloaded
+ * when the data-version stamp moves (DDL changes it), after five minutes, or on
+ * `invalidateSchemaCache()` — which the run manager calls after instrumentation
+ * and optimization so a fresh table is visible to the very next question.
+ */
+async function tableSchemas(stamp = ""): Promise<Map<string, string>> {
+  const current = schemaCache;
+  if (current && Date.now() - current.at < SCHEMA_TTL_MS && current.stamp === stamp) {
+    return current.value;
+  }
+  const value = loadTableSchemas();
+  const entry = { at: Date.now(), stamp, value };
+  schemaCache = entry;
+  // a failed load must not be served for five minutes; the caller still sees the error
+  value.catch(() => {
+    if (schemaCache === entry) schemaCache = null;
+  });
+  return value;
+}
+
+/** Drop the memoised schema so the next question re-reads `system.columns`.
+ * Call after any DDL: an instrumentation run (success OR rollback) and an
+ * applied optimization. */
+export function invalidateSchemaCache(): void {
+  schemaCache = null;
+}
+
+export interface DataVersion {
+  /** Rows across every event table, as `system.tables` reports them. */
+  rows: string;
+  /** Latest DDL time across those tables. */
+  modifiedAt: string;
+  /** sha1(rows|modifiedAt)[:10] — the data-version stamp in the cache key. */
+  key: string;
+}
+
+/**
+ * What the event tables hold right now. A cached answer is only a replay while
+ * the data it ran over is unchanged: a load adds rows, an optimizer `ALTER`
+ * moves the metadata time, and either changes this stamp and so the key.
+ */
+async function dataVersion(): Promise<DataVersion> {
+  const [row] = await query<{ rows: string | number; mod: string }>(`
+    SELECT sum(coalesce(total_rows, 0)) AS rows, max(metadata_modification_time) AS mod
+    FROM system.tables
+    WHERE database = currentDatabase() AND name NOT IN (${INTERNAL_TABLES_SQL})
+  `);
+  const rows = String(row?.rows ?? 0);
+  const modifiedAt = String(row?.mod ?? "");
+  return { rows, modifiedAt, key: sha1(`${rows}|${modifiedAt}`).slice(0, 10) };
 }
 
 /** Only the tables this step needs — a SQL prompt paying for 13 schemas when it
@@ -322,6 +500,130 @@ const BANNED =
 const MAX_RESULT_ROWS = 1000;
 
 const TRAILING_LIMIT = /\blimit\s+(\d+)\s*$/i;
+/** `LIMIT n OFFSET m` / `LIMIT m, n` — already a bound on the fetch, and a second
+ * LIMIT after either is a syntax error (which used to cost a wasted retry). */
+const LIMIT_WITH_OFFSET = /\blimit\s+\d+\s*(?:,\s*\d+|\s+offset\s+\d+)/i;
+/** The same shape with its numbers captured, for rewriting rather than testing:
+ * `LIMIT <count> OFFSET <offset>` (groups 1, 3) or `LIMIT <offset>, <count>`
+ * (groups 1, 2). */
+const LIMIT_WITH_OFFSET_G = /\blimit\s+(\d+)\s*(?:,\s*(\d+)|\s+offset\s+(\d+))/gi;
+/** `LIMIT n BY col` — an ORDER BY cannot follow it, so the cap stays plain. */
+const LIMIT_BY = /\blimit\s+\d+\s+by\b/i;
+const UNION = /\bunion\b/i;
+
+/** Index just past the `"…"` / `` `…` `` identifier that starts at `i`, honouring
+ * doubled-quote and backslash escapes. `s.length` when it is never closed. */
+function skipQuotedIdent(s: string, i: number): number {
+  const q = s[i]!;
+  let j = i + 1;
+  while (j < s.length) {
+    const c = s[j]!;
+    if (c === "\\") {
+      j += 2;
+      continue;
+    }
+    if (c === q) {
+      if (s[j + 1] === q) {
+        j += 2;
+        continue;
+      }
+      return j + 1;
+    }
+    j++;
+  }
+  return s.length;
+}
+
+/** Single-quoted string literals replaced by `''`. A keyword INSIDE a literal is
+ * data, not a statement: the SQL writer's own sentinel — `SELECT 'cannot compute'
+ * AS blocked, 'the data set has no …' AS reason` — used to trip the ban on `set`.
+ *
+ * Identifier-aware: an apostrophe inside a quoted identifier (`"o'clock"`) is part
+ * of the NAME, not the start of a literal. Reading it as one opened a phantom
+ * literal that blanked the rest of the statement, so `FROM "o'clock", system.tables`
+ * lost the word `system` and walked straight through the ban check. An unterminated
+ * literal is left exactly as written for the same reason — blanking to end of input
+ * would hide whatever follows it. */
+export function blankStringLiterals(sql: string): string {
+  let out = "";
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i]!;
+    if (ch === '"' || ch === "`") {
+      const end = skipQuotedIdent(sql, i);
+      out += sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === "'") {
+      let j = i + 1;
+      let closed = false;
+      while (j < sql.length) {
+        const c = sql[j]!;
+        if (c === "\\") {
+          j += 2;
+          continue;
+        }
+        if (c === "'") {
+          if (sql[j + 1] === "'") {
+            j += 2;
+            continue;
+          }
+          j++;
+          closed = true;
+          break;
+        }
+        j++;
+      }
+      if (!closed) {
+        out += sql.slice(i);
+        break;
+      }
+      out += "''";
+      i = j;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** The statement with every parenthesised group and string literal removed —
+ * what is left are the clauses of the OUTERMOST select. A parenthesis inside a
+ * quoted identifier (`"revenue (usd)"`) is part of the name, not a group: counting
+ * it unbalanced the depth, which let `ORDER BY ALL` be appended after an authored
+ * ORDER BY — a syntax error and a wasted retry. */
+export function topLevelSql(sql: string): string {
+  let depth = 0;
+  let out = "";
+  const blanked = blankStringLiterals(sql);
+  for (let i = 0; i < blanked.length; i++) {
+    const ch = blanked[i]!;
+    if (ch === '"' || ch === "`") {
+      const end = skipQuotedIdent(blanked, i);
+      if (depth === 0) out += blanked.slice(i, end);
+      i = end - 1;
+      continue;
+    }
+    if (ch === "(") {
+      depth++;
+      continue;
+    }
+    if (ch === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth === 0) out += ch;
+  }
+  return out;
+}
+
+/** Does the outermost select order its rows? An ORDER BY inside a subquery or a
+ * CTE does not — the outer result is still returned in arbitrary order. */
+export function hasTopLevelOrderBy(sql: string): boolean {
+  return /\border\s+by\b/i.test(topLevelSql(sql));
+}
 
 export interface SqlParts {
   /** The validated single statement, as the model wrote it. */
@@ -339,8 +641,9 @@ export function guardSqlParts(raw: string): SqlParts {
   const sql = stripFences(raw).trim().replace(/;+\s*$/, "");
   if (sql.includes(";")) throw new Error("exactly one statement allowed (found ';')");
   if (!/^(select|with)\b/i.test(sql)) throw new Error("statement must start with SELECT or WITH");
-  if (BANNED.test(sql)) {
-    throw new Error(`banned keyword in SQL: ${BANNED.exec(sql)?.[0]}`);
+  const code = blankStringLiterals(sql);
+  if (BANNED.test(code)) {
+    throw new Error(`banned keyword in SQL: ${BANNED.exec(code)?.[0]}`);
   }
   const limit = TRAILING_LIMIT.exec(sql);
   const authored = limit?.[1];
@@ -351,25 +654,69 @@ export function guardSqlParts(raw: string): SqlParts {
   };
 }
 
-/** Cap what crosses the wire. Byte-identical to what `guardSql` has always
- * returned — saved dashboards store this text, so a cosmetic reformat here would
- * silently rewrite every board on its next save. */
-function capForFetch(parts: SqlParts): string {
-  const { validated, authoredLimit } = parts;
-  if (authoredLimit === null) return `${validated}\nLIMIT ${MAX_RESULT_ROWS}`;
-  // clamp an oversized explicit LIMIT rather than rejecting an otherwise good query
-  if (authoredLimit <= MAX_RESULT_ROWS) return validated;
-  const limit = TRAILING_LIMIT.exec(validated);
-  return limit ? validated.slice(0, limit.index) + `LIMIT ${MAX_RESULT_ROWS}` : validated;
+export interface GuardOptions {
+  /** Append `ORDER BY ALL` with the transport cap (default: the
+   * `ANALYTICS_ORDER_BY_ALL` switch, on unless set to 0). */
+  orderByAll?: boolean;
 }
 
-export function guardSql(raw: string): string {
-  return capForFetch(guardSqlParts(raw));
+/**
+ * Cap what crosses the wire — deterministically.
+ *
+ * `LIMIT 1000` on an unordered result hands the narrator an ARBITRARY thousand
+ * rows: the chart and table are built from the first 24 of them, so the same
+ * question could show different segments run to run. `ORDER BY ALL` (ClickHouse
+ * ≥ 23.12) fixes which rows those are without knowing the column names. It is
+ * added only where it is legal and meaningful: not after an authored ORDER BY,
+ * not before a `LIMIT n BY`, and not on a top-level UNION (where it would sort
+ * one arm only). Saved dashboards store this text, so any change here rewrites
+ * boards on their next save — intended for this one, which is why the tests pin
+ * the bytes.
+ */
+/** Clamp the row COUNT of the statement's last `LIMIT n OFFSET m` / `LIMIT m, n`
+ * down to the transport cap, keeping the offset (and so the page) intact. A count
+ * already within the cap is returned untouched, byte for byte. */
+function clampOffsetLimit(sql: string): string {
+  const matches = [...sql.matchAll(LIMIT_WITH_OFFSET_G)];
+  const m = matches[matches.length - 1];
+  if (!m || m.index === undefined) return sql;
+  const commaForm = m[2] !== undefined;
+  const count = Number(commaForm ? m[2] : m[1]);
+  if (!Number.isFinite(count) || count <= MAX_RESULT_ROWS) return sql;
+  const replaced = commaForm
+    ? `LIMIT ${m[1]}, ${MAX_RESULT_ROWS}`
+    : `LIMIT ${MAX_RESULT_ROWS} OFFSET ${m[3]}`;
+  return sql.slice(0, m.index) + replaced + sql.slice(m.index + m[0].length);
+}
+
+function capForFetch(parts: SqlParts, orderByAll: boolean): string {
+  const { validated, authoredLimit } = parts;
+  if (authoredLimit !== null) {
+    // clamp an oversized explicit LIMIT rather than rejecting an otherwise good query
+    if (authoredLimit <= MAX_RESULT_ROWS) return validated;
+    const limit = TRAILING_LIMIT.exec(validated);
+    return limit ? validated.slice(0, limit.index) + `LIMIT ${MAX_RESULT_ROWS}` : validated;
+  }
+  const top = topLevelSql(validated);
+  // A second LIMIT cannot follow this form, so the transport cap has to be written
+  // INTO the authored one or it is simply bypassed — `LIMIT 50000 OFFSET 0` would
+  // stream fifty thousand rows into Node and into the prompts. Clamp the count and
+  // keep the offset; a page already within the cap is left byte-for-byte alone.
+  if (LIMIT_WITH_OFFSET.test(top)) return clampOffsetLimit(validated);
+  const ordered =
+    orderByAll && !hasTopLevelOrderBy(validated) && !LIMIT_BY.test(top) && !UNION.test(top);
+  return ordered
+    ? `${validated}\nORDER BY ALL\nLIMIT ${MAX_RESULT_ROWS}`
+    : `${validated}\nLIMIT ${MAX_RESULT_ROWS}`;
+}
+
+export function guardSql(raw: string, opts: GuardOptions = {}): string {
+  return capForFetch(guardSqlParts(raw), opts.orderByAll ?? flagOn("orderByAll"));
 }
 
 // ── citation checker: every number in prose must exist in results ──
 
-interface TaskResult {
+export interface TaskResult {
   id: string;
   title: string;
   /** The statement that actually executed, including the transport cap. */
@@ -674,6 +1021,24 @@ export async function retryWithFeedback<T>(
   return onExhausted(feedback);
 }
 
+/**
+ * Record a swallowed failure instead of discarding it.
+ *
+ * Four advisory paths here catch and return a default — a failed verification, a
+ * failed related-insights query, a revision that could not be written, a cache
+ * insert that did not land. Continuing is right (none of them changes whether
+ * the answer is correct), but `catch {}` also meant nobody could ever see one:
+ * the verification leg was returning null on prompt-render errors for an unknown
+ * length of time. WARNING on the span, a `log` run event for the UI, and the run
+ * carries on.
+ */
+function warn(ctx: Ctx, name: string, error: unknown): void {
+  const message =
+    error instanceof Error ? (error.message.split("\n")[0] ?? error.message) : String(error);
+  ctx.event({ name, level: "WARNING", statusMessage: message.slice(0, 300) });
+  emitRunEvent({ type: "log", name, payload: { warning: message.slice(0, 300) } });
+}
+
 /** One entry per column, keeping the WIDEST interval — that is the figure a reader
  * should be most careful with, so it is the one worth reporting. */
 function widestPerColumn(entries: Precision[]): Precision[] {
@@ -689,14 +1054,83 @@ function widestPerColumn(entries: Precision[]): Precision[] {
   return [...byColumn.values()];
 }
 
+// ── per-call budgets (pure) ──────────────────────────────────────
+
+/**
+ * What each call is allowed to spend, and whether it must return JSON.
+ *
+ * Every call used to ask for `max_tokens: 8000` whatever it was for, so a
+ * 200-token plan reserved the same budget as a whole narration; on a thinking
+ * model the unused budget is spent, not saved. These are sized from the largest
+ * real output of each call in the exported traces, roughly doubled. `json`
+ * turns on the provider's JSON mode where it exists (Gemini), which removes the
+ * fenced-prose failure that costs a retry.
+ *
+ * EVERY BUDGET MUST ALSO COVER REASONING/THINKING TOKENS. The first sizing was
+ * measured against the Agent-SDK path, which ignores `maxTokens` altogether; on
+ * the Anthropic API path (`output_config.effort`) and on Gemini, thinking tokens
+ * are spent out of the SAME `max_tokens`, so a budget sized to the visible answer
+ * truncates before the answer starts. What that cost: `quality` truncated twice
+ * and the gate was silently replaced by an all-pass stub; `verify` truncated to
+ * `agreed: null`, which pinned every answer at the 0.70 unverified ceiling and
+ * made "high" confidence unreachable; a truncated `plan` is terminal. Size for
+ * reasoning plus output, never output alone.
+ *
+ * `sql_*` is deliberately NOT json: it returns a bare SQL statement.
+ * `context_lookup` returns a bare array and stays on the default.
+ */
+export const CALL_OPTIONS: Readonly<Record<string, CompleteOptions>> = Object.freeze({
+  plan: { maxTokens: 4000, json: true },
+  sql: { maxTokens: 4000 },
+  verify: { maxTokens: 4000, json: true },
+  narrate: { maxTokens: 8000, json: true },
+  quality: { maxTokens: 2000, json: true },
+  default: { maxTokens: 8000 },
+});
+
+/**
+ * The budget for a named call. Names are per-task (`sql_t1`), so match on the
+ * prefix. Exported for the bench and the tests; the injected `opts.llm`
+ * signature is unchanged, which is what keeps every existing call site working.
+ */
+export function callOptions(name: string): CompleteOptions {
+  if (name.startsWith("sql_")) return CALL_OPTIONS["sql"]!;
+  return CALL_OPTIONS[name] ?? CALL_OPTIONS["default"]!;
+}
+
 // ── sanity gate (pure code) ──────────────────────────────────────
 
-function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[] } {
+export interface SanityCounts {
+  /** Rates above 105% — a definitional error, not noise. */
+  impossible: number;
+  /** "every sample size below 50" flags. */
+  smallSample: number;
+  /** Tasks the gate itself dropped (empty result, blocked query). */
+  dropped: number;
+}
+
+export interface SanityGateResult {
+  kept: TaskResult[];
+  notes: string[];
+  counts: SanityCounts;
+}
+
+/**
+ * Drop what cannot be reported and classify what can, so confidence can weigh a
+ * definitional error differently from a thin tail.
+ *
+ * Exported for the tests: `sanityFlags = notes.length` used to fold drops,
+ * blocks and real flags into one number that was then double-counted against
+ * the answer. The counts below are each incremented exactly once.
+ */
+export function sanityGate(results: TaskResult[]): SanityGateResult {
   const notes: string[] = [];
   const kept: TaskResult[] = [];
+  const counts: SanityCounts = { impossible: 0, smallSample: 0, dropped: 0 };
   for (const r of results) {
     if (r.rows.length === 0) {
       r.dropped = "empty result set";
+      counts.dropped++;
       notes.push(`task ${r.id} (${r.title}): dropped — empty result set`);
       continue;
     }
@@ -708,6 +1142,7 @@ function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[
       const reason = String(first["reason"] ?? "not computable from the available columns");
       r.dropped = `not computable: ${reason}`;
       r.rows = [];
+      counts.dropped++;
       notes.push(`task ${r.id} (${r.title}): the query could not be written — ${reason}`);
       continue;
     }
@@ -722,8 +1157,17 @@ function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[
         }
       }
     }
+    // SUFFIX convention, as the SQL prompt mandates (`offer_shown_n`,
+    // `applied_denominator`). The old prefix regex matched almost nothing a query
+    // actually emits, so "every sample size below 50" essentially never fired.
+    // A bare `_total` is NOT a sample size: `revenue_total`, `discount_total` and
+    // `refund_total` are currency, and reading a ₹40 discount as a population of
+    // 40 told the narrator the answer rested on nothing and took a real −0.10 off
+    // the confidence of a correct answer.
     const sampleCols = r.rows.flatMap((row) =>
-      Object.entries(row).filter(([c]) => /^(n|count|total|users|sessions|payers|uploads)/i.test(c)),
+      Object.entries(row).filter(
+        ([c]) => COUNT_RE.test(c) || /(^|_)(n|denominator|base)$/i.test(c),
+      ),
     );
     // With a digest the same question is answered over every row instead of the
     // fetched ones, so let the stronger check speak rather than saying both.
@@ -732,10 +1176,16 @@ function sanityGate(results: TaskResult[]): { kept: TaskResult[]; notes: string[
     }
     if (r.digest) r.flags.push(...digestFlags(r.digest));
     r.flags = [...new Set(r.flags)];
-    for (const f of r.flags) notes.push(`task ${r.id} (${r.title}): flagged — ${f}`);
+    // Classify once, from the flag text — the digest and the per-row check word
+    // the same finding differently, and confidence weighs the two kinds apart.
+    for (const f of r.flags) {
+      if (/above 100%/.test(f)) counts.impossible++;
+      else if (/below 50/.test(f)) counts.smallSample++;
+      notes.push(`task ${r.id} (${r.title}): flagged — ${f}`);
+    }
     kept.push(r);
   }
-  return { kept, notes };
+  return { kept, notes, counts };
 }
 
 // ── main ─────────────────────────────────────────────────────────
@@ -784,6 +1234,11 @@ export interface AnalyticsInput {
   question: string;
   /** Force a fresh run, bypassing the answer cache. */
   noCache?: boolean;
+  /** The conversation this question belongs to. Scopes BOTH the answer cache and
+   * the related-insights lookup: without it a question can neither read nor
+   * surface another conversation's answers. Omitted by scripts and the bench,
+   * which then get an unscoped key and no related insights. */
+  convId?: string;
   /** Recent conversation turns for follow-up questions (oldest first). */
   history?: Array<{
     role: "user" | "agent";
@@ -808,10 +1263,17 @@ export async function runAnalytics(
   input: AnalyticsInput,
   opts: RunAnalyticsOptions,
 ): Promise<Insight> {
+  // Per-call budgets + JSON mode, keyed by the call name the pipeline already
+  // passes. Injecting `opts.llm` (tests, scripts) overrides the lot, so its
+  // signature stays exactly as it was.
   const llm =
     opts.llm ??
     ((parent: Ctx, name: string, prompt: string) =>
-      complete(parent, name, prompt, { maxTokens: 8000 }));
+      complete(parent, name, prompt, callOptions(name)));
+  const convId = input.convId ?? "";
+  // Read once per run: every task's cap is then decided the same way, even if
+  // the environment is edited mid-run.
+  const orderByAll = flagOn("orderByAll");
 
   // Self-attributing: tagging here rather than at the call site means every
   // query this agent runs is labelled "analytics" in system.query_log (and so on
@@ -819,20 +1281,36 @@ export async function runAnalytics(
   return withQueryContext({ agent: "analytics" }, () =>
    step(opts.trace, "analytics", { question: input.question }, async (span) => {
     // ── context (read-only) ──
-    const { bundle, sqlRulesMarkdown, schemas, contextVersion, contextKey } = await step(
+    const { bundle, sqlRulesMarkdown, verifyDefinitions, schemas, contextVersion, contextKey, dataKey } =
+      await step(
       span,
       "context_load",
       {},
       async () => {
-        const [b, schemas] = await Promise.all([
+        // The data stamp gates the SCHEMAS ONLY — they are cached against it, so a
+        // load or an optimizer ALTER moves the stamp and re-reads system.columns.
+        // Nothing else waits on it: awaiting it up front put its round trip in
+        // front of every question, including a cache hit that needed neither.
+        const dataP = dataVersion();
+        const [b, data, schemas, verifyBundle] = await Promise.all([
           // metrics/conventions/known-issues in full (they define correctness);
-          // table docs brief because `schemas` already gives exact columns.
+          // everything the planner only needs to know EXISTS goes in brief —
+          // `schemas` already carries the exact columns, and the plan prompt was
+          // paying ~2k tokens to read the same table docs twice.
           getContext({
             include: ["*"],
-            brief: ["table", "spec", "overview", "entity"],
+            brief: ["table", "spec", "overview", "entity", "known_issue", "guide"],
             require: ["convention:data_hygiene", "metric"],
           }),
-          tableSchemas(),
+          dataP,
+          dataP.then((d) => tableSchemas(d.key)),
+          // The auditor needs the rules that decide whether a figure MEANS what it
+          // claims — conventions, the join map, the metric definitions — not the
+          // whole store. `latestEntries()` is cached, so this is CPU only.
+          getContext({
+            core: ["convention", "join_map"],
+            include: ["metric"],
+          }),
         ]);
         // SQL generation needs conventions + join_map only — extracted from the
         // already-fetched bundle instead of a second getContext round-trip.
@@ -850,27 +1328,92 @@ export async function runAnalytics(
           .update(b.entries.map((e) => `${e.entity}@${e.version}`).sort().join("|"))
           .digest("hex")
           .slice(0, 10);
-        const maxV = Math.max(...b.entries.map((e) => e.version));
+        // An empty store makes `Math.max()` return -Infinity, which rendered as
+        // `0 entities · max v-Infinity` in the UI and in the trace.
+        const maxV = b.entries.length ? Math.max(...b.entries.map((e) => e.version)) : 0;
         return {
           bundle: b,
           sqlRulesMarkdown,
+          verifyDefinitions: verifyBundle.markdown,
           schemas,
           contextVersion: `${b.entries.length} entities · max v${maxV}`,
-          contextKey: versionDigest,
+          // Definitions AND data: a cached answer is a replay only while both
+          // are unchanged.
+          contextKey: `${versionDigest}:${data.key}`,
+          dataKey: data.key,
         };
       },
     );
 
-    // Cache hit → milliseconds. Follow-ups now cacheable too: the history
-    // digest makes the key conversation-aware, so "break it down by OS" after
-    // different conversations produces different cache entries.
     const historyDigest = input.history?.length
-      ? createHash("sha1")
-          .update(input.history.map((h) => `${h.role}:${h.text}`).join("|"))
-          .digest("hex")
-          .slice(0, 10)
+      ? sha1(input.history.map((h) => `${h.role}:${h.text}`).join("|")).slice(0, 10)
       : "";
-    const key = cacheKey(input.question, contextKey, historyDigest);
+
+    // ── related insights, from EARLIER IN THIS CONVERSATION ──
+    // What this used to do: an unbounded ILIKE over the whole insight_cache,
+    // pulling up to 3 headlines from ANY conversation (including deleted ones)
+    // into the narrator's prompt. Two costs: a PM's answer quietly shaped by a
+    // colleague's unrelated question, and a cache key that did not cover the
+    // text, so the same question drifted as the cache grew.
+    //
+    // Both are fixed rather than the feature removed: the query is scoped to
+    // this conversation by conv_id, and the text is hashed into the cache key
+    // below, so a replay can never disagree with the text that produced it.
+    // Computed BEFORE the lookup for exactly that reason.
+    const relatedContext = await (async (): Promise<string> => {
+      // Nothing to relate to: no conversation (a script or the bench), the
+      // conversation's first question, or the feature switched off.
+      if (!flagOn("relatedInsights") || convId === "" || !input.history?.length) return "";
+      return step(span, "related_insights", { convId }, async (relSpan) => {
+        try {
+          const terms = input.question
+            .toLowerCase()
+            .split(/[^a-z0-9]+/)
+            .filter((t) => t.length > 3)
+            .slice(0, 5);
+          if (terms.length === 0) return "";
+          const likeClause = terms.map((_, i) => `question ILIKE {t${i}:String}`).join(" OR ");
+          const params: Record<string, string> = { conv: convId, q: input.question };
+          terms.forEach((t, i) => (params[`t${i}`] = `%${t}%`));
+          const rows = await query<{ question: string; insight_json: string }>(
+            `SELECT question, insight_json FROM insight_cache
+             WHERE conv_id = {conv:String} AND question != {q:String} AND (${likeClause})
+             ORDER BY created_at DESC LIMIT 3`,
+            params,
+          );
+          if (rows.length === 0) return "";
+          const summaries = rows
+            .map((r) => {
+              try {
+                const ins = JSON.parse(r.insight_json) as Insight;
+                return `- "${r.question}" → ${ins.headline}`;
+              } catch {
+                return null;
+              }
+            })
+            .filter(Boolean);
+          return summaries.length
+            ? `\n## Related insights from earlier in this conversation\n${summaries.join("\n")}`
+            : "";
+        } catch (error) {
+          // Advisory context: an answer is complete without it, but a silent
+          // empty string hid a broken query for the life of the feature.
+          warn(relSpan, "related_insights_failed", error);
+          return "";
+        }
+      });
+    })();
+
+    // Cache hit → milliseconds. The key now covers everything an answer depends
+    // on: the question, the conversation and its turns so far, the definitions
+    // in force, the data version, and the related text the narrator was shown.
+    const key = cacheKey({
+      question: input.question,
+      contextKey,
+      convId,
+      historyDigest,
+      relatedDigest: relatedContext ? sha1(relatedContext).slice(0, 10) : "",
+    });
     if (!input.noCache) {
       const cached = await step(span, "cache_lookup", { key }, () => readCache(key));
       if (cached) {
@@ -973,6 +1516,10 @@ export async function runAnalytics(
         approach: plan.approach,
         tasks: plan.tasks.map((t) => t.title),
         tables: [...new Set(plan.tasks.flatMap((t) => t.tables))],
+        // What the question left open and the planner had to choose. Each one
+        // costs confidence, so showing them here is showing the PM exactly what
+        // to pin down to raise it.
+        assumptions: plan.assumptions,
       },
     });
 
@@ -997,7 +1544,12 @@ export async function runAnalytics(
         recommendedAction: suggestions.length
           ? `Instrument the events this question needs, or ask something the current tables can answer: ${suggestions.slice(0, 3).join(" · ")}`
           : "Instrument the events this question needs before asking it again.",
-        confidence: { value: "low", score: 0.05, note: "no queryable data for this question" },
+        confidence: {
+          value: "low",
+          score: 0.05,
+          note: "no queryable data for this question",
+          signals: [],
+        },
         precision: [],
         verification: null,
         contextVersion,
@@ -1047,7 +1599,7 @@ export async function runAnalytics(
                     : "",
                 });
                 const parts = guardSqlParts(await llm(sqlSpan, `sql_${task.id}`, prompt));
-                const sql = capForFetch(parts);
+                const sql = capForFetch(parts, orderByAll);
                 const rows = await queryReadonly(sql);
                 recordQuery(sqlSpan, `result_${task.id}`, sql, rows);
                 return {
@@ -1116,11 +1668,16 @@ export async function runAnalytics(
     }
 
     // ── sanity gate ──
-    const { kept, notes } = await step(span, "sanity_gate", {}, async () =>
+    // `sqlFailed` is captured BEFORE the gate runs: the gate sets `dropped` on
+    // the tasks it drops itself, so reading `results.filter(r => r.dropped)`
+    // afterwards counted those a second time — every gate-dropped task was
+    // deducted for twice, and appeared twice in the note list.
+    const sqlFailed = results.filter((r) => r.dropped);
+    const { kept, notes, counts } = await step(span, "sanity_gate", {}, async () =>
       sanityGate(results.filter((r) => !r.dropped)),
     );
-    const failedTasks = results.filter((r) => r.dropped);
-    const sanityNotes = [...notes, ...failedTasks.map((r) => `task ${r.id}: ${r.dropped}`)];
+    const sanityNotes = [...notes, ...sqlFailed.map((r) => `task ${r.id}: ${r.dropped}`)];
+    const droppedCount = counts.dropped + sqlFailed.length;
 
     // ── independent verification (started here, awaited after narration) ──
     // One task only: the cost is a full LLM call plus a query, and the figure a
@@ -1160,57 +1717,44 @@ export async function runAnalytics(
               ? renderDigest(toVerify.digest)
               : "(none — this result was small enough to be shown in full)",
             ...(toVerify.digest ? { digestRow: toVerify.digest.statsRow } : {}),
-            definitions: bundle.markdown,
+            // Conventions + join map + metric definitions, not the whole store:
+            // the auditor decides whether a figure means what it claims, and the
+            // table docs it was also being sent are already in `schemas`.
+            definitions: verifyDefinitions,
             schemas: schemaSubset(schemas, plan.tasks.find((t) => t.id === toVerify.id)?.tables ?? []),
           },
           guardSql,
           llm,
-        ).catch(() => null)
+        ).catch((error: unknown) => {
+          warn(span, "verification_failed_to_run", error);
+          return null;
+        })
       : Promise.resolve(null);
 
-    // ── knowledge lookup + precision + cross-conversation context ──
-    // All three are independent: lookupContext uses an LLM call, precision is
-    // pure math, and the cross-conv lookup is a simple DB query.
-    const lookupDigest = kept
-      .map((r) => `${r.title}: ${JSON.stringify(r.rows.slice(0, 3))}`)
+    // ── knowledge lookup + precision ──
+    // Both are independent: lookupContext is a retrieval call, precision is pure
+    // math. (Related insights ran earlier — its text is in the cache key.)
+    //
+    // The topic is what the analysis is ABOUT: the question, what the tasks set
+    // out to measure, and the columns the results came back with. It used to be
+    // `JSON.stringify(rows)` of three rows per task — up to 1.5k characters of
+    // values, which are data, not topic: retrieval matched on city names and
+    // timestamps, and on the LLM path they were pure prompt cost.
+    const lookupTopic = [
+      input.question,
+      ...kept.map((r) => r.title),
+      ...new Set(kept.flatMap((r) => (r.rows[0] ? Object.keys(r.rows[0]) : []))),
+    ]
       .join("\n")
       .slice(0, 1500);
 
-    // Cross-conversation context: find related past insights the PM has seen
-    // in other conversations, so the narrator can reference or contrast them.
-    const relatedInsightsPromise = step(span, "related_insights", {}, async () => {
-      try {
-        // Extract key terms from the question for a lightweight search
-        const terms = input.question.toLowerCase()
-          .split(/[^a-z0-9]+/).filter((t) => t.length > 3)
-          .slice(0, 5);
-        if (terms.length === 0) return "";
-        const likeClause = terms.map((t) => `question ILIKE '%${t}%'`).join(" OR ");
-        const rows = await query<{ question: string; insight_json: string }>(
-          `SELECT question, insight_json FROM insight_cache
-           WHERE (${likeClause}) AND cache_key != {currentKey:String}
-           ORDER BY created_at DESC LIMIT 3`,
-          { currentKey: key },
-        );
-        if (rows.length === 0) return "";
-        const summaries = rows.map((r) => {
-          try {
-            const ins = JSON.parse(r.insight_json) as Insight;
-            return `- "${r.question}" → ${ins.headline}`;
-          } catch { return null; }
-        }).filter(Boolean);
-        return summaries.length
-          ? `\n## Related past insights (from other conversations)\n${summaries.join("\n")}`
-          : "";
-      } catch { return ""; }
-    });
-
-    const [lookup, { precision, headlinePrecision }, relatedContext] = await Promise.all([
-      lookupContext(span, `${input.question}\n${lookupDigest}`, opts.llm),
+    const [lookup, { precision, headlineColumns }] = await Promise.all([
+      lookupContext(span, lookupTopic, opts.llm),
       step(span, "precision", {}, async () => {
         // What the answer's main claims rest on: the listed rows and, when the result
         // was profiled, the whole-population figure.
         const headline: Precision[] = [];
+        const headlineColumns: string[] = [];
         // The extreme rows. Real, and worth reporting — but by construction they
         // include the smallest segments in the result, so letting them decide overall
         // confidence would mark every large answer "low" because some tail row has n=2.
@@ -1220,7 +1764,9 @@ export async function runAnalytics(
             headline.push(...precisionForRow(row as Record<string, unknown>, r.semanticSql));
           }
           if (!r.digest) continue;
-          headline.push(...precisionForRow(populationRow(r.digest), r.digest.sql));
+          const population = populationRow(r.digest);
+          headline.push(...precisionForRow(population, r.digest.sql));
+          headlineColumns.push(...Object.keys(population).filter((c) => RATE_RE.test(c)));
           for (const row of [
             ...(r.digest.extremes?.top ?? []),
             ...(r.digest.extremes?.bottom ?? []),
@@ -1230,10 +1776,12 @@ export async function runAnalytics(
         }
         return {
           precision: widestPerColumn([...headline, ...tails]),
-          headlinePrecision: widestPerColumn(headline),
+          // The population rates — the figures an answer's headline is actually
+          // built on. Confidence picks its headline from these, so one tail row
+          // with n=2 can no longer decide the level for the whole answer.
+          headlineColumns: [...new Set(headlineColumns)],
         };
       }),
-      relatedInsightsPromise,
     ]);
 
     const precisionText =
@@ -1381,12 +1929,37 @@ export async function runAnalytics(
     // the verification started before the lookup has had the whole narration to finish in
     const verification = await verificationPromise;
 
-    const confidence = deriveConfidence({
-      precisions: headlinePrecision,
-      sanityFlags: sanityNotes.length,
-      citationRetries: citationFailures,
-      verificationAgreed: verification?.agreed ?? null,
-    });
+    // Computed, never asked of the model: every input below is a measurement.
+    // Its own step so the trace shows the inputs beside the score they produced.
+    const confidence = await step(
+      span,
+      "confidence",
+      { headlineColumns, assumptions: plan.assumptions },
+      async () => {
+        const confidenceInput: ConfidenceInput = {
+          precisions: precision,
+          headlineColumns,
+          verifiedColumn: verification?.expectedToMatch || null,
+          verification: verification
+            ? {
+                agreed: verification.agreed,
+                relativeDelta: verification.relativeDelta,
+                definitionOk: verification.definitionOk,
+                concern: verification.concern,
+                note: verification.note,
+              }
+            : null,
+          impossibleFlags: counts.impossible,
+          smallSampleFlags: counts.smallSample,
+          droppedTasks: droppedCount,
+          plannedTasks: plan.tasks.length,
+          citationRetries: citationFailures,
+          assumptions: plan.assumptions,
+          namedMetrics: namedMetrics(input.question, bundle.entries.map((e) => e.entity)),
+        };
+        return deriveConfidence(confidenceInput);
+      },
+    );
 
     // ── quality gate ──
     // Skip the LLM call when deterministic checks already cover the rubric.
@@ -1398,15 +1971,32 @@ export async function runAnalytics(
     // mechanical — a `whyItHappens` that restates the measurement, or an action too
     // vague to do — so `sectionsAreSubstantive` catches the degenerate cases in code
     // and only a genuinely doubtful answer pays for a call.
+    // A "below 50" note is now raised by a regex that actually matches the SQL
+    // naming convention, so it fires where it silently never did before. It is a
+    // precision signal, which confidence already weighs — treating it as an
+    // unexplained anomaly here would buy a 4–6k LLM call per thin-sample answer
+    // for no change in the text.
     const hasAnomalyWithoutLink =
-      sanityNotes.some((n) => /flagged/i.test(n)) && !narration.groundedInContext.trim();
+      sanityNotes.some((n) => /flagged/i.test(n) && !/below 50/.test(n)) &&
+      !narration.groundedInContext.trim();
     const selfEvident =
       sanityNotes.filter((n) => !/flagged/i.test(n)).length === 0 &&
       citationFailures === 0 &&
       /\d/.test(narration.headline) &&
       sectionsAreSubstantive(narration) &&
       !hasAnomalyWithoutLink;
-    const quality = selfEvident
+    // The gate stays ON by default; `ANALYTICS_QUALITY_GATE=0` is an escape
+    // hatch for the bench, not a new default. `selfEvident` is unchanged — it
+    // already skips the call for an answer that passed every code check.
+    const gateDisabled = !flagOn("qualityGate");
+    if (gateDisabled) {
+      emitRunEvent({
+        type: "log",
+        name: "quality_gate_skipped",
+        payload: { reason: "ANALYTICS_QUALITY_GATE=0" },
+      });
+    }
+    const quality = gateDisabled || selfEvident
       ? {
           actionable: true, cites_numbers: true, names_segment: true,
           names_pattern: true, explains_why: true,
@@ -1456,7 +2046,7 @@ export async function runAnalytics(
           sanity: sanityNotes.join("\n") || "(clean)",
           method: methodNotes || "(no queries succeeded)",
           precision: precisionText,
-          lookup: lookup.markdown || "(nothing relevant retrieved)",
+          lookup: (lookup.markdown || "(nothing relevant retrieved)") + relatedContext,
           context_version: contextVersion,
           history: input.history?.length ? `\n# Conversation so far\n${historyText}\n` : "",
           feedback: `\n# Quality reviewer's instruction — apply it\n${quality.revision_note}\n`,
@@ -1475,7 +2065,10 @@ export async function runAnalytics(
           return preRevision;
         }
         return parsed;
-      }).catch(() => preRevision);
+      }).catch((error: unknown) => {
+        warn(span, "revision_failed", error);
+        return preRevision;
+      });
     }
 
     annotateFormats(narration, kept);
@@ -1494,10 +2087,13 @@ export async function runAnalytics(
             concern: verification.concern,
             definitionOk: verification.definitionOk,
             answersQuestion: verification.answersQuestion,
+            expectedToMatch: verification.expectedToMatch,
           }
         : null,
       contextVersion,
-      droppedTasks: [...failedTasks, ...results.filter((r) => r.dropped && !failedTasks.includes(r))]
+      // Every task with no usable result, each listed once — `sqlFailed` was
+      // captured before the gate, so the gate's own drops are the remainder.
+      droppedTasks: [...sqlFailed, ...results.filter((r) => r.dropped && !sqlFailed.includes(r))]
         .map((r) => `${r.title}: ${r.dropped}`)
         .filter(Boolean),
       // Every executed query, so a reader can see both what was sampled and how the
@@ -1543,10 +2139,13 @@ export async function runAnalytics(
         cache_key: key,
         question: input.question,
         context_key: contextKey,
+        // Scopes the related-insights lookup above: an answer can only ever be
+        // surfaced to the conversation it was written in.
+        conv_id: convId,
         insight_json: JSON.stringify(insight),
         created_at: new Date().toISOString().replace("T", " ").replace("Z", ""),
       },
-    ]).catch(() => {});
+    ]).catch((error: unknown) => warn(span, "insight_cache_write_failed", error));
 
     scoreRun(span, "analytics_tasks", plan.tasks.length);
     scoreRun(span, "sql_attempts_total", sqlAttemptsTotal);
@@ -1565,9 +2164,15 @@ export async function runAnalytics(
       kept.reduce((sum, r) => sum + r.totalRows, 0),
       `${kept.reduce((sum, r) => sum + Math.min(r.rows.length, NARRATION_ROWS), 0)} rows were listed for the narrator`,
     );
-    scoreRun(span, "sanity_flags", sanityNotes.length);
+    scoreRun(span, "sanity_flags", counts.impossible + counts.smallSample);
+    scoreRun(span, "dropped_tasks", droppedCount);
     scoreRun(span, "citation_failures", citationFailures);
-    scoreRun(span, "quality_gate_passed", quality.verdict === "pass" ? 1 : 0);
+    scoreRun(
+      span,
+      "quality_gate_passed",
+      quality.verdict === "pass" ? 1 : 0,
+      gateDisabled ? "gate disabled (ANALYTICS_QUALITY_GATE=0)" : selfEvident ? "skipped — code checks cover the rubric" : "reviewed by the gate",
+    );
     scoreRun(
       span,
       "verification_agreed",
@@ -1577,6 +2182,7 @@ export async function runAnalytics(
     const tightest = precision.filter((p) => p.interval).sort((a, b) => a.interval!.halfWidthPp - b.interval!.halfWidthPp)[0];
     if (tightest) scoreRun(span, "precision_half_width_pp", tightest.interval!.halfWidthPp);
     scoreRun(span, "confidence_computed", confidence.value === "high" ? 2 : confidence.value === "medium" ? 1 : 0, confidence.note);
+    scoreRun(span, "confidence_score", confidence.score, confidence.note);
 
     return insight;
    }),

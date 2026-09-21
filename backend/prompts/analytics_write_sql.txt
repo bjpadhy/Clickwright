@@ -17,7 +17,7 @@ listed here does not exist.
 {{prior_sql}}{{feedback}}
 <rules>
 1. ONE statement, starting with SELECT or WITH. No semicolon, no trailing comment.
-2. Aggregate in the database: GROUP BY plus count/uniq/avg/quantile. Return a
+2. Aggregate in the database: GROUP BY plus count/uniqExact/avg/quantileExact. Return a
    summary, never raw events. Group as finely as the task deserves without worrying
    about the row count: a large grouped result is profiled in full downstream, so a
    per-city-per-day cut is fine where the task calls for one.
@@ -76,9 +76,12 @@ first match. Prefer aggregating each side to one row per key before joining.
 columns shown in the schema block; a predicate that skips the prefix forces a full scan.
 Put those filters in WHERE, not in HAVING.
 
-**Sizing.** `uniqExact` is exact but expensive; on tables of millions of rows use `uniq`
-(approximate, ~1% error) unless the task needs an exact figure — say which you used in
-the column name if it matters. Never `SELECT *`. Never `FINAL`.
+**Sizing.** Use the EXACT aggregates: `uniqExact`, not `uniq`; `quantileExact(0.5)`, not
+`quantile(0.5)`. Every table here is under a million rows, so the exact versions cost
+nothing measurable — and the approximate ones sample, which makes the same question
+return a slightly different number each time it is asked. A PM re-asking a question and
+seeing 41,208 where they saw 41,190 reads that as the product changing. Never `SELECT *`.
+Never `FINAL`.
 </performance>
 
 <avoid>

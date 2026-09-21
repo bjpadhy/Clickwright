@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import { command, insert, query } from "../core/db.js";
 import {
   startRun,
@@ -21,32 +21,35 @@ import {
   type RunEvent,
 } from "../core/tracing.js";
 import { runAnalytics, establishedFigures, type Insight } from "../agents/analytics.js";
+import { nextTurnSeq, phaseOf } from "./phases.js";
+import { registerStream } from "./streams.js";
+
+// The step→phase tables live in ./phases.ts: they are pure, and a unit test has
+// to be able to import them without a .env or a database.
+export { phaseOf };
 
 /**
- * Technical step names are noise in a chat UI. Each maps to one of five phases the
- * reader actually cares about, so the FE can render "Querying ClickHouse · 12s"
- * instead of a stack of sql_attempt_1 / task_t2 lines. The raw name still rides
- * along for the "how I got this" detail view.
+ * "That conversation does not exist" — the only condition the HTTP layer may
+ * answer with a 404. Anything else (a ClickHouse outage, a malformed row) is a
+ * server fault and must surface as a 500: the webapp treats 404 on a
+ * conversation as "it was deleted" and drops the user back to an empty screen,
+ * which is the wrong recovery for a database that is merely down.
  */
-const PHASES: Array<[RegExp, string]> = [
-  // the wrapper span and the cache probe are plumbing — no phase, so the UI skips
-  // them rather than flashing a line the reader cannot act on
-  [/^analytics$/, ""],
-  [/^cache_lookup$/, ""],
-  [/^context_load$/, "Reading the knowledge store"],
-  [/^plan/, "Planning the analysis"],
-  [/^(task_|sql_attempt)/, "Querying ClickHouse"],
-  [/^digest_/, "Analysing every row of the results"],
-  [/^sanity_gate$/, "Validating the results"],
-  [/^context_lookup$/, "Looking for known issues"],
-  [/^narrate/, "Writing the insight"],
-  [/^quality_gate/, "Reviewing the answer"],
-];
+export class UnknownConversationError extends Error {
+  constructor() {
+    // The wire message is load-bearing — the webapp matches on it.
+    super("unknown conversation");
+    this.name = "UnknownConversationError";
+  }
+}
 
-/** "" means: plumbing, do not surface it in the chat timeline. */
-export function phaseOf(stepName: string): string {
-  for (const [re, label] of PHASES) if (re.test(stepName)) return label;
-  return "Working";
+/** One swallowed-error log per site, so a recurring failure is visible once
+ *  instead of either silent or spamming every turn. */
+const warnedOnce = new Set<string>();
+function warnOnce(site: string, error: unknown): void {
+  if (warnedOnce.has(site)) return;
+  warnedOnce.add(site);
+  console.warn(`[chat] ${site} failed:`, error instanceof Error ? error.message : error);
 }
 
 export interface ChatMessageRow {
@@ -90,6 +93,36 @@ export async function initChatTables(): Promise<void> {
 }
 
 const now = () => new Date().toISOString().replace("T", " ").replace("Z", "");
+
+/**
+ * One write lock per conversation, in process.
+ *
+ * Reading the next turn number and writing the user row have to be atomic: two
+ * questions asked at the same moment would otherwise both read the same
+ * `max(seq)` and write their turns onto the same slot, interleaving the
+ * conversation. The section is two statements long, so the lock is held for
+ * milliseconds, and it is per conversation — different conversations never
+ * wait on each other. (One process owns the writes; a second replica would
+ * need the same guarantee from ClickHouse, which is why the seq is derived
+ * from `max(seq)` rather than a counter held in memory.)
+ */
+const conversationLocks = new Map<string, Promise<void>>();
+
+function withConversationLock<T>(convId: string, fn: () => Promise<T>): Promise<T> {
+  const previous = conversationLocks.get(convId) ?? Promise.resolve();
+  // `.then(fn, fn)` — the next waiter runs whether or not the previous one threw.
+  const result = previous.then(fn, fn);
+  const tail = result.then(
+    () => {},
+    () => {},
+  );
+  conversationLocks.set(convId, tail);
+  void tail.then(() => {
+    // Drop the entry once this conversation is idle, or the map grows forever.
+    if (conversationLocks.get(convId) === tail) conversationLocks.delete(convId);
+  });
+  return result;
+}
 
 export async function createConversation(title?: string): Promise<string> {
   const id = `conv_${Date.now().toString(36)}_${randomUUID().slice(0, 6)}`;
@@ -174,7 +207,7 @@ export async function listConversations(): Promise<unknown[]> {
 }
 
 export async function getConversation(convId: string): Promise<unknown> {
-  if (!(await loadConversation(convId))) throw new Error("unknown conversation");
+  if (!(await loadConversation(convId))) throw new UnknownConversationError();
   const messages = await query<ChatMessageRow>(
     `SELECT conv_id, toUInt32(seq) AS seq, role, question, insight_json, trace_url, toString(ts) AS ts
      FROM messages WHERE conv_id = {conv:String} ORDER BY seq ASC`,
@@ -197,7 +230,7 @@ export async function getConversation(convId: string): Promise<unknown> {
 
 export async function setStarred(convId: string, starred: boolean): Promise<void> {
   const current = await loadConversation(convId);
-  if (!current) throw new Error("unknown conversation");
+  if (!current) throw new UnknownConversationError();
   await insert("conversations", [
     {
       conv_id: convId,
@@ -225,7 +258,7 @@ export async function setStarred(convId: string, starred: boolean): Promise<void
  */
 export async function deleteConversation(convId: string): Promise<void> {
   const current = await loadConversation(convId);
-  if (!current) throw new Error("unknown conversation");
+  if (!current) throw new UnknownConversationError();
   await insert("conversations", [
     {
       conv_id: convId,
@@ -306,13 +339,19 @@ export async function streamAnswer(
   convId: string,
   question: string,
   res: Response,
+  req: Pick<Request, "on"> = res.req,
 ): Promise<void> {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
+  // The answer keeps running when the reader leaves — both turns are persisted,
+  // so a reload re-reads the finished card — but nothing should keep writing to
+  // a socket that is gone, and the keepalive must not outlive it.
+  let clientGone = false;
   const send = (event: string, data: unknown) => {
+    if (clientGone) return;
     try {
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     } catch {
@@ -320,12 +359,21 @@ export async function streamAnswer(
     }
   };
   const keepalive = setInterval(() => {
+    if (clientGone) return;
     try {
       res.write(": keepalive\n\n");
     } catch {
       /* client gone */
     }
   }, 15000);
+  // Registered so a shutdown closes this stream instead of leaving the client
+  // on a dead socket — the same treatment run streams already had.
+  const unregister = registerStream({ end: () => res.end() });
+  req.on("close", () => {
+    clientGone = true;
+    clearInterval(keepalive);
+    unregister();
+  });
   // trace/url must be visible to catch and finally; everything that can throw
   // goes inside the try, or a pre-flight failure leaves the keepalive interval
   // writing to a half-open response forever with no terminal event sent.
@@ -340,72 +388,95 @@ export async function streamAnswer(
     url = traceUrl(trace);
     send("start", { traceUrl: url, convId });
 
-    // independent reads — run them together rather than back to back
-    const [priorRows, historyRows] = await Promise.all([
-      // count(), not max(seq): ClickHouse returns 0 for max() over an empty set,
-      // which made nextSeq 1 for a new conversation and stopped it being titled.
-      query<{ n: string }>(
-        `SELECT toString(count()) AS n FROM messages WHERE conv_id = {conv:String}`,
-        { conv: convId },
-      ),
-      query<{ role: string; question: string; insight_json: string }>(
-        `SELECT role, question, insight_json FROM messages
-         WHERE conv_id = {conv:String} ORDER BY seq DESC LIMIT 12`,
-        { conv: convId },
-      ),
-    ]);
-    const nextSeq = Number(priorRows[0]?.n ?? 0);
-    const history = historyRows.reverse().map((m) => {
-      if (m.role === "user") return { role: "user" as const, text: m.question };
-      // Carry the figures forward, not just the sentence. A follow-up that recomputes
-      // a quantity on a different basis than the turn before contradicts what the user
-      // was already told, and no per-answer check can see that.
-      let insight: Insight | null = null;
-      try {
-        insight = JSON.parse(m.insight_json || "{}") as Insight;
-      } catch {
-        /* a malformed stored answer must not break the next question */
+    // Read the turn number and write the user row as one critical section, so
+    // two questions asked at once cannot land on the same seq. The history read
+    // rides along inside it: issued with the seq read (one round trip, as
+    // before) and always finished before this turn's own row is written, so a
+    // question never appears in its own history.
+    const { nextSeq, history } = await withConversationLock(convId, async () => {
+      // count() AND max(seq): ClickHouse returns 0 for max() over an empty set,
+      // which would make a brand-new conversation look like it already had turn 0
+      // and stop it being titled.
+      const [priorRows, historyRows] = await Promise.all([
+        query<{ n: string; max_seq: string }>(
+          `SELECT toString(count()) AS n, toString(max(seq)) AS max_seq
+           FROM messages WHERE conv_id = {conv:String}`,
+          { conv: convId },
+        ),
+        query<{ role: string; question: string; insight_json: string }>(
+          `SELECT role, question, insight_json FROM messages
+           WHERE conv_id = {conv:String} ORDER BY seq DESC LIMIT 12`,
+          { conv: convId },
+        ),
+      ]);
+      const nextSeq = nextTurnSeq(
+        Number(priorRows[0]?.n ?? 0),
+        Number(priorRows[0]?.max_seq ?? 0),
+      );
+      const history = historyRows.reverse().map((m) => {
+        if (m.role === "user") return { role: "user" as const, text: m.question };
+        // Carry the figures forward, not just the sentence. A follow-up that recomputes
+        // a quantity on a different basis than the turn before contradicts what the user
+        // was already told, and no per-answer check can see that.
+        let insight: Insight | null = null;
+        try {
+          insight = JSON.parse(m.insight_json || "{}") as Insight;
+        } catch {
+          /* a malformed stored answer must not break the next question */
+        }
+        // Carry the SQL context forward so the planner can reuse the same tables,
+        // columns and approach rather than re-planning from scratch and drifting.
+        const mainQueries = (insight?.sql ?? [])
+          .filter((s) => !s.task.endsWith("_profile") && !s.task.endsWith("_top") && !s.task.endsWith("_bottom"));
+        const sqlContext = mainQueries
+          .map((s) => {
+            const tables = [...s.query.matchAll(/\bfrom\s+([a-z_][a-z0-9_]*)/gi)]
+              .map((m) => m[1]!).filter((t) => !/^select$/.test(t));
+            return `${s.task}: ${s.title} (tables: ${[...new Set(tables)].join(", ")})`;
+          })
+          .join("; ");
+        return {
+          role: "agent" as const,
+          text: insight?.headline ?? "",
+          figures: insight ? establishedFigures(insight) : "",
+          sqlContext,
+          // Pass actual SQL from the most recent agent turn so the SQL writer
+          // can reference or adapt them for follow-ups.
+          priorSql: mainQueries.map((s) => ({
+            task: s.task,
+            title: s.title,
+            query: s.query,
+          })),
+          droppedTasks: insight?.droppedTasks ?? [],
+        };
+      });
+
+      // Title from the first question NOW, not after a successful answer: a failed
+      // first answer still persists the user message, so a later retry would never
+      // see nextSeq === 0 and the conversation would stay "New conversation".
+      if (nextSeq === 0) {
+        const created = now();
+        await insert("conversations", [
+          {
+            conv_id: convId,
+            title: question.slice(0, 70),
+            starred: 0,
+            // Explicit, not defaulted: this row is a new ReplacingMergeTree
+            // version, and one written without `deleted` takes the column's
+            // DEFAULT 0 anyway — but stating it keeps the two insert sites
+            // identical and stops a future default change resurrecting rows.
+            deleted: 0,
+            created_at: created,
+            updated_at: created,
+          },
+        ]).catch((error: unknown) => warnOnce("title insert", error));
       }
-      // Carry the SQL context forward so the planner can reuse the same tables,
-      // columns and approach rather than re-planning from scratch and drifting.
-      const mainQueries = (insight?.sql ?? [])
-        .filter((s) => !s.task.endsWith("_profile") && !s.task.endsWith("_top") && !s.task.endsWith("_bottom"));
-      const sqlContext = mainQueries
-        .map((s) => {
-          const tables = [...s.query.matchAll(/\bfrom\s+([a-z_][a-z0-9_]*)/gi)]
-            .map((m) => m[1]!).filter((t) => !/^select$/.test(t));
-          return `${s.task}: ${s.title} (tables: ${[...new Set(tables)].join(", ")})`;
-        })
-        .join("; ");
-      return {
-        role: "agent" as const,
-        text: insight?.headline ?? "",
-        figures: insight ? establishedFigures(insight) : "",
-        sqlContext,
-        // Pass actual SQL from the most recent agent turn so the SQL writer
-        // can reference or adapt them for follow-ups.
-        priorSql: mainQueries.map((s) => ({
-          task: s.task,
-          title: s.title,
-          query: s.query,
-        })),
-        droppedTasks: insight?.droppedTasks ?? [],
-      };
+
+      await insert("messages", [
+        { conv_id: convId, seq: nextSeq, role: "user", question, insight_json: "", trace_url: url, ts: now() },
+      ]);
+      return { nextSeq, history };
     });
-
-    // Title from the first question NOW, not after a successful answer: a failed
-    // first answer still persists the user message, so a later retry would never
-    // see nextSeq === 0 and the conversation would stay "New conversation".
-    if (nextSeq === 0) {
-      const created = now();
-      await insert("conversations", [
-        { conv_id: convId, title: question.slice(0, 70), starred: 0, created_at: created, updated_at: created },
-      ]).catch(() => {});
-    }
-
-    await insert("messages", [
-      { conv_id: convId, seq: nextSeq, role: "user", question, insight_json: "", trace_url: url, ts: now() },
-    ]);
 
     const activeTrace = trace;
     const insight = await withRunSink(
@@ -417,7 +488,10 @@ export async function streamAnswer(
           phase: e.type.startsWith("step_") ? phaseOf(e.name) : undefined,
           payload: e.payload,
         }),
-      () => runAnalytics({ question, history }, { trace: activeTrace }),
+      // convId scopes the answer cache AND the related-insights lookup: without
+      // it one conversation can be served another's cached answer, and the
+      // narrator can cite headlines from conversations this reader never saw.
+      () => runAnalytics({ question, history, convId }, { trace: activeTrace }),
     );
     await insert("messages", [
       {
@@ -458,6 +532,7 @@ export async function streamAnswer(
     clearInterval(keepalive);
     send("done", {});
     res.end();
-    await flushTraces().catch(() => {});
+    unregister();
+    await flushTraces().catch((error: unknown) => warnOnce("trace flush", error));
   }
 }

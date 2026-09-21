@@ -24,14 +24,18 @@
  *   GET  /api/observe/changelog/export    the same, as a markdown download
  */
 import express from "express";
-import { readdir, readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { RunManager, type StoredEvent } from "./runs.js";
 import {
   initChatTables, createConversation, listConversations, getConversation,
   setStarred, deleteConversation, suggestions, streamAnswer,
+  UnknownConversationError,
 } from "./chat.js";
+import { closeOpenStreams, registerStream } from "./streams.js";
 import { initInsightCache } from "../agents/analytics.js";
 import { closeDb, command, query } from "../core/db.js";
 import { env } from "../core/env.js";
@@ -48,12 +52,17 @@ app.use("/api/observe", observeRouter(manager));
 app.get("/api/health", async (_req, res) => {
   try {
     const [row] = await query<{ v: string }>("SELECT version() AS v");
+    const llm = env.llm;
     res.json({
       ok: true,
       clickhouse: row?.v ?? "unknown",
       database: env.clickhouse.database,
-      llmBackend: env.llm.apiKey ? "anthropic-api" : "claude-code-oauth",
-      model: env.llm.model,
+      // llmBackend is a free-form string on the webapp side (api/instrumentation.ts):
+      // "gemini-openai-compatible" | "anthropic-api" | "claude-code-oauth".
+      llmProvider: llm.provider,
+      llmBackend: llm.backend,
+      model: llm.model,
+      ...(llm.provider === "gemini" ? { llmBaseUrl: llm.baseUrl } : {}),
     });
   } catch (error) {
     res.status(500).json({ ok: false, error: String(error) });
@@ -80,6 +89,10 @@ app.get("/api/runs/:id", (req, res) => {
   res.json(rest);
 });
 
+/** A run is over for good at these events — nothing follows them. */
+const isTerminalEvent = (e: StoredEvent): boolean =>
+  e.type === "status" && (e.name === "succeeded" || e.name === "failed");
+
 app.get("/api/runs/:id/events", (req, res) => {
   const run = manager.get(req.params.id);
   if (!run) return res.status(404).json({ error: "unknown run" });
@@ -89,18 +102,45 @@ app.get("/api/runs/:id/events", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  const send = (e: StoredEvent) =>
-    res.write(`id: ${e.seq}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+  let closed = false;
+  let keepalive: NodeJS.Timeout | null = null;
+  let unregister: (() => void) | null = null;
 
-  for (const e of run.events) send(e); // replay
-  run.subscribers.add(send); // live
-  const keepalive = setInterval(() => res.write(": keepalive\n\n"), 15000);
-  const handle = { end: () => res.end() };
-  openStreams.add(handle);
-  req.on("close", () => {
-    clearInterval(keepalive);
+  /**
+   * Close the stream for good. A finished run emits nothing more, so holding
+   * the socket open costs a connection per replay and keeps a keepalive timer
+   * ticking forever. The client closes its EventSource on the same terminal
+   * event (see webapp `openRunStream`), so this never triggers a reconnect
+   * loop.
+   */
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    if (keepalive) clearInterval(keepalive);
     run.subscribers.delete(send);
-    openStreams.delete(handle);
+    unregister?.();
+    res.end();
+  };
+
+  const send = (e: StoredEvent) => {
+    if (closed) return;
+    res.write(`id: ${e.seq}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+    if (isTerminalEvent(e)) finish();
+  };
+
+  for (const e of run.events) send(e); // replay (may already be terminal)
+  if (closed) return;
+
+  run.subscribers.add(send); // live
+  keepalive = setInterval(() => {
+    if (!closed) res.write(": keepalive\n\n");
+  }, 15000);
+  unregister = registerStream({ end: () => res.end() });
+  req.on("close", () => {
+    closed = true;
+    if (keepalive) clearInterval(keepalive);
+    run.subscribers.delete(send);
+    unregister?.();
   });
 });
 
@@ -116,53 +156,131 @@ app.post("/api/runs/:id/approve", (req, res) => {
   }
 });
 
-/** Sample specs from the repo's specs/ dir — the "start from a sample" list. */
-app.get("/api/specs", async (_req, res) => {
-  const specsRoot = fileURLToPath(new URL("../../../specs", import.meta.url));
-  const instrumented = new Set(
-    (
-      await query<{ s: string }>(
-        `SELECT DISTINCT source_spec AS s FROM context_store`,
-      )
-    ).map((r) => r.s),
-  );
-  const dirs = (await readdir(specsRoot, { withFileTypes: true }))
+/* ── sample specs ───────────────────────────────────────────────
+ *
+ * The six sample specs are ~14 MB / 35k lines of NDJSON in total, and this
+ * endpoint used to read and JSON.parse all of it on EVERY call — synchronously
+ * enough to stall the event loop, which stalls every in-flight SSE answer with
+ * it. The files are static, so the counts are computed once and reused until a
+ * file actually changes (size + mtime), and the parse streams line by line
+ * instead of materialising a 14 MB string and a 35k-element array.
+ */
+
+const SPECS_ROOT = fileURLToPath(new URL("../../../specs", import.meta.url));
+
+interface SpecFacts {
+  id: string;
+  specDir: string;
+  events: number;
+  eventTypes: number;
+}
+
+/** Count events and distinct event types without holding the file in memory. */
+async function readSpecFacts(dir: string): Promise<SpecFacts> {
+  const eventTypes = new Set<string>();
+  let events = 0;
+  const stream = createReadStream(path.join(SPECS_ROOT, dir, "events.ndjson"), {
+    encoding: "utf-8",
+  });
+  try {
+    // `for await` over readline yields between chunks, so a big file is read
+    // in slices the event loop can interleave other work around.
+    for await (const line of createInterface({ input: stream, crlfDelay: Infinity })) {
+      if (!line.trim()) continue;
+      events++;
+      try {
+        eventTypes.add(String((JSON.parse(line) as { event?: string }).event ?? ""));
+      } catch {
+        /* skip bad lines */
+      }
+    }
+  } finally {
+    stream.destroy();
+  }
+  return { id: dir, specDir: `../specs/${dir}`, events, eventTypes: eventTypes.size };
+}
+
+let specCache: { key: string; facts: SpecFacts[] } | null = null;
+let specCacheInFlight: { key: string; facts: Promise<SpecFacts[]> } | null = null;
+
+async function specFacts(): Promise<SpecFacts[]> {
+  const dirs = (await readdir(SPECS_ROOT, { withFileTypes: true }))
     .filter((d) => d.isDirectory())
     .map((d) => d.name)
     .sort();
-  const specs = await Promise.all(
-    dirs.map(async (dir) => {
-      const nd = await readFile(path.join(specsRoot, dir, "events.ndjson"), "utf-8");
-      const lines = nd.split("\n").filter((l) => l.trim());
-      const eventTypes = new Set<string>();
-      for (const line of lines) {
-        try {
-          eventTypes.add(String((JSON.parse(line) as { event?: string }).event ?? ""));
-        } catch { /* skip bad lines */ }
-      }
-      return {
-        id: dir,
-        specDir: `../specs/${dir}`,
-        events: lines.length,
-        eventTypes: eventTypes.size,
-        alreadyInstrumented: instrumented.has(dir),
-      };
-    }),
+  // Identity of the inputs, not a clock: a spec edited in place invalidates the
+  // entry, and nothing else does.
+  const stamps = await Promise.all(
+    dirs.map((dir) =>
+      stat(path.join(SPECS_ROOT, dir, "events.ndjson"))
+        .then((st) => `${st.size}:${st.mtimeMs}`)
+        .catch(() => "missing"),
+    ),
   );
-  res.json(specs);
+  const key = dirs.map((dir, i) => `${dir}@${stamps[i]}`).join("|");
+
+  if (specCache?.key === key) return specCache.facts;
+  // Concurrent first calls (two tabs, a StrictMode double mount) share one parse.
+  if (specCacheInFlight?.key === key) return specCacheInFlight.facts;
+
+  const facts = (async () => {
+    const out: SpecFacts[] = [];
+    // Serial, not Promise.all: six parallel multi-MB parses is a CPU spike on
+    // the only thread serving the SSE streams.
+    for (const [i, dir] of dirs.entries()) {
+      if (stamps[i] === "missing") continue;
+      out.push(await readSpecFacts(dir));
+    }
+    specCache = { key, facts: out };
+    return out;
+  })();
+  specCacheInFlight = { key, facts };
+  try {
+    return await facts;
+  } finally {
+    if (specCacheInFlight?.facts === facts) specCacheInFlight = null;
+  }
+}
+
+/** Sample specs from the repo's specs/ dir — the "start from a sample" list. */
+app.get("/api/specs", async (_req, res) => {
+  try {
+    const [facts, instrumentedRows] = await Promise.all([
+      specFacts(),
+      query<{ s: string }>(`SELECT DISTINCT source_spec AS s FROM context_store`),
+    ]);
+    const instrumented = new Set(instrumentedRows.map((r) => r.s));
+    res.json(
+      facts.map((spec) => ({ ...spec, alreadyInstrumented: instrumented.has(spec.id) })),
+    );
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 /** History that survives restarts. Uses run_summary (one row per run) when
  *  populated; falls back to the GROUP BY over runs_log for older data. */
 app.get("/api/history", async (_req, res) => {
   // Try the fast path first — run_summary is O(runs), not O(events).
+  // run_summary is a ReplacingMergeTree keyed on run_id: until the parts merge
+  // a run can have several versions, and reading them raw showed a finished run
+  // twice (once as it was at an earlier write). argMax collapses them on the
+  // sort key — cheaper than FINAL, which merges at query time on every load.
   const summary = await query<{
     run_id: string; spec: string; started: string; finished: string;
     status: string; events: string; duration_ms: string;
   }>(`
-    SELECT run_id, spec, toString(started) AS started, toString(finished) AS finished,
-           status, toString(events) AS events, toString(duration_ms) AS duration_ms
-    FROM run_summary ORDER BY started DESC LIMIT 200
+    SELECT run_id,
+           argMax(spec, finished)                  AS spec,
+           toString(argMax(started, finished))     AS started,
+           toString(max(finished))                 AS finished,
+           argMax(status, finished)                AS status,
+           toString(argMax(events, finished))      AS events,
+           toString(argMax(duration_ms, finished)) AS duration_ms
+    FROM run_summary
+    GROUP BY run_id
+    ORDER BY started DESC
+    LIMIT 200
   `).catch(() => [] as Array<{
     run_id: string; spec: string; started: string; finished: string;
     status: string; events: string; duration_ms: string;
@@ -204,6 +322,15 @@ app.get("/api/history", async (_req, res) => {
   );
 });
 
+/** Parse a stored payload, degrading to an empty object rather than throwing. */
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return {};
+  }
+}
+
 /** Full decision record of one past run (replay source for the report view). */
 app.get("/api/history/:runId", async (req, res) => {
   // The alias must NOT be `seq`: `ORDER BY seq` would bind to the String
@@ -219,7 +346,9 @@ app.get("/api/history/:runId", async (req, res) => {
   res.json(
     rows.map((r) => ({
       seq: Number(r.seq_text), ts: r.ts, type: r.type, name: r.name,
-      payload: JSON.parse(r.payload) as unknown,
+      // One malformed row must not 404/500 the whole decision record — the
+      // replay is evidence, and 99 good events beat none.
+      payload: safeJson(r.payload),
     })),
   );
 });
@@ -235,11 +364,26 @@ app.get("/api/conversations", async (_req, res) => {
   res.json(await listConversations());
 });
 
+/**
+ * 404 means the conversation does not exist; anything else is a 500.
+ *
+ * Every one of these routes used to answer 404 for any failure, so a ClickHouse
+ * outage told the webapp the conversation had been deleted — and the webapp
+ * dutifully cleared it from the screen. A database that is down must read as a
+ * server fault, so the UI keeps the conversation and says it is offline.
+ */
+function conversationError(error: unknown, res: express.Response): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = error instanceof UnknownConversationError ? 404 : 500;
+  if (status === 500) console.warn("[conversations] request failed:", message);
+  res.status(status).json({ error: message });
+}
+
 app.get("/api/conversations/:id", async (req, res) => {
   try {
     res.json(await getConversation(req.params.id));
   } catch (error) {
-    res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+    conversationError(error, res);
   }
 });
 
@@ -248,7 +392,7 @@ app.post("/api/conversations/:id/star", async (req, res) => {
     await setStarred(req.params.id, Boolean(req.body?.starred));
     res.json({ ok: true });
   } catch (error) {
-    res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+    conversationError(error, res);
   }
 });
 
@@ -258,7 +402,7 @@ app.delete("/api/conversations/:id", async (req, res) => {
     await deleteConversation(req.params.id);
     res.json({ ok: true });
   } catch (error) {
-    res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+    conversationError(error, res);
   }
 });
 
@@ -266,7 +410,7 @@ app.delete("/api/conversations/:id", async (req, res) => {
 app.post("/api/conversations/:id/messages", async (req, res) => {
   const question = String(req.body?.question ?? "").trim();
   if (!question) return res.status(400).json({ error: "question required" });
-  await streamAnswer(req.params.id, question, res);
+  await streamAnswer(req.params.id, question, res, req);
 });
 
 /** Suggested-question chips, from the PM questions instrumentation stored. */
@@ -291,10 +435,6 @@ app.get("/api/context/:entity/history", async (req, res) => {
   res.json(rows);
 });
 
-/** SSE responses have no natural end; track them so a shutdown can close them
- * cleanly instead of leaving clients waiting on a dead socket. */
-const openStreams = new Set<{ end: () => void }>();
-
 const PORT = Number(process.env["PORT"] ?? 8787);
 await manager.init();
 await initChatTables();
@@ -307,6 +447,11 @@ await command(
 ).catch(() => {});
 const server = app.listen(PORT, () => {
   console.log(`Clickwright backend listening on http://localhost:${PORT}`);
+  // Warm the sample-spec counts off the request path, so the first visitor to
+  // the Instrumentation screen does not pay for the parse.
+  void specFacts().catch((error: unknown) => {
+    console.warn("[specs] warm-up failed:", error instanceof Error ? error.message : error);
+  });
 });
 
 /**
@@ -329,13 +474,8 @@ async function shutdown(signal: string): Promise<void> {
   }
 
   server.close();
-  for (const stream of openStreams) {
-    try {
-      stream.end();
-    } catch {
-      /* already gone */
-    }
-  }
+  // Run streams AND chat answer streams — both register in ./streams.ts.
+  closeOpenStreams();
 
   // bounded: never hang a reload waiting on a slow network
   await Promise.race([

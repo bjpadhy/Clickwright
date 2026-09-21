@@ -53,7 +53,7 @@ const LARGE: CitableResult = {
       conversion_rate_max: 0.94,
       day_min: "2025-03-01",
       day_max: "2025-06-30",
-      city_distinct_approx: 412,
+      city_distinct: 412,
     },
     {
       metric: "conversion_rate",

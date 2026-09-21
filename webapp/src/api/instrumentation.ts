@@ -16,21 +16,42 @@ export type RunStatus =
   | "succeeded"
   | "failed"
 
-export type Gate = "ddl" | "context"
+/**
+ * The three human gates. "optimization" gates an advisor-suggested schema
+ * change and its proposal is an `OptimizationProposal`, NOT a `DdlProposal` —
+ * anything reading `payload.proposal` has to branch on the gate name. It was
+ * missing here, so an optimization run's proposal was cast to the DDL shape
+ * and the approval panel rendered against fields that do not exist on it.
+ */
+export type Gate = "ddl" | "context" | "optimization"
+
+/** A spec run instruments a feature; an optimization run applies an advisor
+ *  suggestion. Same queue, same gates, same stream. */
+export type RunKind = "spec" | "optimization"
 
 export interface RunSummary {
   /** e.g. "run_msafuwue_a5688b" */
   id: string
-  /** spec id, e.g. "02_group_family" */
+  /** spec id, e.g. "02_group_family", or "optimize:<table>" */
   spec: string
+  kind: RunKind
   status: RunStatus
   /** set while `status === "awaiting_approval"` */
   pendingGate: Gate | null
   /** Langfuse deep link, set once the run starts */
   traceUrl: string | null
   createdAt: string
-  /** server-side path — display only */
+  /** server-side path — display only. Empty for optimization runs. */
   specDir: string
+  /** set only when `kind === "optimization"` */
+  suggestionId: string | null
+  /** when execution began — null while queued */
+  startedAt: string | null
+  finishedAt: string | null
+  /** end-to-end ms, gates included — null until the run is over */
+  durationMs: number | null
+  /** most recent step name, used to attribute progress ticks to a phase */
+  currentStep?: string
 }
 
 export interface RunDetail extends RunSummary {
@@ -106,6 +127,17 @@ export interface ContextProposal {
   warnings?: string[]
 }
 
+/**
+ * The "optimization" gate's proposal: DDL the advisor drafted for one
+ * suggestion, not a table design. Statements execute byte-for-byte on approval.
+ */
+export interface OptimizationProposal {
+  reasoning: string
+  statements: string[]
+  /** what the operator should see change, in plain terms */
+  expectedEffect: string
+}
+
 export interface LoadedTable {
   name: string
   event: string
@@ -120,9 +152,13 @@ export interface Health {
   ok: boolean
   clickhouse: string
   database: string
-  /** "claude-code-oauth" | "anthropic-api" */
+  /** "gemini" | "anthropic" | "anthropic-oauth" — absent on older backends */
+  llmProvider?: string
+  /** free-form: "gemini-openai-compatible" | "anthropic-api" | "claude-code-oauth" */
   llmBackend: string
   model: string
+  /** only sent for the OpenAI-compatible (Gemini) backend */
+  llmBaseUrl?: string
 }
 
 export interface SpecOption {
@@ -143,6 +179,8 @@ export interface HistoryRun {
   finished: string
   last_status: string
   events: number
+  /** end-to-end ms as the backend measured it, gates included */
+  durationMs?: number
 }
 
 export interface ContextEntry {
@@ -200,25 +238,43 @@ export const backend = {
 export function openRunStream(
   runId: string,
   onEvent: (event: RunEvent) => void,
-  onStateChange?: (state: "open" | "reconnecting") => void
+  onStateChange?: (state: "open" | "reconnecting" | "closed") => void
 ): () => void {
   const source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`)
+  let closed = false
+
+  const close = () => {
+    if (closed) return
+    closed = true
+    for (const type of RUN_EVENT_TYPES) source.removeEventListener(type, handle)
+    source.close()
+  }
 
   const handle = (message: MessageEvent<string>) => {
+    let event: RunEvent
     try {
-      onEvent(JSON.parse(message.data) as RunEvent)
+      event = JSON.parse(message.data) as RunEvent
     } catch {
       /* a truncated frame is re-sent on the next replay — ignore it */
+      return
+    }
+    onEvent(event)
+    // A finished run emits nothing further, and the server ends the response
+    // at this same event. Closing here is what keeps EventSource's automatic
+    // reconnect from re-opening the stream, replaying the whole buffer and
+    // being closed again, forever.
+    if (event.type === "status" && (event.name === "succeeded" || event.name === "failed")) {
+      close()
+      onStateChange?.("closed")
     }
   }
 
   for (const type of RUN_EVENT_TYPES) source.addEventListener(type, handle)
   source.addEventListener("open", () => onStateChange?.("open"))
   // EventSource reconnects on its own; a reconnect replays the whole buffer.
-  source.addEventListener("error", () => onStateChange?.("reconnecting"))
+  source.addEventListener("error", () => {
+    if (!closed) onStateChange?.("reconnecting")
+  })
 
-  return () => {
-    for (const type of RUN_EVENT_TYPES) source.removeEventListener(type, handle)
-    source.close()
-  }
+  return close
 }

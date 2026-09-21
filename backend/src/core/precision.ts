@@ -289,86 +289,370 @@ export function precisionForRow(
   return out;
 }
 
-export interface ConfidenceInput {
-  precisions: Precision[];
-  sanityFlags: number;
-  citationRetries: number;
-  /** Did an independent verification query agree? null when none was run. */
-  verificationAgreed: boolean | null;
+// ── confidence ──────────────────────────────────────────────────────
+//
+// Confidence is COMPUTED, never asked of the model, and it is a SUM: every
+// measurement that weakens the answer is one named signal with a signed delta,
+// `1 + Σdelta` is the score, and the level is read off the score. A reader can
+// therefore see exactly why two "medium" answers differ, and a PM who refines a
+// vague question watches specific deductions disappear.
+//
+// The old rule took the WIDEST interval across every cell, so one tail row with
+// n=2 marked an answer "low" whose headline figure (n≈850) had just been
+// reproduced exactly by an independent query (spec-06 q1, low 0.50). Here the
+// headline figure carries the precision weight and the tails are a small,
+// capped deduction; the ceilings below say what a score can never exceed.
+//
+// Deterministic given the SQL results, `plan.assumptions` and the verification
+// outcome — no model call sits between the inputs and the number.
+
+export interface ConfidenceSignal {
+  /** Stable id (`headline_interval`, `assumptions`, …) — the UI keys on it. */
+  name: string;
+  /** Signed contribution; `1 + Σdelta` over all signals is `score`. */
+  delta: number;
+  /** One line a reader can act on. */
+  detail: string;
 }
 
-/**
- * Confidence is COMPUTED, never asked of the model. Each input is a measurement:
- * the widest reported interval, gate flags, citation retries, and whether an
- * independently written query reproduced the number.
- */
-export function deriveConfidence(input: ConfidenceInput): {
-  value: "high" | "medium" | "low";
+export interface ConfidenceInput {
+  /** `widestPerColumn` of the headline rows + digest population row + tail rows. */
+  precisions: Precision[];
+  /** Digest population rate columns (`full_*_rate`) across the kept tasks. */
+  headlineColumns: string[];
+  /** `verification.expectedToMatch` when a comparison actually happened. */
+  verifiedColumn: string | null;
+  verification: {
+    agreed: boolean | null;
+    relativeDelta: number | null;
+    definitionOk: boolean;
+    concern: string;
+    note: string;
+  } | null;
+  /** Sanity-gate flags: rates above 100%, and "every sample size below 50". */
+  impossibleFlags: number;
+  smallSampleFlags: number;
+  /** Planned tasks that produced no usable result (each counted ONCE). */
+  droppedTasks: number;
+  plannedTasks: number;
+  /** Narration attempts rejected for uncited numbers. */
+  citationRetries: number;
+  /** The planner's `assumptions` — choices the question left open. */
+  assumptions: string[];
+  /** Stored `metric:*` ids the question names, from `namedMetrics()`. */
+  namedMetrics: string[];
+}
+
+export type ConfidenceLevel = "high" | "medium" | "low";
+
+export interface Confidence {
+  value: ConfidenceLevel;
   score: number;
   note: string;
-} {
-  const reasons: string[] = [];
-  let level: "high" | "medium" | "low" = "high";
-  const drop = (to: "medium" | "low", why: string) => {
-    reasons.push(why);
-    if (to === "low" || level === "medium") level = to === "low" ? "low" : level;
-    if (level === "high") level = to;
-  };
+  signals: ConfidenceSignal[];
+}
 
-  if (input.verificationAgreed === false) {
-    level = "low";
-    reasons.push("an independently written query did not reproduce the figure");
+// ── the weights (single source of truth; the table in API.md mirrors this) ──
+
+/** Ceilings: while the condition holds the score cannot exceed the value. They
+ * apply first, in this order, each lowering the running ceiling by what it adds,
+ * so the deductions underneath stay visible instead of vanishing into a clamp. */
+/** probe-2: two independently written queries disagree → never medium. */
+const CEILING_VERIFICATION_FAILED = 0.44;
+/** q3 / probe-1: nothing reproduced the figure → never high. */
+const CEILING_UNVERIFIED = 0.7;
+/** q3: sums, counts and means carry no interval → at most medium (was high 1.00). */
+const CEILING_NO_BOUNDED_PRECISION = 0.6;
+
+/** Headline interval, per half-width percentage point. spec-06 q1: ±3.1pp on
+ * n=848 costs 0.09; walkthrough step 4: ±24pp on n=14 costs 0.65 (the maximum),
+ * so a figure too wide to act on can never reach medium on its own. */
+const HEADLINE_TIGHT_LIMIT_PP = 4;
+const HEADLINE_TIGHT_PER_PP = 0.03;
+const HEADLINE_MID_LIMIT_PP = 10;
+const HEADLINE_MID_PER_PP = 0.075;
+const HEADLINE_WIDE_BASE = 0.57;
+const HEADLINE_WIDE_PER_PP = 0.008;
+const HEADLINE_WIDE_EXTRA_CAP = 0.08;
+
+/** TUNABLE — decides spec-06 q1 high vs medium: three tail segments (n=2, 14, 31)
+ * beside a verified ±3.1pp headline cost 0.12 → 0.79 (high). At 0.06 each the same
+ * answer would land on 0.73 (medium). */
+const SMALL_SEGMENT_PENALTY = 0.04;
+const SMALL_SEGMENTS_CAP = 0.12;
+const SMALL_SEGMENT_N = 50;
+const SMALL_SEGMENT_HW_PP = 10;
+
+const RATES_WITHOUT_DENOMINATOR_PENALTY = 0.1;
+const SMALL_SAMPLE_FLAG_PENALTY = 0.1;
+const DEFINITION_CONCERN_PENALTY = 0.1;
+const IMPOSSIBLE_VALUE_PENALTY = 0.1;
+const IMPOSSIBLE_VALUES_CAP = 0.2;
+const DROPPED_TASK_PENALTY = 0.07;
+const DROPPED_TASKS_CAP = 0.21;
+const CITATION_RETRY_PENALTY = 0.1;
+const CITATION_RETRIES_CAP = 0.2;
+
+/** TUNABLE — the vague-question lever of the walkthrough: "How is checkout doing?"
+ * assumes metric, denominator, window and segment → the cap (−0.25) under an
+ * unverified ceiling ≈ low 0.35; "What is the standard checkout conversion rate?"
+ * assumes window and segment only → −0.16, still high (0.86) once verified. */
+const ASSUMPTION_PENALTY = 0.08;
+const ASSUMPTIONS_CAP = 0.25;
+
+/** Naming a stored metric removes the definition ambiguity; the bonus only ever
+ * offsets deductions, so a perfect answer stays at 1.00 rather than 1.05. */
+const NAMED_METRIC_BONUS = 0.05;
+
+const SCORE_FLOOR = 0.05;
+/** Non-overlapping bands: high ≥ 0.75, medium ≥ 0.45, else low. */
+const HIGH_FROM = 0.75;
+const MEDIUM_FROM = 0.45;
+
+const round2 = (x: number) => Math.round(x * 100) / 100;
+
+type Bounded = Precision & { interval: NonNullable<Precision["interval"]> };
+const isBounded = (p: Precision): p is Bounded => p.interval !== null;
+const byColumn = (a: Precision, b: Precision) => (a.column < b.column ? -1 : a.column > b.column ? 1 : 0);
+
+/**
+ * The deduction for the headline figure's 95% half-width, in percentage points:
+ * 0.03/pp up to ±4pp, then 0.075/pp up to ±10pp (0.57), then slowly on to 0.65.
+ * Continuous at the joins so a figure just over a boundary is not punished for it.
+ */
+export function headlinePenalty(halfWidthPp: number): number {
+  const hw = Math.max(0, Number.isFinite(halfWidthPp) ? halfWidthPp : 0);
+  if (hw <= HEADLINE_TIGHT_LIMIT_PP) return HEADLINE_TIGHT_PER_PP * hw;
+  if (hw <= HEADLINE_MID_LIMIT_PP) {
+    return HEADLINE_TIGHT_PER_PP * HEADLINE_TIGHT_LIMIT_PP + HEADLINE_MID_PER_PP * (hw - HEADLINE_TIGHT_LIMIT_PP);
   }
-  if (input.citationRetries > 0) drop("medium", "the narration had to be corrected for uncited numbers");
-  if (input.sanityFlags > 0) drop("medium", "the sanity gate raised flags");
-
-  const bounded = input.precisions.filter((p) => p.interval);
-  const widest = bounded.sort((a, b) => (b.interval!.halfWidthPp) - (a.interval!.halfWidthPp))[0];
-  if (widest) {
-    const hw = widest.interval!.halfWidthPp;
-    if (hw > 10) drop("low", `±${hw.toFixed(1)}pp on ${widest.column} (n=${widest.n}) — too wide to act on`);
-    else if (hw > 4) drop("medium", `±${hw.toFixed(1)}pp on ${widest.column} (n=${widest.n})`);
-    else reasons.push(`tightest bound ±${hw.toFixed(1)}pp on n=${widest.n}`);
-  }
-
-  const unbounded = input.precisions.filter((p) => !p.interval);
-  if (bounded.length === 0 && unbounded.length > 0) {
-    drop("medium", `precision not computable for ${unbounded.map((u) => u.column).join(", ")}`);
-  }
-
-  if (input.verificationAgreed === true) {
-    reasons.push("an independently written query reproduced the figure");
-  }
-
-  return {
-    value: level,
-    score: confidenceScore(input, level),
-    note: reasons.join("; ") || "no precision signals available",
-  };
+  return HEADLINE_WIDE_BASE + Math.min(HEADLINE_WIDE_EXTRA_CAP, HEADLINE_WIDE_PER_PP * (hw - HEADLINE_MID_LIMIT_PP));
 }
 
 /**
- * The same judgement as `value`, on a 0–1 scale, so a reader can see that two
- * "medium" answers are not equally solid.
- *
- * It is a deduction from 1, not a model's guess: each measurement that weakens
- * the answer subtracts a fixed amount, and the widest interval subtracts in
- * proportion to how wide it is. Clamped into the band its level implies, so the
- * number and the label can never disagree.
+ * The figure whose precision the answer rests on: the column an independent
+ * query actually compared, else the widest whole-population (`full_*_rate`)
+ * figure, else the bounded figure with the largest denominator. Ties break on
+ * the column name, so a shuffled input picks the same headline. Null when
+ * nothing is bounded.
  */
-function confidenceScore(input: ConfidenceInput, level: "high" | "medium" | "low"): number {
-  let score = 1;
-  if (input.verificationAgreed === false) score -= 0.45;
-  else if (input.verificationAgreed === true) score += 0.05;
-  score -= Math.min(0.2, input.citationRetries * 0.1);
-  score -= Math.min(0.2, input.sanityFlags * 0.07);
+export function pickHeadline(
+  precisions: Precision[],
+  headlineColumns: string[],
+  verifiedColumn: string | null,
+): Precision | null {
+  const bounded = precisions.filter(isBounded);
+  if (bounded.length === 0) return null;
+  const widestFirst = (a: Bounded, b: Bounded) =>
+    b.interval.halfWidthPp - a.interval.halfWidthPp || byColumn(a, b);
 
-  const bounded = input.precisions.filter((p) => p.interval);
-  const widest = Math.max(0, ...bounded.map((p) => p.interval!.halfWidthPp));
-  // ±0pp costs nothing, ±15pp or worse costs the full 0.35
-  if (bounded.length > 0) score -= Math.min(0.35, (widest / 15) * 0.35);
-  else if (input.precisions.length > 0) score -= 0.15; // nothing could be bounded
+  if (verifiedColumn) {
+    const verified = bounded.filter((p) => p.column === verifiedColumn).sort(widestFirst)[0];
+    if (verified) return verified;
+  }
+  const population = new Set(headlineColumns);
+  const headline = bounded.filter((p) => population.has(p.column)).sort(widestFirst)[0];
+  if (headline) return headline;
 
-  const band = level === "high" ? [0.75, 1] : level === "medium" ? [0.45, 0.8] : [0.05, 0.5];
-  return Math.round(Math.min(band[1]!, Math.max(band[0]!, score)) * 100) / 100;
+  return [...bounded].sort((a, b) => (b.n ?? 0) - (a.n ?? 0) || byColumn(a, b))[0] ?? null;
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * The stored `metric:*` entities a question names, detected in code: the id
+ * (`metric:standard_checkout_conversion_rate`) is split on `_`, and it matches
+ * when every word appears as a whole word in the lowercased question, or the id
+ * itself appears literally. Sorted, so the same question always yields the same
+ * list. Whole words only — "conversions" does not name `conversion_rate`.
+ */
+export function namedMetrics(question: string, entities: string[]): string[] {
+  const q = question.toLowerCase();
+  const matched = new Map<string, Set<string>>();
+  for (const entity of entities) {
+    if (!entity.toLowerCase().startsWith("metric:")) continue;
+    const id = entity.slice("metric:".length).toLowerCase();
+    const words = id.split("_").filter((w) => w.length > 0);
+    if (words.length === 0 || matched.has(id)) continue;
+    const literal = new RegExp(`(^|[^a-z0-9])${escapeRe(id)}(?![a-z0-9])`).test(q);
+    const everyWord = words.every((w) => new RegExp(`\\b${escapeRe(w)}\\b`).test(q));
+    if (literal || everyWord) matched.set(id, new Set(words));
+  }
+  // "the standard checkout conversion rate" contains every word of BOTH
+  // `standard_checkout_conversion_rate` and `conversion_rate`. Only the specific
+  // one was named: drop any match whose words are a strict subset of another's,
+  // so the confidence note says which metric the question actually pins.
+  const ids = [...matched.keys()];
+  return ids
+    .filter((id) => {
+      const words = matched.get(id)!;
+      return !ids.some((other) => {
+        if (other === id) return false;
+        const otherWords = matched.get(other)!;
+        return otherWords.size > words.size && [...words].every((w) => otherWords.has(w));
+      });
+    })
+    .sort();
+}
+
+/**
+ * Confidence from measurements only. Ceilings first (a failed or missing
+ * verification, nothing bounded), then additive deductions (headline interval,
+ * small segments, gate flags, dropped tasks, citation retries, the planner's
+ * assumptions), then a named-metric bonus that can only offset deductions.
+ *
+ * Invariants: `1 + Σsignals.delta === score` (to 2 dp — the UI can draw a
+ * waterfall); `score ≤ every applicable ceiling`; `score ≥ 0.05`; the level is a
+ * pure function of the score.
+ */
+export function deriveConfidence(input: ConfidenceInput): Confidence {
+  const signals: ConfidenceSignal[] = [];
+  const push = (name: string, delta: number, detail: string) =>
+    signals.push({ name, delta: round2(delta), detail });
+
+  // ── ceilings, in table order; each lowers the running ceiling by what it adds.
+  // A ceiling already covered by a tighter one contributes 0 — surfaced, not counted.
+  let ceiling = 1;
+  const lowerCeiling = (name: string, to: number, detail: string) => {
+    const next = Math.min(ceiling, to);
+    push(name, next - ceiling, detail);
+    ceiling = next;
+  };
+
+  const v = input.verification;
+  if (v && v.agreed === false) {
+    const delta = v.relativeDelta === null ? "" : ` (Δ ${(v.relativeDelta * 100).toFixed(1)}%)`;
+    lowerCeiling(
+      "verification_failed",
+      CEILING_VERIFICATION_FAILED,
+      `${v.note || "an independently written query did not reproduce the figure"}${delta}`,
+    );
+  } else if (!v || v.agreed === null) {
+    lowerCeiling(
+      "unverified",
+      CEILING_UNVERIFIED,
+      `not independently verified — ${v?.note || "no verification query was run"}`,
+    );
+  }
+
+  const bounded = input.precisions.filter(isBounded);
+  if (bounded.length === 0) {
+    lowerCeiling(
+      "no_bounded_precision",
+      CEILING_NO_BOUNDED_PRECISION,
+      "no figure carries an interval (sums, counts, means cannot be bounded)",
+    );
+  }
+
+  // ── additive deductions
+  let deductions = 0;
+  const deduct = (name: string, amount: number, detail: string) => {
+    const a = round2(amount);
+    if (a <= 0) return;
+    deductions = round2(deductions + a);
+    push(name, -a, detail);
+  };
+
+  const headline = pickHeadline(input.precisions, input.headlineColumns, input.verifiedColumn);
+  if (headline && isBounded(headline)) {
+    const hw = headline.interval.halfWidthPp;
+    const detail = `±${hw.toFixed(1)}pp on ${headline.column} (n=${headline.n})${
+      hw > HEADLINE_MID_LIMIT_PP ? " — too wide to act on" : ""
+    }`;
+    const penalty = round2(headlinePenalty(hw));
+    // a tight headline costs nothing but is still the fact the reader most wants
+    if (penalty > 0) deduct("headline_interval", penalty, detail);
+    else push("headline_interval", 0, detail);
+  }
+
+  const small = bounded
+    .filter((p) => p !== headline)
+    .filter((p) => (p.n !== null && p.n < SMALL_SEGMENT_N) || p.interval.halfWidthPp > SMALL_SEGMENT_HW_PP)
+    .sort(byColumn);
+  if (small.length > 0) {
+    const ns = small.map((p) => p.n ?? 0);
+    const range = small.length === 1 ? `n=${ns[0]}` : `n ${Math.min(...ns)}–${Math.max(...ns)}`;
+    deduct(
+      "small_segments",
+      Math.min(SMALL_SEGMENTS_CAP, small.length * SMALL_SEGMENT_PENALTY),
+      `${small.length} small segment${small.length === 1 ? "" : "s"} (${small.map((p) => p.column).join(", ")}; ${range}) — indicative only`,
+    );
+  }
+
+  const rates = input.precisions.filter((p) => p.kind === "proportion");
+  if (bounded.length === 0 && rates.length > 0) {
+    deduct(
+      "rates_without_denominator",
+      RATES_WITHOUT_DENOMINATOR_PENALTY,
+      `${rates.length} rate${rates.length === 1 ? " ships" : "s ship"} no denominator column`,
+    );
+  }
+  if (bounded.length === 0 && input.smallSampleFlags > 0) {
+    deduct("small_sample_flag", SMALL_SAMPLE_FLAG_PENALTY, "every sample size below 50");
+  }
+
+  if (v && v.definitionOk === false) {
+    deduct(
+      "definition_concern",
+      DEFINITION_CONCERN_PENALTY,
+      `auditor: ${v.concern || "the SQL did not use the documented denominator or filters"}`,
+    );
+  } else if (v && v.concern) {
+    // the auditor agreed the definition holds but still had an argument — surfaced at no cost
+    push("definition_concern", 0, `auditor: ${v.concern}`);
+  }
+
+  if (input.impossibleFlags > 0) {
+    deduct(
+      "impossible_values",
+      Math.min(IMPOSSIBLE_VALUES_CAP, input.impossibleFlags * IMPOSSIBLE_VALUE_PENALTY),
+      `${input.impossibleFlags} value${input.impossibleFlags === 1 ? " looks" : "s look"} like a rate above 100%`,
+    );
+  }
+  if (input.droppedTasks > 0) {
+    deduct(
+      "dropped_tasks",
+      Math.min(DROPPED_TASKS_CAP, input.droppedTasks * DROPPED_TASK_PENALTY),
+      `${input.droppedTasks} of ${Math.max(input.plannedTasks, input.droppedTasks)} planned task${input.plannedTasks === 1 ? "" : "s"} returned no data`,
+    );
+  }
+  if (input.citationRetries > 0) {
+    deduct(
+      "citation_retries",
+      Math.min(CITATION_RETRIES_CAP, input.citationRetries * CITATION_RETRY_PENALTY),
+      `narration corrected ${input.citationRetries}× for uncited numbers`,
+    );
+  }
+  const assumptions = input.assumptions.map((a) => a.trim()).filter((a) => a.length > 0);
+  if (assumptions.length > 0) {
+    deduct(
+      "assumptions",
+      Math.min(ASSUMPTIONS_CAP, assumptions.length * ASSUMPTION_PENALTY),
+      `assumed: ${assumptions.join("; ")}`,
+    );
+  }
+
+  // ── bonus, never above what was deducted — so 1 + Σdelta stays the score
+  let bonus = 0;
+  if (input.namedMetrics.length > 0) {
+    bonus = round2(Math.min(NAMED_METRIC_BONUS, deductions));
+    push("named_metric", bonus, `question pins a stored metric: ${[...input.namedMetrics].sort().join(", ")}`);
+  }
+
+  let score = round2(ceiling - deductions + bonus);
+  if (score < SCORE_FLOOR) {
+    // the floor is a signal too, so the waterfall still sums to the score
+    push("floor", SCORE_FLOOR - score, `score floored at ${SCORE_FLOOR.toFixed(2)}`);
+    score = SCORE_FLOOR;
+  }
+
+  const value: ConfidenceLevel = score >= HIGH_FROM ? "high" : score >= MEDIUM_FROM ? "medium" : "low";
+
+  const noted = signals.filter((s) => s.delta !== 0 || s.name === "definition_concern");
+  const fallback = signals.filter((s) => s.name === "headline_interval");
+  const note =
+    (noted.length > 0 ? noted : fallback).map((s) => s.detail).join("; ") ||
+    "verified, bounded, nothing assumed — no deductions";
+
+  return { value, score, note, signals };
 }

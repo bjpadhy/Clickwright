@@ -18,6 +18,7 @@ import type {
   DdlProposal,
   Gate,
   LoadedTable,
+  OptimizationProposal,
   RunEvent,
   RunStatus,
 } from "@/api/instrumentation"
@@ -46,6 +47,11 @@ const STEP_PHASE: Record<string, PhaseId> = {
   ddl_execution: "execute",
   update_generation: "context",
   update_approval: "context",
+  // An optimization run reuses the same five-node stepper: the advisor's DDL
+  // is designed, approved and executed like any other schema change.
+  optimization_generation: "design",
+  optimization_approval: "approval",
+  optimization_execution: "execute",
 }
 
 const STEP_LABEL: Record<string, string> = {
@@ -60,10 +66,13 @@ const STEP_LABEL: Record<string, string> = {
   ddl_execution: "Execute DDL + load rows",
   update_generation: "Draft context update (LLM)",
   update_approval: "Human approval — context",
+  optimization_generation: "Draft the optimisation (LLM)",
+  optimization_approval: "Human approval — optimisation",
+  optimization_execution: "Apply the change to ClickHouse",
 }
 
 /** Wrappers spanning a whole phase — their children carry the detail. */
-const WRAPPERS = new Set(["instrumentation", "context_update"])
+const WRAPPERS = new Set(["instrumentation", "context_update", "optimization"])
 
 /**
  * The event stream is flat — a `step_start` carries a name and nothing else — so
@@ -137,7 +146,13 @@ function execLine(
   }
 }
 
-const GATE_PHASE: Record<Gate, PhaseId> = { ddl: "approval", context: "context" }
+// Every gate must be here: this is a total map, and an optimization run that
+// reached its gate used to leave the stepper with no "waiting" node at all.
+const GATE_PHASE: Record<Gate, PhaseId> = {
+  ddl: "approval",
+  context: "context",
+  optimization: "approval",
+}
 
 export interface Attempt {
   /** `null` for steps that run exactly once (profile, context_load, …) */
@@ -187,6 +202,9 @@ export interface RunResult {
   tables: LoadedTable[]
   contextEntries: { entity: string; version: number }[]
   contextWarnings: string[]
+  /** optimization runs finish with statements applied, not tables created */
+  statements: string[]
+  expectedEffect: string | null
 }
 
 export interface RunModel {
@@ -198,6 +216,9 @@ export interface RunModel {
   /** latest DDL proposal — survives after the gate closes, for the report */
   ddlProposal: DdlProposal | null
   contextProposal: ContextProposal | null
+  /** latest advisor-optimisation proposal (the "optimization" gate). A
+   *  different shape from DdlProposal — statements, not tables. */
+  optimizationProposal: OptimizationProposal | null
   /** decisions taken, oldest first */
   approvals: Approval[]
   steps: StepGroup[]
@@ -209,7 +230,7 @@ export interface RunModel {
   startedAt: string | null
   endedAt: string | null
   /** how many proposals each gate has seen — >1 means a reviewer sent one back */
-  proposals: { ddl: number; context: number }
+  proposals: { ddl: number; context: number; optimization: number }
 }
 
 /* ── helpers ───────────────────────────────────────────────────────────── */
@@ -315,10 +336,11 @@ export function buildRunModel(events: RunEvent[]): RunModel {
   let pendingGate: Gate | null = null
   let ddlProposal: DdlProposal | null = null
   let contextProposal: ContextProposal | null = null
+  let optimizationProposal: OptimizationProposal | null = null
   let result: RunResult | null = null
   let error: string | null = null
   let endedAt: string | null = null
-  const proposals = { ddl: 0, context: 0 }
+  const proposals = { ddl: 0, context: 0, optimization: 0 }
 
   for (const event of events) {
     const { key, attempt } = splitStep(event.name)
@@ -380,9 +402,16 @@ export function buildRunModel(events: RunEvent[]): RunModel {
       case "approval_request": {
         const gate = event.name as Gate
         const proposal = event.payload["proposal"]
+        // Branch on all three gates. The else-branch used to swallow the
+        // optimization gate and store an OptimizationProposal as a
+        // ContextProposal — which the context panel then rendered by reading
+        // `.entries`, a field it does not have.
         if (gate === "ddl") {
           ddlProposal = proposal as DdlProposal
           proposals.ddl++
+        } else if (gate === "optimization") {
+          optimizationProposal = proposal as OptimizationProposal
+          proposals.optimization++
         } else {
           contextProposal = proposal as ContextProposal
           proposals.context++
@@ -476,6 +505,12 @@ export function buildRunModel(events: RunEvent[]): RunModel {
             contextEntries:
               (event.payload["contextEntries"] as RunResult["contextEntries"]) ?? [],
             contextWarnings: (event.payload["contextWarnings"] as string[]) ?? [],
+            // An optimization run reports what it applied instead.
+            statements: (event.payload["statements"] as string[] | undefined) ?? [],
+            expectedEffect:
+              typeof event.payload["expectedEffect"] === "string"
+                ? event.payload["expectedEffect"]
+                : null,
           }
         } else if (status === "failed") {
           endedAt = event.ts
@@ -519,6 +554,7 @@ export function buildRunModel(events: RunEvent[]): RunModel {
     pendingGate,
     ddlProposal,
     contextProposal,
+    optimizationProposal,
     approvals,
     steps,
     phases: derivePhases(steps, status, pendingGate),

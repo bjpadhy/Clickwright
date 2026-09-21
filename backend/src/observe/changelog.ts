@@ -263,13 +263,29 @@ export function changelogToMarkdown(entries: ChangelogEntry[]): string {
 
 // ── collectors ───────────────────────────────────────────────────
 
+/**
+ * Both source tables are append-only and unbounded, and the changelog renders
+ * a scrollable stream — nobody reads past a few hundred entries. The reads are
+ * therefore capped at the most recent rows rather than scanning history that
+ * grows forever. The cap is on ROWS, taken newest-first and then re-ordered
+ * ascending, so what you see is always the latest part of the stream.
+ */
+const MAX_CONTEXT_ROWS = 5000;
+const MAX_RUN_ROWS = 5000;
+/** Matches the runs_log TTL — older events do not exist to be read anyway. */
+const CHANGELOG_WINDOW_DAYS = 90;
+
 export async function loadContextRows(): Promise<ContextRow[]> {
   // definition_md is deliberately excluded — it is large and the changelog only
   // needs the metadata.
   const rows = await query<Record<string, unknown>>(`
-    SELECT run_id, source_spec, entity, toUInt32(version) AS version,
-           change_note, toString(updated_at) AS updated_at
-    FROM context_store ORDER BY updated_at ASC, entity ASC
+    SELECT run_id, source_spec, entity, version, updated_at FROM (
+      SELECT run_id, source_spec, entity, toUInt32(version) AS version,
+             change_note, toString(updated_at) AS updated_at
+      FROM context_store
+      ORDER BY updated_at DESC, entity DESC
+      LIMIT ${MAX_CONTEXT_ROWS}
+    ) ORDER BY updated_at ASC, entity ASC
   `);
   return rows.map((r) => ({
     runId: String(r["run_id"] ?? ""),
@@ -283,12 +299,16 @@ export async function loadContextRows(): Promise<ContextRow[]> {
 
 export async function loadRunRows(): Promise<RunLogRow[]> {
   const rows = await query<Record<string, unknown>>(`
-    SELECT run_id, spec, toString(ts) AS at, type, name, payload
-    FROM runs_log
-    WHERE (type = 'status' AND name IN ('running', 'succeeded', 'failed'))
-       OR type = 'approval_result'
-       OR (type = 'step_start' AND name = 'instrumentation')
-    ORDER BY ts ASC
+    SELECT run_id, spec, at, type, name, payload FROM (
+      SELECT run_id, spec, toString(ts) AS at, type, name, payload
+      FROM runs_log
+      WHERE ts >= now() - INTERVAL ${CHANGELOG_WINDOW_DAYS} DAY
+        AND ((type = 'status' AND name IN ('running', 'succeeded', 'failed'))
+             OR type = 'approval_result'
+             OR (type = 'step_start' AND name = 'instrumentation'))
+      ORDER BY ts DESC
+      LIMIT ${MAX_RUN_ROWS}
+    ) ORDER BY at ASC
   `);
   return rows.map((r) => {
     let payload: Record<string, unknown> = {};

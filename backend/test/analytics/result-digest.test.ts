@@ -7,10 +7,12 @@ import {
   classifyResultColumns,
   digestFlags,
   digestScope,
+  extremesTieBreakers,
   pickExtremesMetric,
   populationRow,
   renderDigest,
   shapeDigest,
+  type ResultColumn,
   type ResultDigest,
 } from "../../src/core/result-digest.js";
 import { classifyMetric, findDenominator, precisionForRow } from "../../src/core/precision.js";
@@ -177,7 +179,7 @@ test("a rate without a denominator gets spread figures but no population rate", 
   ]);
   assert.equal(plan.emissions.some((e) => e.stat === "full_rate"), false);
   assert.match(plan.sql, /min\(`conversion_rate`\)/);
-  assert.match(plan.sql, /quantile\(0\.5\)\(`conversion_rate`\) AS conversion_rate_p50_approx/);
+  assert.match(plan.sql, /quantileExact\(0\.5\)\(`conversion_rate`\) AS conversion_rate_p50/);
 });
 
 test("a rate column never gets a bare avg()", () => {
@@ -200,7 +202,7 @@ test("categorical and temporal columns get cardinality and a range", () => {
     { name: "city", kind: "categorical" },
     { name: "day", kind: "temporal" },
   ]);
-  assert.match(plan.sql, /uniq\(`city`\) AS city_distinct_approx/);
+  assert.match(plan.sql, /uniqExact\(`city`\) AS city_distinct/);
   assert.match(plan.sql, /min\(`day`\) AS day_min/);
   assert.match(plan.sql, /max\(`day`\) AS day_max/);
 });
@@ -251,6 +253,44 @@ test("extremes queries select whole rows from both ends", () => {
   );
 });
 
+test("every other column breaks ties, so the named extremes are the same rows every run", () => {
+  // A tail is mostly ties: dozens of segments at 0%, ranked arbitrarily, so the
+  // "worst cities" the narrator named changed between two runs of one question.
+  assert.equal(
+    buildExtremesSql("SELECT 1", "conversion_rate", "ASC", ["city", "conversion_n"]),
+    "SELECT * FROM (\nSELECT 1\n) AS __result " +
+      "ORDER BY `conversion_rate` ASC, `city` ASC, `conversion_n` ASC LIMIT 5",
+  );
+  // the metric never repeats as its own tie-breaker, and an unquotable name is dropped
+  assert.equal(
+    buildExtremesSql("SELECT 1", "x_rate", "DESC", ["x_rate", "we`ird", "city"]),
+    "SELECT * FROM (\nSELECT 1\n) AS __result ORDER BY `x_rate` DESC, `city` ASC LIMIT 5",
+  );
+});
+
+test("a non-comparable column never becomes a tie-breaker", () => {
+  // `Map`/`Array`/`Tuple`/`AggregateFunction` land in `kind: "other"`; ordering
+  // by one raises "Illegal type Map ... of argument of function less", and both
+  // extremes queries share the key list, so the answer loses top AND bottom.
+  const columns: ResultColumn[] = [
+    { name: "conversion_rate", kind: "rate" },
+    { name: "city", kind: "categorical" },
+    { name: "day", kind: "temporal" },
+    { name: "signups", kind: "count" },
+    { name: "spend", kind: "numeric" },
+    { name: "per_os", kind: "other" },
+  ];
+  const tieBreakers = extremesTieBreakers(columns, "conversion_rate");
+  assert.deepEqual(tieBreakers, ["city", "day", "signups", "spend"]);
+  const sql = buildExtremesSql("SELECT 1", "conversion_rate", "ASC", tieBreakers);
+  assert.ok(!sql.includes("per_os"));
+  assert.equal(
+    sql,
+    "SELECT * FROM (\nSELECT 1\n) AS __result " +
+      "ORDER BY `conversion_rate` ASC, `city` ASC, `day` ASC, `signups` ASC, `spend` ASC LIMIT 5",
+  );
+});
+
 // ── shaping, flags, rendering ────────────────────────────────────
 
 const digestOf = (over: Partial<ResultDigest> = {}): ResultDigest => {
@@ -259,14 +299,14 @@ const digestOf = (over: Partial<ResultDigest> = {}): ResultDigest => {
     total_rows: 52340,
     conversion_rate_min: 0,
     conversion_rate_max: 0.94,
-    conversion_rate_p50_approx: 0.06,
+    conversion_rate_p50: 0.06,
     conversion_rate_gt1_n: 0,
     full_conversion_rate: 0.0712,
     full_conversion_n: 48212,
     conversion_n_min: 3,
     conversion_n_max: 8801,
     full_conversion_n_sum: 48212,
-    city_distinct_approx: 412,
+    city_distinct: 412,
   };
   const { population, columnStats } = shapeDigest(statsRow, plan.emissions, RATE_RESULT);
   return {
@@ -332,8 +372,10 @@ test("renderDigest states the coverage and labels approximate figures", () => {
     }),
   );
   assert.match(text, /computed by ClickHouse over ALL 52340 rows/);
-  assert.match(text, /about 412 distinct values/);
-  assert.match(text, /median about 0\.06/);
+  assert.match(text, /412 distinct values/);
+  assert.match(text, /median 0\.06/);
+  // "about" is gone from both: these are exact aggregates now
+  assert.equal(/about/.test(text), false);
   assert.match(text, /highest 5 rows of the full set by conversion_rate/);
   assert.match(text, /Kochi/);
 });

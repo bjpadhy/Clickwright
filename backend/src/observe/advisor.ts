@@ -78,6 +78,11 @@ export interface ScanResult {
 }
 
 const READS_WINDOW_HOURS = 720; // 30 days
+/** Read counts are per table, and this database has tens of tables — a cap
+ *  well above that bounds the response without ever truncating real rows. */
+const MAX_TABLE_READ_ROWS = 500;
+/** Suggestions shown per scan; the schema caps a scan at 6 anyway. */
+const MAX_SUGGESTIONS = 20;
 
 function num(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value ?? 0);
@@ -115,6 +120,8 @@ export async function gatherEvidence(): Promise<AdvisorEvidence> {
         SELECT arrayJoin(tables) AS qualified, count() AS reads
         FROM ${source.expr} WHERE ${queryLogFilter(hours)}
         GROUP BY qualified
+        ORDER BY reads DESC
+        LIMIT ${MAX_TABLE_READ_ROWS}
       `);
       for (const row of rows) {
         const table = stripDatabasePrefix(String(row["qualified"] ?? ""), db);
@@ -396,6 +403,7 @@ export async function latestScan(): Promise<ScanResult> {
     WHERE scan_id = (SELECT scan_id FROM optimization_suggestions ORDER BY scanned_at DESC LIMIT 1)
     ORDER BY
       multiIf(severity = 'HIGH', 0, severity = 'MED', 1, 2) ASC, id ASC
+    LIMIT ${MAX_SUGGESTIONS}
   `);
 
   if (rows.length === 0) {

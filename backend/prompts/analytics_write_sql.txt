@@ -32,6 +32,11 @@ listed here does not exist.
    in the SELECT cannot be bounded, and a reader cannot tell whether 83% rests on 428
    rows or 4. Denominators are also what make the whole-set rate exact when the result
    is large: without them there is no overall rate at all.
+   CHECK THIS BEFORE YOU FINISH. Read your SELECT list back: for every column you
+   named `*_rate`, `*_ratio` or `*_pct`, both counts it divides must be in that same
+   SELECT list as their own columns. This is the single most common reason a correct
+   answer is reported to the user as low confidence — the figure is right, nothing can
+   bound it, and the ceiling drops to 0.60 no matter how good the query was.
 4. If the task compares anything — A vs B, best vs worst, lift, gap, change over time —
    compute that comparison as its own column. A delta you do not compute cannot be
    reported downstream.

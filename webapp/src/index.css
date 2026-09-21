@@ -12,7 +12,11 @@
 @import "@fontsource/geist-mono/latin-400.css";
 @import "@fontsource/geist-mono/latin-500.css";
 @import "@fontsource/geist-mono/latin-600.css";
-@import "@tabler/icons-webfont/dist/tabler-icons.min.css";
+/* The Tabler webfont, subset to the ~50 glyphs this app renders: 9 KB instead
+   of 820 KB of font plus 247 KB of CSS, all of which used to be fetched before
+   the first paint. Same font, same class names, identical glyphs — see
+   scripts/build-icon-subset.py, which regenerates it. */
+@import "./assets/tabler-icons-subset.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -250,6 +254,12 @@
 @media print {
     /* the app itself never prints — only the document built for it */
     body > #root {
+        display: none !important;
+    }
+    /* Radix portals poppers (tooltips, popovers) straight onto document.body,
+       outside #root — an open confidence tooltip would otherwise print as a
+       floating box over the report, or as a stray page. */
+    [data-radix-popper-content-wrapper] {
         display: none !important;
     }
     #print-root {

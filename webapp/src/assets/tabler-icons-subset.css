@@ -1,0 +1,80 @@
+/*
+ * Tabler Icons 3.31.0 by tabler — https://tabler.io
+ * License: https://github.com/tabler/tabler-icons/blob/master/LICENSE
+ *
+ * GENERATED — do not edit by hand. Regenerate with scripts/build-icon-subset.py
+ * after adding an icon (the script fails loudly on a name the font lacks).
+ *
+ * The full webfont is 820 KB of glyphs plus 247 KB of CSS for ~5,900 icons;
+ * this app renders 48. Everything below is the same font and the same
+ * class names — `<i class="ti ti-check">` is unchanged, and so are the glyph
+ * metrics, because this IS the Tabler font with the unused glyphs removed.
+ */
+@font-face {
+    font-family: "tabler-icons";
+    font-style: normal;
+    font-weight: 400;
+    font-display: block;
+    src: url("./tabler-icons-subset.woff2") format("woff2");
+}
+
+.ti {
+    font-family: "tabler-icons" !important;
+    speak: none;
+    font-style: normal;
+    font-weight: normal;
+    font-variant: normal;
+    text-transform: none;
+    line-height: 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+.ti-alert-triangle:before { content: "\ea06"; }
+.ti-arrow-right:before { content: "\ea1f"; }
+.ti-bolt:before { content: "\ea38"; }
+.ti-book-2:before { content: "\efc5"; }
+.ti-bulb:before { content: "\ea51"; }
+.ti-chart-arrows-vertical:before { content: "\ee29"; }
+.ti-chart-bar:before { content: "\ea59"; }
+.ti-check:before { content: "\ea5e"; }
+.ti-chevron-down:before { content: "\ea5f"; }
+.ti-chevron-up:before { content: "\ea62"; }
+.ti-circle-check:before { content: "\ea67"; }
+.ti-clock:before { content: "\ea70"; }
+.ti-clock-pause:before { content: "\f548"; }
+.ti-code:before { content: "\ea77"; }
+.ti-database:before { content: "\ea88"; }
+.ti-download:before { content: "\ea96"; }
+.ti-external-link:before { content: "\ea99"; }
+.ti-file-plus:before { content: "\eaa0"; }
+.ti-file-text:before { content: "\eaa2"; }
+.ti-file-type-pdf:before { content: "\fb10"; }
+.ti-filter:before { content: "\eaa5"; }
+.ti-fold-down:before { content: "\ed54"; }
+.ti-fold-up:before { content: "\ed55"; }
+.ti-gavel:before { content: "\ef90"; }
+.ti-hash:before { content: "\eabc"; }
+.ti-history:before { content: "\ebea"; }
+.ti-list-details:before { content: "\ef40"; }
+.ti-loader-2:before { content: "\f226"; }
+.ti-message-circle:before { content: "\eaed"; }
+.ti-pencil:before { content: "\eb04"; }
+.ti-plug-connected-x:before { content: "\f0a0"; }
+.ti-plus:before { content: "\eb0b"; }
+.ti-point-filled:before { content: "\f698"; }
+.ti-refresh:before { content: "\eb13"; }
+.ti-refresh-alert:before { content: "\ed57"; }
+.ti-route:before { content: "\eb17"; }
+.ti-send:before { content: "\eb1e"; }
+.ti-shield-check:before { content: "\eb22"; }
+.ti-sparkles:before { content: "\f6d7"; }
+.ti-star:before { content: "\eb2e"; }
+.ti-star-filled:before { content: "\f6a6"; }
+.ti-table:before { content: "\eba1"; }
+.ti-terminal-2:before { content: "\ebef"; }
+.ti-trash:before { content: "\eb41"; }
+.ti-upload:before { content: "\eb47"; }
+.ti-users:before { content: "\ebf2"; }
+.ti-wand:before { content: "\ebcb"; }
+.ti-x:before { content: "\eb55"; }

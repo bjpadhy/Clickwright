@@ -16,6 +16,14 @@
  *  2. Nothing here is written by a model. The queries are generated from the
  *     result's column types, so a profile cannot hallucinate.
  *
+ * Every aggregate here is EXACT (`quantileExact`, `uniqExact`). Approximate
+ * functions are the right default on billions of rows, but these run over one
+ * query's already-aggregated result — every table in this database is under a
+ * million rows — and their sampling makes the same question return a slightly
+ * different median or cardinality run to run, which reads to a PM as the
+ * product changing. The aliases say so too: `_p50` and `_distinct`, not
+ * `_p50_approx` / `_distinct_approx`.
+ *
  * The headline emission is the population-weighted rate: `sum(rate * n) / sum(n)`
  * aliased `full_<base>_rate` alongside `sum(n) AS full_<base>_n`. Those names ride
  * the conventions in precision.ts, so the existing Wilson code bounds a figure
@@ -254,7 +262,7 @@ export function buildDigestSql(scope: string, columns: ResultColumn[]): DigestPl
     const q = quote(c.name);
     emit(`min(${q})`, `${c.name}_min`, { column: c.name, stat: "min" });
     emit(`max(${q})`, `${c.name}_max`, { column: c.name, stat: "max" });
-    emit(`quantile(0.5)(${q})`, `${c.name}_p50_approx`, { column: c.name, stat: "p50" });
+    emit(`quantileExact(0.5)(${q})`, `${c.name}_p50`, { column: c.name, stat: "p50" });
     // Exact count of impossible values across the whole set — strictly more useful
     // than "a rate above 100% exists somewhere in here".
     emit(`countIf(${q} > 1.05)`, `${c.name}_gt1_n`, { column: c.name, stat: "gt1_n" });
@@ -294,7 +302,7 @@ export function buildDigestSql(scope: string, columns: ResultColumn[]): DigestPl
     emit(`min(${q})`, `${c.name}_min`, { column: c.name, stat: "min" });
     emit(`max(${q})`, `${c.name}_max`, { column: c.name, stat: "max" });
     emit(`avg(${q})`, `${c.name}_avg`, { column: c.name, stat: "avg" });
-    emit(`quantile(0.5)(${q})`, `${c.name}_p50_approx`, { column: c.name, stat: "p50" });
+    emit(`quantileExact(0.5)(${q})`, `${c.name}_p50`, { column: c.name, stat: "p50" });
   }
 
   for (const c of pick("temporal", MAX_TEMPORAL_COLS)) {
@@ -304,7 +312,7 @@ export function buildDigestSql(scope: string, columns: ResultColumn[]): DigestPl
   }
 
   for (const c of pick("categorical", MAX_CATEGORICAL_COLS)) {
-    emit(`uniq(${quote(c.name)})`, `${c.name}_distinct_approx`, {
+    emit(`uniqExact(${quote(c.name)})`, `${c.name}_distinct`, {
       column: c.name,
       stat: "distinct",
     });
@@ -337,15 +345,51 @@ export function pickExtremesMetric(
   );
 }
 
-/** Real rows from the ends of the full result set — `SELECT *` is correct here:
+/**
+ * Real rows from the ends of the full result set — `SELECT *` is correct here:
  * these are our own generated queries over an already-aggregated result, and the
- * rows must arrive whole to stay citable and precision-checkable. */
+ * rows must arrive whole to stay citable and precision-checkable.
+ *
+ * `ORDER BY metric` alone is not a total order: ties are broken arbitrarily, so
+ * a result with many segments at 0% (the common case — that is what a tail
+ * looks like) names different "worst" cities on each run, and the narrator
+ * names whichever it was shown. Every other column becomes an ascending
+ * tie-breaker, which makes the choice total and repeatable.
+ */
+/**
+ * Kinds ClickHouse can actually compare in an ORDER BY. `other` covers
+ * `Map(...)`, `Array(...)`, `Tuple(...)`, `AggregateFunction` and friends,
+ * where `<` raises "Illegal type ... of argument of function less" — and since
+ * both extremes queries share one key list, one such column loses top AND
+ * bottom rows for the whole task.
+ */
+const ORDERABLE_KINDS: ReadonlySet<ColumnKind> = new Set<ColumnKind>([
+  "rate",
+  "count",
+  "numeric",
+  "temporal",
+  "categorical",
+]);
+
+/** Every other orderable column of the result, in its own order — a total
+ * order over the rows, so the extremes are the same rows on every run. */
+export function extremesTieBreakers(columns: ResultColumn[], metric: string): string[] {
+  return columns
+    .filter((c) => c.name !== metric && ORDERABLE_KINDS.has(c.kind))
+    .map((c) => c.name);
+}
+
 export function buildExtremesSql(
   scope: string,
   metric: string,
   direction: "DESC" | "ASC",
+  tieBreakers: readonly string[] = [],
 ): string {
-  return `SELECT * FROM (\n${scope}\n) AS __result ORDER BY ${quote(metric)} ${direction} LIMIT ${EXTREME_ROWS}`;
+  const order = [
+    `${quote(metric)} ${direction}`,
+    ...tieBreakers.filter((c) => c !== metric && SAFE_IDENT.test(c)).map((c) => `${quote(c)} ASC`),
+  ].join(", ");
+  return `SELECT * FROM (\n${scope}\n) AS __result ORDER BY ${order} LIMIT ${EXTREME_ROWS}`;
 }
 
 // ── shaping the result ───────────────────────────────────────────
@@ -446,7 +490,7 @@ export function renderDigest(digest: ResultDigest): string {
           case "max":
             return `max ${v}`;
           case "p50":
-            return `median about ${v}`;
+            return `median ${v}`;
           case "avg":
             return `mean across rows ${v}`;
           case "sum":
@@ -454,7 +498,7 @@ export function renderDigest(digest: ResultDigest): string {
           case "gt1_n":
             return `${v} rows above 100%`;
           case "distinct":
-            return `about ${v} distinct values`;
+            return `${v} distinct values`;
           case "full_rate":
             return `population-weighted value ${v} (${s.alias})`;
           default:
@@ -487,6 +531,10 @@ export interface ProfileInput {
   authoredLimit: number | null;
   /** Rows already fetched — used only if DESCRIBE cannot type the result. */
   rows: Record<string, unknown>[];
+  /** Skip the two extremes queries. They name the best and worst rows of a set
+   * too large to show; when every row is already in front of the reader they
+   * cost two round trips to repeat what is on screen. */
+  skipExtremes?: boolean;
 }
 
 /**
@@ -540,10 +588,11 @@ export async function profileResult(parent: Ctx, input: ProfileInput): Promise<R
       typesFromSample,
     };
 
-    const metric = pickExtremesMetric(columns, plan.emissions);
+    const metric = input.skipExtremes ? null : pickExtremesMetric(columns, plan.emissions);
     if (metric) {
-      const topSql = buildExtremesSql(scope, metric, "DESC");
-      const bottomSql = buildExtremesSql(scope, metric, "ASC");
+      const tieBreakers = extremesTieBreakers(columns, metric);
+      const topSql = buildExtremesSql(scope, metric, "DESC", tieBreakers);
+      const bottomSql = buildExtremesSql(scope, metric, "ASC", tieBreakers);
       try {
         // Independent statements, so each gets its own execution budget rather
         // than sharing one with the aggregate.

@@ -15,8 +15,9 @@
 #   docker compose logs -f backend
 #
 # Requires backend/.env (copy backend/.env.example and fill it in). Note that a
-# container cannot use the Claude Code OAuth fallback — set a real
-# ANTHROPIC_API_KEY or every agent call will fail.
+# container cannot use the Claude Code OAuth fallback — set GEMINI_API_KEY (free,
+# and the default backend) or a real ANTHROPIC_API_KEY, or every agent call will
+# fail. /api/health reports which backend actually resolved.
 
 services:
   backend:

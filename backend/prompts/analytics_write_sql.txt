@@ -16,8 +16,23 @@ listed here does not exist.
 </task>
 {{prior_sql}}{{feedback}}
 <rules>
+0. **A metric definition in <conventions> is the formula, not a hint.** If one gives an
+   expression — "uniqExact(application_id) in purchase_completed divided by
+   uniqExact(application_id) in pay_now_clicked, both with the data-hygiene filters" —
+   reproduce it with THAT key column, THAT denominator and THOSE filters. Counting
+   uniqExact(user_id) where the definition says application_id answers a different
+   question and returns a different number: one user with two applications counts once
+   instead of twice. An independent auditor checks the query against the definition and
+   reports every substitution to the reader, so a swapped key is not a shortcut — it is
+   a visible defect on the answer. When no definition covers the figure, choose the key
+   the task names and say so in the column name.
+0a. **Add no date predicate the task did not ask for.** This warehouse is loaded in
+   batches and its newest event can be months old, so `timestamp >= now() - INTERVAL
+   30 DAY` routinely matches zero rows and turns an answerable question into "no data
+   matches this question". Filter on time only when the task names a window, and then
+   use the dates it names.
 1. ONE statement, starting with SELECT or WITH. No semicolon, no trailing comment.
-2. Aggregate in the database: GROUP BY plus count/uniq/avg/quantile. Return a
+2. Aggregate in the database: GROUP BY plus count/uniqExact/avg/quantileExact. Return a
    summary, never raw events. Group as finely as the task deserves without worrying
    about the row count: a large grouped result is profiled in full downstream, so a
    per-city-per-day cut is fine where the task calls for one.
@@ -32,6 +47,11 @@ listed here does not exist.
    in the SELECT cannot be bounded, and a reader cannot tell whether 83% rests on 428
    rows or 4. Denominators are also what make the whole-set rate exact when the result
    is large: without them there is no overall rate at all.
+   CHECK THIS BEFORE YOU FINISH. Read your SELECT list back: for every column you
+   named `*_rate`, `*_ratio` or `*_pct`, both counts it divides must be in that same
+   SELECT list as their own columns. This is the single most common reason a correct
+   answer is reported to the user as low confidence — the figure is right, nothing can
+   bound it, and the ceiling drops to 0.60 no matter how good the query was.
 4. If the task compares anything — A vs B, best vs worst, lift, gap, change over time —
    compute that comparison as its own column. A delta you do not compute cannot be
    reported downstream.
@@ -76,9 +96,12 @@ first match. Prefer aggregating each side to one row per key before joining.
 columns shown in the schema block; a predicate that skips the prefix forces a full scan.
 Put those filters in WHERE, not in HAVING.
 
-**Sizing.** `uniqExact` is exact but expensive; on tables of millions of rows use `uniq`
-(approximate, ~1% error) unless the task needs an exact figure — say which you used in
-the column name if it matters. Never `SELECT *`. Never `FINAL`.
+**Sizing.** Use the EXACT aggregates: `uniqExact`, not `uniq`; `quantileExact(0.5)`, not
+`quantile(0.5)`. Every table here is under a million rows, so the exact versions cost
+nothing measurable — and the approximate ones sample, which makes the same question
+return a slightly different number each time it is asked. A PM re-asking a question and
+seeing 41,208 where they saw 41,190 reads that as the product changing. Never `SELECT *`.
+Never `FINAL`.
 </performance>
 
 <avoid>

@@ -113,11 +113,21 @@ Connectivity + configuration summary. Use for a status dot in the header.
   "ok": true,
   "clickhouse": "26.2.1.525",
   "database": "atlys_dataset",
-  "llmBackend": "claude-code-oauth",   // or "anthropic-api"
-  "model": "claude-sonnet-5"
+  "llmProvider": "gemini",                        // "gemini" | "anthropic" | "anthropic-oauth"
+  "llmBackend": "gemini-openai-compatible",       // | "anthropic-api" | "claude-code-oauth"
+  "model": "gemini-3.1-flash-lite",
+  "llmBaseUrl": "https://generativelanguage.googleapis.com/v1beta/openai"  // gemini only
 }
 500 { "ok": false, "error": "..." }
 ```
+
+`llmProvider` is the configured backend family and `llmBackend` the transport
+actually in use — render either as an opaque string; new values can appear
+without an API version bump. `llmBaseUrl` is present only on the Gemini path, so
+a self-hosted OpenAI-compatible endpoint is visible in the header. The provider
+is resolved from `LLM_PROVIDER`, else the first real key among `GEMINI_API_KEY`
+and `ANTHROPIC_API_KEY`, else the machine's Claude Code login. A 500 here means
+ClickHouse is unreachable; the LLM is not called by this route.
 
 ---
 
@@ -424,9 +434,18 @@ export interface Insight {
   groundedInContext: string;          // retrieved knowledge bearing on the answer; "" when none applies
   recommendedAction: string;          // the decision this implies, and what it should move
   // COMPUTED in code, never the model's opinion — see "Confidence" below.
-  // `score` is the same judgement on a 0–1 scale, clamped into the band its
-  // level implies so the number and the label can never disagree.
-  confidence: { value: "high" | "medium" | "low"; score: number; note: string };
+  // `score` is `1 + Σsignals.delta`, 2dp; `value` is read off it (high ≥ 0.75,
+  // medium ≥ 0.45), so the number and the label can never disagree.
+  confidence: {
+    value: "high" | "medium" | "low";
+    score: number;
+    note: string;                        // the signals with a non-zero delta, joined by "; "
+    signals: Array<{
+      name: string;                      // "headline_interval", "assumptions", …
+      delta: number;                     // signed; the deltas sum with 1 to `score`
+      detail: string;                    // one line a reader can act on
+    }>;
+  };
   precision: Array<{
     column: string;
     kind: "proportion" | "mean" | "quantile" | "ratio" | "count" | "unknown";
@@ -444,7 +463,9 @@ export interface Insight {
     concern: string;                     // strongest reason the figure might be wrong
     definitionOk: boolean;               // did the SQL use the documented denominator
     answersQuestion: boolean;
+    expectedToMatch: string;             // the column of the result that was compared
   };
+  droppedTasks?: string[];               // planned tasks that produced no usable result
   contextVersion: string;                            // e.g. "44 entities · max v2" — the badge
   sql: Array<{
     task: string;                        // "t1"; also "t1_profile" / "t1_top" / "t1_bottom"
@@ -465,11 +486,53 @@ export interface ChatMessage {
 ```
 
 **Confidence is computed, not claimed.** The model no longer rates its own answer.
-`confidence.value` is derived from: the widest 95% interval among the reported figures,
-whether the sanity gate flagged anything, whether the narration needed a citation
-retry, and whether an **independently written query reproduced the headline figure**.
-`high` requires a tight interval and a successful verification; a failed verification
-forces `low`.
+The score is a **sum of named signals**: it starts at 1, every measurement that
+weakens the answer subtracts a stated amount, and `1 + Σsignals.delta === score`
+(2dp) — so `signals[]` renders directly as a waterfall, and `note` is just the
+signals with a non-zero delta joined by `"; "`. The level is read off the score:
+
+| level | score |
+|---|---|
+| `high` | ≥ 0.75 |
+| `medium` | ≥ 0.45 |
+| `low` | < 0.45 |
+
+The bands do not overlap, so the word and the number can never disagree.
+
+**Ceilings apply first**, and the deductions stay visible underneath them:
+
+| condition | score cannot exceed |
+|---|---|
+| an independent query **disagreed** (`agreed: false`) | 0.44 — never medium |
+| **not** independently verified (`agreed: null`, or no verification ran) | 0.70 — never high |
+| no figure carries an interval at all | 0.60 |
+
+**Deductions**, each surfaced as one signal: the headline figure's interval
+(0.03/pp to ±4pp, then 0.075/pp to ±10pp, then slowly on to a maximum of 0.65 —
+a figure too wide to act on cannot reach medium on its own); other bounded
+segments with n<50 or ±>10pp (−0.04 each, cap −0.12); rates that shipped no
+denominator (−0.10); an "every sample below 50" flag (−0.10); an auditor's
+`definitionOk: false` (−0.10); values above 100% (−0.10 each, cap −0.20); planned
+tasks that returned no data (−0.07 each, cap −0.21); narration citation retries
+(−0.10 each, cap −0.20); and each of the planner's `assumptions` (−0.08 each,
+cap −0.25). One bonus: naming a stored `metric:*` entity in the question is
++0.05, capped at the total deducted so a clean answer stays at 1.00 rather than
+exceeding it.
+
+`assumptions` is the lever a PM can pull. When a question leaves the metric,
+denominator, window or segment open, the planner records the choice it made for
+them and each one costs 0.08 — so "How is checkout doing?" scores low with a note
+saying exactly what was assumed, and pinning those down in the question raises
+the score visibly. Assumptions never reach the narrator: they are confidence
+input and a `plan_summary` field only.
+
+**The score is deterministic** given the SQL results, `plan.assumptions` and the
+verification outcome — no model call sits between those inputs and the number.
+The headline figure it bounds is the verified column when a comparison happened,
+else the widest whole-population (`full_*_rate`) figure, else the bounded figure
+with the largest denominator; tail rows from the extremes are deliberately *not*
+allowed to set it, because one segment with n=2 does not make a population
+estimate of n=848 uncertain.
 
 `precision[]` carries the bounds per figure. Only *proportions* get an interval —
 means need a standard deviation, quantiles need bootstrapping, and unbounded ratios
@@ -484,6 +547,15 @@ adversarially by a different route, recomputes the figure and the two are compar
 `agreed: null` means inconclusive — surface it as unverified, never as passed. Show
 `concern` when present even if the numbers agreed; it is the auditor's best argument
 that the figure is wrong.
+
+`expectedToMatch` is the column of the original result the comparison used. The
+verifier names it, and the prompt gives it the list of numeric column names to
+choose from (`<their_columns>`) — naming a column that does not exist was the
+single largest cause of inconclusive verifications. When it still names one that
+is absent, the column whose *value* matches the recomputed figure is used instead
+(only when exactly one column of the same kind matches; two would be a coin
+flip), and `note` says "matched by value". Confidence reads `expectedToMatch` to
+decide which figure's interval to weigh.
 
 **Query safety.** Generated SQL is read-only by construction: the guard rejects
 anything that is not a single SELECT/WITH, strips banned keywords, and clamps any

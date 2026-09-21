@@ -158,6 +158,17 @@ export function summariseRuns(runRows: RunLogRow[]): Map<string, RunFacts> {
   return runs;
 }
 
+export interface ChangelogOptions {
+  /**
+   * How many context batches were written BEFORE the oldest batch passed in.
+   * The read cap keeps only the newest batches, and without this every entry's
+   * version label would shift as history rolls off — the oldest surviving batch
+   * would rename itself "v1.0". Derived from the total batch count, so a label
+   * belongs to a batch, not to its position in the slice.
+   */
+  versionOffset?: number;
+}
+
 /**
  * Merge context batches and run milestones into one reverse-chronological stream.
  *
@@ -169,6 +180,7 @@ export function summariseRuns(runRows: RunLogRow[]): Map<string, RunFacts> {
 export function buildChangelog(
   contextRows: ContextRow[],
   runRows: RunLogRow[],
+  options: ChangelogOptions = {},
 ): ChangelogEntry[] {
   const runs = summariseRuns(runRows);
 
@@ -182,7 +194,7 @@ export function buildChangelog(
 
   const entries: ChangelogEntry[] = [];
 
-  let batchIndex = 0;
+  let batchIndex = Math.max(0, Math.floor(options.versionOffset ?? 0));
   for (const [runId, rows] of batches) {
     const first = rows[0];
     if (!first) continue;
@@ -231,12 +243,17 @@ export function buildChangelog(
   return entries.sort((a, b) => b.at.localeCompare(a.at));
 }
 
-export function changelogToMarkdown(entries: ChangelogEntry[]): string {
+export function changelogToMarkdown(
+  entries: ChangelogEntry[],
+  options: { truncated?: boolean } = {},
+): string {
   const lines = [
     "# Clickwright changelog",
     "",
-    "Every schema change and context update, newest first. Generated from",
-    "`context_store` and `runs_log`.",
+    options.truncated
+      ? "The most recent schema changes and context updates, newest first. Older history is beyond the read cap and is NOT included in this export."
+      : "Every schema change and context update, newest first.",
+    "Generated from `context_store` and `runs_log`.",
     "",
   ];
   for (const entry of entries) {
@@ -263,15 +280,61 @@ export function changelogToMarkdown(entries: ChangelogEntry[]): string {
 
 // ── collectors ───────────────────────────────────────────────────
 
-export async function loadContextRows(): Promise<ContextRow[]> {
+/**
+ * Both source tables are append-only and unbounded, and the changelog renders
+ * a scrollable stream — nobody reads past a few hundred entries. The reads are
+ * therefore capped at the most recent history rather than scanning everything.
+ *
+ * The cap is on WHOLE UNITS, not on rows: a context batch and a run are each
+ * kept entire or not at all. A row cap cut units in half, and half a unit is
+ * not merely less data, it is wrong data — a sliced batch under-reports its own
+ * size ("+7 new entries" for a batch of 23), and a run whose `succeeded` row
+ * survives while its `approval_result` row is cut renders as "auto-approved"
+ * with no trace link.
+ */
+const MAX_CONTEXT_BATCHES = 300;
+const MAX_RUNS = 500;
+/** Matches the runs_log TTL — older events do not exist to be read anyway. */
+const CHANGELOG_WINDOW_DAYS = 90;
+
+/** The runs_log event types the changelog is assembled from. Shared by the row
+ *  read and the run-selection subquery so both see the same population. */
+const RUN_EVENT_FILTER = `((type = 'status' AND name IN ('running', 'succeeded', 'failed'))
+       OR type = 'approval_result'
+       OR (type = 'step_start' AND name = 'instrumentation'))`;
+
+export interface ContextRowsPage {
+  rows: ContextRow[];
+  /** Batches that landed before the oldest one read — the version offset. */
+  versionOffset: number;
+  truncated: boolean;
+}
+
+export interface RunRowsPage {
+  rows: RunLogRow[];
+  truncated: boolean;
+}
+
+export async function loadContextRows(): Promise<ContextRowsPage> {
   // definition_md is deliberately excluded — it is large and the changelog only
   // needs the metadata.
-  const rows = await query<Record<string, unknown>>(`
-    SELECT run_id, source_spec, entity, toUInt32(version) AS version,
-           change_note, toString(updated_at) AS updated_at
-    FROM context_store ORDER BY updated_at ASC, entity ASC
-  `);
-  return rows.map((r) => ({
+  const [totals, rows] = await Promise.all([
+    query<Record<string, unknown>>(
+      `SELECT uniqExact(run_id) AS batches FROM context_store`,
+    ),
+    query<Record<string, unknown>>(`
+      SELECT run_id, source_spec, entity, toUInt32(version) AS version,
+             change_note, toString(updated_at) AS updated_at
+      FROM context_store
+      WHERE run_id IN (
+        SELECT run_id FROM context_store
+        GROUP BY run_id ORDER BY max(updated_at) DESC LIMIT ${MAX_CONTEXT_BATCHES}
+      )
+      ORDER BY updated_at ASC, entity ASC
+    `),
+  ]);
+
+  const mapped = rows.map((r) => ({
     runId: String(r["run_id"] ?? ""),
     sourceSpec: String(r["source_spec"] ?? ""),
     entity: String(r["entity"] ?? ""),
@@ -279,18 +342,27 @@ export async function loadContextRows(): Promise<ContextRow[]> {
     changeNote: String(r["change_note"] ?? ""),
     updatedAt: String(r["updated_at"] ?? ""),
   }));
+
+  const loadedBatches = new Set(mapped.map((r) => r.runId)).size;
+  const totalBatches = Number(totals[0]?.["batches"] ?? 0) || loadedBatches;
+  const versionOffset = Math.max(0, totalBatches - loadedBatches);
+  return { rows: mapped, versionOffset, truncated: versionOffset > 0 };
 }
 
-export async function loadRunRows(): Promise<RunLogRow[]> {
+export async function loadRunRows(): Promise<RunRowsPage> {
+  const inWindow = `ts >= now() - INTERVAL ${CHANGELOG_WINDOW_DAYS} DAY`;
   const rows = await query<Record<string, unknown>>(`
     SELECT run_id, spec, toString(ts) AS at, type, name, payload
     FROM runs_log
-    WHERE (type = 'status' AND name IN ('running', 'succeeded', 'failed'))
-       OR type = 'approval_result'
-       OR (type = 'step_start' AND name = 'instrumentation')
-    ORDER BY ts ASC
+    WHERE ${inWindow} AND ${RUN_EVENT_FILTER}
+      AND run_id IN (
+        SELECT run_id FROM runs_log
+        WHERE ${inWindow} AND ${RUN_EVENT_FILTER}
+        GROUP BY run_id ORDER BY max(ts) DESC LIMIT ${MAX_RUNS}
+      )
+    ORDER BY at ASC
   `);
-  return rows.map((r) => {
+  const mapped = rows.map((r) => {
     let payload: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(String(r["payload"] ?? "{}"));
@@ -309,9 +381,24 @@ export async function loadRunRows(): Promise<RunLogRow[]> {
       spec: String(r["spec"] ?? ""),
     };
   });
+  const loadedRuns = new Set(mapped.map((r) => r.runId)).size;
+  return { rows: mapped, truncated: loadedRuns >= MAX_RUNS };
 }
 
-export async function getChangelog(): Promise<ChangelogEntry[]> {
-  const [contextRows, runRows] = await Promise.all([loadContextRows(), loadRunRows()]);
-  return buildChangelog(contextRows, runRows);
+export interface ChangelogPage {
+  entries: ChangelogEntry[];
+  /** Older history fell outside the read caps: the stream does not reach back
+   *  to the first change. Surfaced in the export header and a response header
+   *  rather than being papered over. */
+  truncated: boolean;
+}
+
+export async function getChangelog(): Promise<ChangelogPage> {
+  const [context, runs] = await Promise.all([loadContextRows(), loadRunRows()]);
+  return {
+    entries: buildChangelog(context.rows, runs.rows, {
+      versionOffset: context.versionOffset,
+    }),
+    truncated: context.truncated || runs.truncated,
+  };
 }

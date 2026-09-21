@@ -48,8 +48,11 @@ export interface RunEvent {
 type RunEventSink = (event: RunEvent) => void;
 
 /** Per-async-context sink so an instrumentation run and a chat answer can
- * stream concurrently without stealing each other's events. */
-const sinkStore = new AsyncLocalStorage<RunEventSink>();
+ * stream concurrently without stealing each other's events.
+ *
+ * The stored value may be `null`, which means "explicitly no sink" and is NOT
+ * the same as having no scope at all — see `emitRunEvent`. */
+const sinkStore = new AsyncLocalStorage<RunEventSink | null>();
 let runSink: RunEventSink | null = null; // legacy global (instrumentation runs)
 
 export function setRunSink(sink: RunEventSink | null): void {
@@ -61,6 +64,20 @@ export function withRunSink<T>(sink: RunEventSink, fn: () => Promise<T>): Promis
   return sinkStore.run(sink, fn);
 }
 
+/**
+ * Run `fn` with NO sink: its steps go to Langfuse and nowhere else.
+ *
+ * For background work that is not part of any run. The advisor scan is the
+ * case that forced this: it is kicked off from an HTTP handler, so it had no
+ * scoped sink, fell through to the global one, and its `advisor_evidence` /
+ * `advisor_generation_attempt_N` steps appeared in whatever instrumentation
+ * run happened to be live — on that run's SSE stream, in its stepper, and
+ * persisted into runs_log under its run_id.
+ */
+export function withoutRunSink<T>(fn: () => Promise<T>): Promise<T> {
+  return sinkStore.run(null, fn);
+}
+
 const clip = (v: unknown): unknown => {
   const s = JSON.stringify(v);
   return s && s.length > 6000 ? JSON.parse(JSON.stringify(v, (_k, val) =>
@@ -70,8 +87,14 @@ const clip = (v: unknown): unknown => {
 
 export function emitRunEvent(event: RunEvent): void {
   const scoped = sinkStore.getStore();
-  if (scoped) scoped(event);
-  else runSink?.(event);
+  // `undefined` = no scope was established, so fall back to the active run's
+  // global sink. `null` = a scope deliberately opted out (withoutRunSink), and
+  // falling back there is exactly the leak this distinction prevents.
+  if (scoped !== undefined) {
+    scoped?.(event);
+    return;
+  }
+  runSink?.(event);
 }
 
 export function startRun(

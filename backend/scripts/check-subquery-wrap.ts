@@ -33,6 +33,19 @@ const CASES: Array<{ name: string; sql: string }> = [
     sql: `SELECT * FROM (SELECT number AS n, number / 50 AS x_rate FROM system.numbers LIMIT 40) AS q ORDER BY x_rate ASC LIMIT 5`,
   },
   {
+    name: "ORDER BY ALL + LIMIT — the deterministic transport cap the guard appends",
+    sql: `SELECT number % 5 AS bucket, count() AS n FROM system.numbers WHERE number < 100
+          GROUP BY bucket
+          ORDER BY ALL
+          LIMIT 1000`,
+  },
+  {
+    name: "ORDER BY ALL over a wrapped subquery result (needs ClickHouse >= 23.12)",
+    sql: `SELECT * FROM (SELECT number AS n, number / 7 AS x_rate FROM system.numbers LIMIT 10) AS q
+          ORDER BY ALL
+          LIMIT 1000`,
+  },
+  {
     name: "UNION ALL result wrapped",
     sql: `SELECT count() AS total_rows FROM (SELECT 1 AS n UNION ALL SELECT 2 AS n) AS q`,
   },
@@ -67,7 +80,7 @@ async function main(): Promise<void> {
   }
   console.log(
     failures === 0
-      ? "\nAll wrap shapes execute under readonly=1 — the digest can wrap task SQL directly."
+      ? "\nAll wrap shapes execute under readonly=1 — the digest can wrap task SQL directly,\nand ORDER BY ALL is supported (leave ANALYTICS_ORDER_BY_ALL unset)."
       : `\n${failures}/${CASES.length} shapes failed — those tasks will degrade to a digest note.`,
   );
   await closeDb();

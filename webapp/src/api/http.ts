@@ -5,6 +5,16 @@
  * same code works in dev and behind a reverse proxy.
  */
 
+/** JSON if it is JSON, `undefined` if it is not. Never throws. */
+function parseJson(text: string): unknown {
+  if (!text) return null
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return undefined
+  }
+}
+
 /** Errors are `{ error: string }` with a 4xx/5xx status. */
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -12,7 +22,17 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: init?.body ? { "Content-Type": "application/json" } : undefined,
   })
   const text = await response.text()
-  const body = text ? (JSON.parse(text) as unknown) : null
+  // A proxy error page, an HTML 502 or a truncated body is not JSON. Parsing it
+  // unguarded threw a SyntaxError that surfaced as "Unexpected token '<'" —
+  // which told the reader nothing about the backend being down.
+  const body = parseJson(text)
+  if (body === undefined) {
+    throw new Error(
+      response.ok
+        ? `${path}: the backend returned a response that is not JSON`
+        : `${response.status} ${response.statusText}`,
+    )
+  }
 
   if (!response.ok) {
     const error =
@@ -63,11 +83,9 @@ export async function streamPost(
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => "")
     let message = `${response.status} ${response.statusText}`
-    try {
-      const parsed = JSON.parse(text) as { error?: unknown }
-      if (parsed.error) message = String(parsed.error)
-    } catch {
-      /* not JSON — keep the status line */
+    const parsed = parseJson(text)
+    if (parsed && typeof parsed === "object" && "error" in parsed) {
+      message = String((parsed as { error: unknown }).error)
     }
     throw new Error(message)
   }

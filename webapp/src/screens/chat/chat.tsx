@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input"
 import { Icon, Spinner } from "@/components/ui-kit/icon"
 import { Panel } from "@/components/ui-kit/panel"
 import { capsuleButton } from "@/components/ui-kit/styles"
+import { cn } from "@/lib/utils"
 import { useChat } from "@/state/chat"
 import { AgentSteps } from "./agent-steps"
 import { ConversationList } from "./conversation-list"
@@ -34,6 +35,7 @@ export function Chat() {
     input,
     setInput,
     send,
+    cancel,
     stepLog,
   } = useChat()
 
@@ -189,12 +191,25 @@ export function Chat() {
                 className="h-auto flex-1 border-none bg-transparent p-0 text-[13.5px] shadow-none focus-visible:border-none focus-visible:ring-0 md:text-[13.5px]"
               />
               <Button
-                onClick={() => send()}
-                disabled={streaming || !input.trim()}
-                title="Send"
-                className="size-[34px] shrink-0 rounded-[9px] bg-zinc-900 p-0 text-white hover:bg-zinc-800"
+                onClick={() => (streaming ? cancel() : send())}
+                disabled={!streaming && !input.trim()}
+                title={streaming ? "Stop generating" : "Send"}
+                aria-label={streaming ? "Stop generating" : "Send"}
+                className={cn(
+                  "group size-[34px] shrink-0 rounded-[9px] p-0 text-white",
+                  streaming ? "bg-zinc-700 hover:bg-zinc-900" : "bg-zinc-900 hover:bg-zinc-800",
+                )}
               >
-                {streaming ? <Spinner size={15} /> : <Icon name="ti-send" size={15} />}
+                {streaming ? (
+                  <>
+                    {/* the spinner is the progress cue; the ✕ appears on hover so the
+                        button reads as "stop" only when it is about to be clicked */}
+                    <Spinner size={15} className="group-hover:hidden" />
+                    <Icon name="ti-x" size={15} className="hidden group-hover:block" />
+                  </>
+                ) : (
+                  <Icon name="ti-send" size={15} />
+                )}
               </Button>
             </div>
             <div className="mt-2 text-center text-[10.5px] text-zinc-400">

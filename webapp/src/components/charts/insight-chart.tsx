@@ -1,13 +1,7 @@
-import { Bar, BarChart, Cell, LabelList, Line, LineChart, XAxis, YAxis } from "recharts"
+import * as React from "react"
 
 import type { InsightChart as InsightChartData, ValueFormat } from "@/api/chat"
-import { ChartContainer, type ChartConfig } from "@/components/ui/chart"
-
-const config = {
-  value: { label: "Value", color: "var(--color-teal)" },
-} satisfies ChartConfig
-
-const MONO = "'Geist Mono', ui-monospace, monospace"
+import { ErrorBoundary } from "@/components/error-boundary"
 
 /**
  * Render a number the way the backend says it should be read.
@@ -44,115 +38,78 @@ function round(value: number): string {
 }
 
 /**
- * The chart an insight card carries. `kind` and the series come from the agent;
- * the bar heights are the real values, so the proportions are the data's.
+ * Geometry, shared by the chart and by the placeholder held for it while the
+ * charting library loads — so nothing on the page moves when it arrives.
+ *
+ * Many bars, or long labels, means rotated tick labels and a taller axis.
  */
-export function InsightChart({
-  chart,
-  scale = 1,
-}: {
+export function chartLayout(
+  chart: InsightChartData,
+  scale = 1
+): { needsRotation: boolean; height: number } {
+  const needsRotation =
+    chart.series.length > 5 || chart.series.some((point) => point.label.length > 12)
+  return { needsRotation, height: Math.round((150 + (needsRotation ? 50 : 0)) * scale) }
+}
+
+/**
+ * Recharts is ~300 KB — a third of the bundle — and it is needed only once an
+ * answer with a chart is on screen. It is fetched as its own chunk, starting
+ * the moment this module is evaluated, so it is in cache long before the first
+ * answer arrives (and long before the PDF export, which can only run after a
+ * conversation has rendered).
+ */
+const loadCanvas = () => import("./insight-chart-canvas")
+const Canvas = React.lazy(() =>
+  loadCanvas().then((module) => ({ default: module.InsightChartCanvas }))
+)
+// A rejection here is not fatal — `React.lazy` calls `import()` again when the
+// first chart renders, and the boundary below catches it if that fails too —
+// but an uncaught one is an `unhandledrejection` in every offline tab.
+void loadCanvas().catch(() => {})
+
+export interface InsightChartProps {
   chart: InsightChartData
   /** dashboards and previews render the same chart smaller */
   scale?: number
-}) {
-  const data = chart.series.map((point) => ({
-    label: point.label,
-    value: point.value,
-    display: formatValue(point.value, chart.valueFormat),
-  }))
-  const values = data.map((point) => point.value)
-  const max = Math.max(...values, 0)
-  const min = Math.min(...values, 0)
-  // The weakest bar is the one an operator acts on — mark it, but only when
-  // there is a spread worth pointing at.
-  const lowest = values.length > 2 && max > 0 && min < max * 0.75 ? Math.min(...values) : null
+}
 
-  // When there are many bars with long labels, rotate them to avoid overlap.
-  const needsRotation = data.length > 5 || data.some((d) => d.label.length > 12)
-  const xAxisHeight = needsRotation ? 70 : 22
-  const chartHeight = Math.round((150 + (needsRotation ? 50 : 0)) * scale)
-
-  const xTickProps = needsRotation
-    ? { fontSize: 9.5, fill: "var(--color-zinc-500)", textAnchor: "end" as const, angle: -35 }
-    : { fontSize: 10.5, fill: "var(--color-zinc-500)" }
-
+/**
+ * The chart an insight card carries. `kind` and the series come from the
+ * agent; the bar heights are the real values, so the proportions are the
+ * data's.
+ *
+ * Memoised: a conversation holds one chart per answer, and every step event of
+ * the NEXT answer used to re-render all of them — handing Recharts a brand-new
+ * data array each time, which it treats as new data and re-lays-out. A
+ * finished insight is immutable, so an identical `chart` prop is a no-op.
+ */
+export const InsightChart = React.memo(function InsightChart({
+  chart,
+  scale = 1,
+}: InsightChartProps) {
+  const { height } = chartLayout(chart, scale)
   return (
-    <ChartContainer
-      config={config}
-      className="aspect-auto w-full"
-      style={{ height: chartHeight }}
+    // Losing a chart must never lose the answer it illustrates: if the canvas
+    // chunk cannot be fetched or blows up, only this rectangle is replaced and
+    // the rest of the insight card stays exactly as it was.
+    <ErrorBoundary fallback={() => <ChartUnavailable height={height} />}>
+      <React.Suspense fallback={<div aria-hidden style={{ height }} />}>
+        <Canvas chart={chart} scale={scale} />
+      </React.Suspense>
+    </ErrorBoundary>
+  )
+})
+
+/** Same footprint as the chart it stands in for, so nothing on the card moves. */
+function ChartUnavailable({ height }: { height: number }) {
+  return (
+    <div
+      role="status"
+      style={{ height }}
+      className="flex items-center justify-center rounded-lg border border-dashed border-zinc-200 text-[11.5px] text-zinc-400"
     >
-      {chart.kind === "line" ? (
-        <LineChart data={data} margin={{ top: 20, left: 4, right: 8, bottom: needsRotation ? 10 : 0 }}>
-          <YAxis hide domain={[min < 0 ? min * 1.1 : 0, max * 1.15]} />
-          <XAxis
-            dataKey="label"
-            axisLine={false}
-            tickLine={false}
-            tickMargin={6}
-            height={xAxisHeight}
-            interval="preserveStartEnd"
-            tick={xTickProps}
-          />
-          <Line
-            dataKey="value"
-            type="monotone"
-            stroke="var(--color-teal)"
-            strokeWidth={1.5}
-            isAnimationActive={false}
-            dot={{ r: 2.5, strokeWidth: 0, fill: "var(--color-teal)" }}
-          >
-            <LabelList
-              dataKey="display"
-              position="top"
-              offset={8}
-              fontSize={10.5}
-              fontFamily={MONO}
-              fontWeight={650}
-              fill="var(--color-zinc-700)"
-            />
-          </Line>
-        </LineChart>
-      ) : (
-        <BarChart data={data} margin={{ top: 20, bottom: needsRotation ? 10 : 0 }} barCategoryGap="26%">
-          <YAxis hide domain={[min < 0 ? min * 1.1 : 0, max * 1.15]} />
-          <XAxis
-            dataKey="label"
-            axisLine={false}
-            tickLine={false}
-            tickMargin={6}
-            height={xAxisHeight}
-            interval={0}
-            tick={xTickProps}
-          />
-          <Bar
-            dataKey="value"
-            radius={[6, 6, 2, 2]}
-            maxBarSize={Math.round(54 * scale)}
-            isAnimationActive={false}
-          >
-            {data.map((point, index) => (
-              <Cell
-                key={`${point.label}-${index}`}
-                fill={
-                  lowest !== null && point.value === lowest
-                    ? "var(--color-coral)"
-                    : "var(--color-teal)"
-                }
-              />
-            ))}
-            <LabelList
-              dataKey="display"
-              position="top"
-              offset={6}
-              fontSize={11}
-              fontFamily={MONO}
-              fontWeight={650}
-              fill="var(--color-zinc-700)"
-            />
-          </Bar>
-        </BarChart>
-      )}
-    </ChartContainer>
+      chart unavailable
+    </div>
   )
 }

@@ -146,11 +146,25 @@ Every number in an insight traces backward: **narration span → SQL span → qu
 
 ## LLM Provider
 
-**Model:** Claude Sonnet 5 (configurable via `CLICKWRIGHT_MODEL`)
+Three interchangeable backends behind one `complete()` entry point, chosen by `LLM_PROVIDER` or, when it is blank, by whichever credential is present (Gemini key → Anthropic key → Claude Code login):
 
-**Why Claude:** Structured JSON output with strict schema adherence, strong ClickHouse SQL generation, and reliable multi-section prompt following. Effort pinned to `medium` — prompts are tightly specified and schema-validated.
+| Backend | `llmBackend` | Default model | Transport |
+|---|---|---|---|
+| Gemini (default) | `gemini-openai-compatible` | `gemini-3.1-flash-lite` (`GEMINI_MODEL`) | `fetch` → OpenAI-compatible `/chat/completions`, no SDK dependency |
+| Anthropic API | `anthropic-api` | `claude-sonnet-5` (`CLICKWRIGHT_MODEL`) | `@anthropic-ai/sdk`, retries disabled in favour of the shared backoff |
+| Claude Code | `claude-code-oauth` | `claude-sonnet-5` | Claude Agent SDK subprocess, machine's OAuth login |
 
-**Auth:** `ANTHROPIC_API_KEY` (direct API) or Claude Code OAuth login (company plan).
+**Why Gemini by default:** the same answer quality at roughly a quarter of the wall time, on a free key with no card — which matters more than a marginal reliability edge when a judge is watching a demo. Claude stays one env var away.
+
+**Why `gemini-3.1-flash-lite` and not the newest model:** free-tier quota is per model, and the newest ones can be metered per *day* rather than per minute — measured on a free key (21 Sep 2026), `gemini-3.8-flash` allows 20 requests/day, which one question (5–7 calls) exhausts. Flash-lite returned in 1.2–1.5 s on the ordinary quota. Any host on a low daily cap needs `GEMINI_MODEL` changed.
+
+**Determinism:** `temperature 0` and JSON mode (`response_format: json_object`) on the OpenAI-compatible path. The Anthropic path sends no `temperature` at all — current Claude models reject a non-default sampling parameter with a 400 — and pins effort at `medium` instead. `reasoning_effort` defaults to `low` on Gemini and is not sent on the Anthropic paths; `LLM_REASONING_EFFORT=none` turns it off. `seed` is sent only when `LLM_SEED` is set, because Gemini rejects unknown fields with a 400.
+
+**Why thinking stays on:** `reasoning_effort=none` is faster and gives the wrong answer. Measured on the coupon-apply question (21 Sep 2026), thinking off reported 30.3% and the independent verification query disagreed (confidence low, 0.14); `low` reported 27.6%, reproduced to the digit (high, 0.79). The extra ~10 s per question buys a figure that survives its own audit.
+
+**Shared transport** (`core/llm-transport.ts`, pure and unit-tested): a process-wide semaphore caps in-flight calls (`LLM_MAX_CONCURRENCY`, default 3 to fit Gemini's ≈ 15 req/min free tier), wrapping a 3-attempt backoff that retries only 408/409/429/5xx and network failures, honouring `Retry-After` (header seconds, HTTP-date, or Gemini's `error.details[].retryDelay`). Each attempt carries a `LLM_TIMEOUT_MS` deadline. A filtered or empty completion raises `LlmBlockedError` (never retried) and a `finish_reason: length` raises `LlmTruncatedError`, whose message feeds the self-healing retry so the next attempt is shorter instead of failing on truncated JSON.
+
+**Auth:** `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, or the Claude Code OAuth login (company plan).
 
 ## Tech Stack
 
@@ -158,7 +172,7 @@ Every number in an insight traces backward: **narration span → SQL span → qu
 |---|---|---|
 | Database | ClickHouse Cloud | Competition platform; ideal for event analytics at scale |
 | Backend | Node.js + TypeScript | Async-native, strong typing, fast iteration |
-| LLM | Claude (Anthropic) | Best structured-output reliability for SQL + JSON |
+| LLM | Gemini (default) or Claude | Provider-swappable via one env var; Gemini for free-tier speed, Claude for structured-output reliability |
 | Tracing | Langfuse Cloud | Full observability; every span, generation, and score queryable |
 | Frontend | React + Vite + Tailwind | Component library with SSE streaming support |
 | Validation | Zod | Runtime schema validation on every LLM output |

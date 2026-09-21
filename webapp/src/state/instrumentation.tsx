@@ -163,16 +163,73 @@ export function InstrumentationProvider({ children }: { children: React.ReactNod
     }
     setEvents([])
     setStreaming(true)
-    return openRunStream(
+
+    // A run emits 100+ events, and a reconnect replays every one of them in a
+    // burst. Publishing each arrival separately meant a state update, a
+    // buildRunModel and a full re-render per event — and the old dedupe
+    // (`current.some(...)` then copy-and-sort) made that quadratic. Events are
+    // collected into a Map keyed by `seq`, which is dense and authoritative,
+    // and published at most once per frame.
+    const received = new Map<number, RunEvent>()
+    let frame: number | null = null
+    let timer: number | null = null
+
+    const publish = () => {
+      frame = null
+      timer = null
+      setEvents([...received.values()].sort((a, b) => a.seq - b.seq))
+    }
+
+    const cancel = () => {
+      if (frame !== null) window.cancelAnimationFrame(frame)
+      if (timer !== null) window.clearTimeout(timer)
+      frame = null
+      timer = null
+    }
+
+    // rAF is paused in a background tab, so a run that finishes while the tab
+    // is hidden would never publish its terminal event — the screen would stay
+    // frozen mid-run until the reader came back. Hidden means timeout instead.
+    const schedule = () => {
+      if (frame !== null || timer !== null) return
+      if (document.hidden) timer = window.setTimeout(publish, 0)
+      else frame = window.requestAnimationFrame(publish)
+    }
+
+    const flush = () => {
+      if (frame === null && timer === null) return
+      cancel()
+      publish()
+    }
+
+    const unsubscribe = openRunStream(
       runId,
-      (event) =>
-        // Reconnects replay the whole buffer; `seq` is dense and authoritative.
-        setEvents((current) => {
-          if (current.some((item) => item.seq === event.seq)) return current
-          return [...current, event].sort((a, b) => a.seq - b.seq)
-        }),
-      (state) => setStreaming(state === "open")
+      (event) => {
+        if (received.has(event.seq)) return
+        received.set(event.seq, event)
+        schedule()
+      },
+      (state) => {
+        // The terminal event and the close arrive in the same handler. Publish
+        // the queued events FIRST, so `streaming` can never go false while
+        // `status` and `busy` still hold their pre-terminal values — that gap
+        // is one frame of "reconnecting…" on every successful finish. Both
+        // updates land in the same batch, so the run goes straight to done.
+        flush()
+        setStreaming(state === "open")
+      }
     )
+
+    const onVisibilityChange = () => {
+      if (document.hidden) flush()
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange)
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange)
+      cancel()
+      unsubscribe()
+    }
   }, [runId])
 
   /* Queue depth only changes server-side, and only matters while queued. */
@@ -283,36 +340,68 @@ export function InstrumentationProvider({ children }: { children: React.ReactNod
     decide(false, note)
   }, [decide, feedback])
 
-  const value: InstrumentationValue = {
-    health,
-    specs,
-    runs,
-    history,
-    offline,
-    runId,
-    run,
-    model,
-    status,
-    queuedBehind,
-    streaming,
-    busy,
-    starting,
-    startRun,
-    newRun,
-    openRun,
-    identity,
-    setIdentity,
-    changeRequestOpen,
-    setChangeRequestOpen,
-    feedback,
-    setFeedback,
-    deciding,
-    approve,
-    requestChanges,
-    refreshHistory,
-    selectedRunId,
-    selectRunId: setSelectedRunId,
-  }
+  // Memoised: this provider wraps the whole app (the nav rail reads it for the
+  // pending-gate dot), so a fresh object per render re-rendered every screen
+  // — including the chat thread — on every run event.
+  const value = React.useMemo<InstrumentationValue>(
+    () => ({
+      health,
+      specs,
+      runs,
+      history,
+      offline,
+      runId,
+      run,
+      model,
+      status,
+      queuedBehind,
+      streaming,
+      busy,
+      starting,
+      startRun,
+      newRun,
+      openRun,
+      identity,
+      setIdentity,
+      changeRequestOpen,
+      setChangeRequestOpen,
+      feedback,
+      setFeedback,
+      deciding,
+      approve,
+      requestChanges,
+      refreshHistory,
+      selectedRunId,
+      selectRunId: setSelectedRunId,
+    }),
+    [
+      health,
+      specs,
+      runs,
+      history,
+      offline,
+      runId,
+      run,
+      model,
+      status,
+      queuedBehind,
+      streaming,
+      busy,
+      starting,
+      startRun,
+      newRun,
+      openRun,
+      identity,
+      setIdentity,
+      changeRequestOpen,
+      feedback,
+      deciding,
+      approve,
+      requestChanges,
+      refreshHistory,
+      selectedRunId,
+    ]
+  )
 
   return (
     <InstrumentationContext value={value}>{children}</InstrumentationContext>

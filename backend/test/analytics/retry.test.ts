@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
-import { retryWithFeedback } from "../../src/agents/analytics.js";
+import { PlanSchema, retryWithFeedback } from "../../src/agents/analytics.js";
 import { loadPrompt } from "../../src/core/llm.js";
 import { phaseOf } from "../../src/server/chat.js";
 
@@ -107,6 +107,46 @@ test("analytics_plan_tasks renders retry feedback into the prompt", async () => 
   assert.match(rendered, /FEEDBACK_MARKER_7291/);
 });
 
+test("analytics_verify_query renders the result's column names into the prompt", async () => {
+  // `expected_to_match` naming a column that is not in the result was the single
+  // largest cause of inconclusive verifications, so the names are handed to the
+  // auditor explicitly — and loadPrompt throws if the call site forgets one.
+  const rendered = await loadPrompt("analytics_verify_query", {
+    question: "Q",
+    task: "T",
+    sql: "SELECT 1",
+    result: "[]",
+    columns: JSON.stringify(["full_applied_rate", "full_applied_n"]),
+    digest: "D",
+    definitions: "DEF",
+    schemas: "S",
+    feedback: "",
+  });
+  assert.match(rendered, /<their_columns>/);
+  assert.match(rendered, /full_applied_rate/);
+  assert.match(rendered, /expected_to_match` is one of the names in <their_columns>, copied exactly/);
+});
+
+test("analytics_verify_query renders the database's rejection back to the verifier", async () => {
+  // A verification query that will not RUN costs the answer 0.30 and the "not
+  // independently verified" chip. One retry, carrying ClickHouse's own words,
+  // recovers the one-line mistakes — the live case aggregated the other query's
+  // output column names, which are columns of no table.
+  const rendered = await loadPrompt("analytics_verify_query", {
+    question: "Q",
+    task: "T",
+    sql: "SELECT 1",
+    result: "[]",
+    columns: "[]",
+    digest: "D",
+    definitions: "DEF",
+    schemas: "S",
+    feedback: "\n# Your previous query did not run — fix it\nColumn 'pay_now_n' is not under aggregate function\n",
+  });
+  assert.match(rendered, /did not run/);
+  assert.match(rendered, /pay_now_n/);
+});
+
 test("analytics_review_quality renders retry feedback into the prompt", async () => {
   const rendered = await loadPrompt("analytics_review_quality", {
     question: "Q",
@@ -126,4 +166,51 @@ test("plan attempt spans map to the planning phase", () => {
 
 test("quality gate attempt spans map to the review phase", () => {
   assert.equal(phaseOf("quality_gate_attempt_2"), "Reviewing the answer");
+});
+
+// ── the plan schema cannot fail on `assumptions` alone ──────────
+// Exhausting the plan retries THROWS, so a field the prompt never specifies must
+// never be able to reject: a 121-character assumption, or a seventh one, would
+// kill a question that worked before the field existed.
+
+test("an over-long or over-full assumptions list is clamped, never rejected", () => {
+  const long = "x".repeat(400);
+  const plan = PlanSchema.parse({
+    approach: "a",
+    tasks: [{ id: "t1", title: "t", question: "q", tables: ["events"] }],
+    assumptions: [long, ...Array.from({ length: 9 }, (_, i) => `assumption ${i}`)],
+  });
+  assert.equal(plan.assumptions.length, 6, "clamped to six, not rejected");
+  assert.equal(plan.assumptions[0]!.length, 120, "each one truncated to 120 chars");
+});
+
+test("assumptions the planner writes badly degrade to none rather than killing the plan", () => {
+  const base = {
+    approach: "a",
+    tasks: [{ id: "t1", title: "t", question: "q", tables: ["events"] }],
+  };
+  for (const assumptions of [undefined, [], ["  ", "", "  kept  "], "not an array", [1, 2], null]) {
+    const parsed = PlanSchema.parse({ ...base, assumptions });
+    assert.ok(Array.isArray(parsed.assumptions), String(assumptions));
+    assert.ok(parsed.assumptions.every((a) => a.length > 0), String(assumptions));
+  }
+  // blanks are dropped and the survivors trimmed
+  assert.deepEqual(
+    PlanSchema.parse({ ...base, assumptions: ["  ", "", "  last 90 days  "] }).assumptions,
+    ["last 90 days"],
+  );
+});
+
+test("depends_on is still a hard check the retry loop can turn into feedback", () => {
+  assert.throws(
+    () =>
+      PlanSchema.parse({
+        approach: "a",
+        tasks: [
+          { id: "t1", title: "t", question: "q", tables: ["events"] },
+          { id: "t2", title: "t", question: "q", tables: ["events"], depends_on: "t9" },
+        ],
+      }),
+    /depends_on/,
+  );
 });

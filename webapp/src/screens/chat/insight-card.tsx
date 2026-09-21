@@ -1,8 +1,9 @@
 import * as React from "react"
 
-import type { Insight } from "@/api/chat"
+import type { ConfidenceSignal, Insight } from "@/api/chat"
 import { formatValue, InsightChart } from "@/components/charts/insight-chart"
 import { Button } from "@/components/ui/button"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { CodeSurface } from "@/components/ui-kit/code"
 import { Segmented, SegmentedItem } from "@/components/ui-kit/controls"
 import { Icon } from "@/components/ui-kit/icon"
@@ -10,11 +11,20 @@ import { Panel } from "@/components/ui-kit/panel"
 import { capsuleButton } from "@/components/ui-kit/styles"
 import { cn } from "@/lib/utils"
 
+type ConfidenceLevel = Insight["confidence"]["value"]
+
 /** The meter fill tracks the level, so colour and number never disagree. */
-const CONFIDENCE_FILL: Record<Insight["confidence"]["value"], string> = {
+const CONFIDENCE_FILL: Record<ConfidenceLevel, string> = {
   high: "bg-teal",
   medium: "bg-sand",
   low: "bg-coral",
+}
+
+/** The level word as a chip, in the same tints the section labels use. */
+const CONFIDENCE_CHIP: Record<ConfidenceLevel, string> = {
+  high: "bg-[#e6f4f1] text-[#1a6e64]",
+  medium: "bg-[#faf1d6] text-[#7a5a0a]",
+  low: "bg-[#fdeae4] text-[#a03c22]",
 }
 
 /**
@@ -28,7 +38,7 @@ const CONFIDENCE_FILL: Record<Insight["confidence"]["value"], string> = {
  * `print` renders the same card for the PDF export: no controls, and anything
  * behind a toggle is laid out in full, because paper has no interactions.
  */
-export function InsightCard({
+function InsightCardImpl({
   insight,
   traceUrl,
   print = false,
@@ -41,6 +51,10 @@ export function InsightCard({
   const [view, setView] = React.useState<"chart" | "table">("chart")
 
   const { evidence, confidence } = insight
+  // Optional on the wire: cards stored before the breakdown existed have none.
+  const signals = confidence.signals ?? []
+  const verification = insight.verification ?? null
+  const droppedTasks = insight.droppedTasks ?? []
   const chart = evidence?.chart ?? null
   const segmentTable = evidence?.segmentTable ?? null
   // On screen one of the two is behind a toggle; on paper both are shown.
@@ -172,9 +186,61 @@ export function InsightCard({
 
       <div className="print-block mt-[13px] flex flex-wrap items-center gap-[9px]">
         <span className="text-[11px] text-zinc-500">Confidence</span>
-        <ConfidenceMeter value={confidence.value} score={confidence.score} />
+        <span
+          className={cn(
+            "rounded-full px-[7px] py-[2px] text-[9.5px] font-bold tracking-[.06em] uppercase",
+            CONFIDENCE_CHIP[confidence.value]
+          )}
+        >
+          {confidence.value}
+        </span>
+        <ConfidenceMeter
+          value={confidence.value}
+          score={confidence.score}
+          signals={print ? [] : signals}
+        />
+        {verification && verification.agreed === null ? (
+          <span
+            title={verification.note}
+            className="rounded-full border border-dashed border-zinc-300 px-[7px] py-[2px] text-[10px] text-zinc-500"
+          >
+            not independently verified
+          </span>
+        ) : null}
         <span className="min-w-0 flex-1 text-[11px] text-zinc-400">{confidence.note}</span>
       </div>
+
+      {/* Paper has no hover, so the breakdown behind the tooltip is laid out in full. */}
+      {print && signals.length > 0 ? (
+        <ul className="print-block mt-1.5 flex flex-col gap-[3px] pl-[76px]">
+          {signals.map((signal) => (
+            <li key={signal.name} className="text-[10.5px] leading-[1.5] text-zinc-500">
+              <SignalLine signal={signal} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {/* The auditor's best argument that the figure is wrong — shown even when
+          the numbers agreed; coral when it says the definition was not followed. */}
+      {verification?.concern ? (
+        <div
+          className={cn(
+            "print-block mt-2 text-[11.5px] leading-[1.55]",
+            verification.definitionOk === false ? "text-coral" : "text-zinc-600"
+          )}
+        >
+          <span className="font-[650]">Auditor's concern — </span>
+          {verification.concern}
+        </div>
+      ) : null}
+
+      {droppedTasks.length > 0 ? (
+        <div className="print-block mt-1.5 text-[11px] leading-[1.55] text-zinc-400">
+          {droppedTasks.length} planned task{droppedTasks.length === 1 ? "" : "s"} returned no
+          data: {droppedTasks.join("; ")}
+        </div>
+      ) : null}
 
       <div className="mt-3.5 flex flex-wrap items-center gap-[7px] border-t border-zinc-100 pt-3">
         <span className="inline-flex items-center gap-[5px] rounded-full border border-zinc-200 px-[9px] py-[3px] text-[10.5px] text-zinc-600">
@@ -244,6 +310,14 @@ export function InsightCard({
   )
 }
 
+/**
+ * Memoised: a streaming answer pushes an SSE step event several times a second,
+ * and without this every card in the thread — and every chart under it — re-renders
+ * on each one. Props are stable (the parent holds insights in state), so a shallow
+ * compare is enough.
+ */
+export const InsightCard = React.memo(InsightCardImpl)
+
 /** A labelled paragraph — the tag carries the section, the text carries the claim. */
 function Section({
   label,
@@ -270,17 +344,49 @@ function Section({
   )
 }
 
-/** Confidence as a bar plus the score, so two "medium" answers can be told apart. */
+/** `+0.05` / `−0.12` / `±0.00` — the sign is the whole point of a waterfall. */
+function formatDelta(delta: number): string {
+  if (delta === 0) return "±0.00"
+  return `${delta > 0 ? "+" : "−"}${Math.abs(delta).toFixed(2)}`
+}
+
+/** One signal as `name · ±delta · detail`, the way API.md documents it. */
+function SignalLine({ signal }: { signal: ConfidenceSignal }) {
+  return (
+    <>
+      <span className="font-mono">{signal.name}</span>
+      <span className="mx-1 opacity-60">·</span>
+      <span
+        className={cn(
+          "font-mono font-[650]",
+          signal.delta < 0 ? "text-coral" : signal.delta > 0 ? "text-teal" : ""
+        )}
+      >
+        {formatDelta(signal.delta)}
+      </span>
+      <span className="mx-1 opacity-60">·</span>
+      {signal.detail}
+    </>
+  )
+}
+
+/**
+ * Confidence as a bar plus the score, so two "medium" answers can be told apart.
+ * Hovering shows the signals whose deltas sum to the score — the breakdown that
+ * lets a PM see which refinement of the question would raise it.
+ */
 function ConfidenceMeter({
   value,
   score,
+  signals,
 }: {
-  value: Insight["confidence"]["value"]
+  value: ConfidenceLevel
   score: number
+  signals: ConfidenceSignal[]
 }) {
   const pct = Math.round(Math.min(1, Math.max(0, score)) * 100)
-  return (
-    <span className="flex items-center gap-2" title={`${value} confidence`}>
+  const meter = (
+    <span className="flex items-center gap-2" title={signals.length ? undefined : `${value} confidence`}>
       <span className="h-[6px] w-[92px] overflow-hidden rounded-full bg-zinc-200">
         <span
           className={cn("block h-full rounded-full", CONFIDENCE_FILL[value])}
@@ -291,5 +397,27 @@ function ConfidenceMeter({
         {score.toFixed(2)}
       </span>
     </span>
+  )
+  if (signals.length === 0) return meter
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="cursor-help">{meter}</span>
+      </TooltipTrigger>
+      <TooltipContent
+        side="top"
+        align="start"
+        className="flex max-w-sm flex-col items-start gap-1 px-3 py-2 text-[11px] leading-[1.5]"
+      >
+        <span className="text-[9.5px] font-bold tracking-[.06em] opacity-60">
+          HOW THE SCORE WAS BUILT · 1 + Σ = {score.toFixed(2)}
+        </span>
+        {signals.map((signal) => (
+          <span key={signal.name} className="block">
+            <SignalLine signal={signal} />
+          </span>
+        ))}
+      </TooltipContent>
+    </Tooltip>
   )
 }

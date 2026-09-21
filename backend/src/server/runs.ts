@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { runInstrumentation } from "../agents/instrumentation.js";
+import { invalidateSchemaCache } from "../agents/analytics.js";
 import { updateContext } from "../agents/context.js";
 import { runOptimization } from "../agents/optimizer.js";
 import { findSuggestion } from "../observe/advisor.js";
@@ -25,6 +26,7 @@ import {
 } from "../core/tracing.js";
 import { command, insert, query } from "../core/db.js";
 import { withQueryContext } from "../core/query-context.js";
+import { runPhaseOf } from "./phases.js";
 
 /** The optimizer needs real column names and types; guessing them is how you get
  *  DDL that references a column that does not exist. */
@@ -39,29 +41,21 @@ async function describeTable(table: string | null): Promise<string> {
   return `Table ${table}:\n${rows.map((r) => `  ${r.name} ${r.type}`).join("\n")}`;
 }
 
-/** "optimization" gates an advisor-suggested schema change; its proposal shape is
- *  OptimizationProposal, not DdlProposal — the UI must branch on the gate name. */
-/**
- * Step names are implementation detail; the UI wants phases. Several steps and all
- * their LLM progress ticks collapse into one line, so "Executing on ClickHouse"
- * shows table results only and never a stream of thinking ticks.
- */
-const RUN_PHASES: Array<[RegExp, string]> = [
-  [/^profile$/, "Profiling the events"],
-  [/^(context_load|schema_reconciliation)$/, "Reading the knowledge store"],
-  [/^(ddl_generation_attempt|schema_design_attempt|schema_design)/, "Designing the schema"],
-  [/^dry_run/, "Validating the schema"],
-  [/^(approval_attempt|update_approval_attempt)/, "Waiting for your approval"],
-  [/^ddl_execution_attempt/, "Creating tables and loading data"],
-  [/^(context_update|update_generation_attempt)/, "Updating the knowledge store"],
-  [/^(instrumentation|optimization)$/, ""],
-];
+// Step names are implementation detail; the UI wants phases. The table lives in
+// ./phases.ts so it can be unit-tested without a database or a .env.
+export { runPhaseOf };
 
-export function runPhaseOf(stepName: string): string {
-  for (const [re, label] of RUN_PHASES) if (re.test(stepName)) return label;
-  return "";
+/** One log per swallowed-error site: a recurring failure should be visible
+ *  once, not silent and not once per event. */
+const warnedOnce = new Set<string>();
+function warnOnce(site: string, error: unknown): void {
+  if (warnedOnce.has(site)) return;
+  warnedOnce.add(site);
+  console.warn(`[runs] ${site} failed:`, error instanceof Error ? error.message : error);
 }
 
+/** "optimization" gates an advisor-suggested schema change; its proposal shape is
+ *  OptimizationProposal, not DdlProposal — the UI must branch on the gate name. */
 export type Gate = "ddl" | "context" | "optimization";
 export type RunKind = "spec" | "optimization";
 
@@ -102,6 +96,48 @@ export interface RunRecord {
   durationMs: number | null;
 }
 
+/** The fields eviction reasons about — a seam so the policy is unit-testable
+ *  without standing up a RunManager. */
+export interface EvictableRun {
+  id: string;
+  status: RunRecord["status"];
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+/**
+ * Which finished runs may be dropped to bring the map back under `cap`.
+ *
+ * Two rules the naive "oldest created first" version got wrong: a run that
+ * finished within `graceMs` is never evicted — with 41 runs posted at once, the
+ * FIRST one to complete was also the oldest by createdAt, so completing a run
+ * deleted it and /api/runs/:id 404'd at the exact moment its client asked for
+ * the result — and ordering is by when a run FINISHED, so the runs still worth
+ * reading are the ones that survive. Staying briefly over the cap is cheaper
+ * than losing a result somebody is waiting for.
+ */
+export function evictableRuns<T extends EvictableRun>(
+  runs: readonly T[],
+  cap: number,
+  nowMs: number,
+  graceMs: number,
+): T[] {
+  const excess = runs.length - cap;
+  if (excess <= 0) return [];
+  const finishedMs = (run: T): number => {
+    const finished = run.finishedAt ? Date.parse(run.finishedAt) : Number.NaN;
+    if (Number.isFinite(finished)) return finished;
+    const created = Date.parse(run.createdAt);
+    return Number.isFinite(created) ? created : 0;
+  };
+  const cutoff = nowMs - Math.max(0, graceMs);
+  return runs
+    .filter((run) => run.status === "succeeded" || run.status === "failed")
+    .filter((run) => finishedMs(run) <= cutoff)
+    .sort((a, b) => finishedMs(a) - finishedMs(b) || a.createdAt.localeCompare(b.createdAt))
+    .slice(0, excess);
+}
+
 const UPLOADS = fileURLToPath(new URL("../../uploads", import.meta.url));
 
 export class RunManager {
@@ -122,6 +158,16 @@ export class RunManager {
 
   private static readonly FLUSH_MS = 250;
   private static readonly FLUSH_ROWS = 50;
+  /**
+   * Runs kept in memory; older finished ones are read back from runs_log via
+   * /api/history. Raised from 40: a run holds its event list, so ~100 runs is a
+   * few MB, and 40 was small enough that a burst of parallel POSTs could push a
+   * run out of the map while its client was still polling /api/runs/:id.
+   */
+  private static readonly MAX_RETAINED_RUNS = 100;
+  /** A run that finished this recently is never evicted, whatever the cap says:
+   *  its client is still reading it. */
+  private static readonly EVICT_GRACE_MS = 60_000;
 
   /** Queue one insert of everything buffered so far. Never throws. */
   private flush(): void {
@@ -132,7 +178,9 @@ export class RunManager {
     if (this.buffer.length === 0) return;
     const batch = this.buffer;
     this.buffer = [];
-    this.writes = this.writes.then(() => insert("runs_log", batch).catch(() => {}));
+    this.writes = this.writes.then(() =>
+      insert("runs_log", batch).catch((error: unknown) => warnOnce("runs_log insert", error)),
+    );
   }
 
   async init(): Promise<void> {
@@ -195,7 +243,7 @@ export class RunManager {
    * process exits so a restart cannot truncate a run's event history. */
   async drain(): Promise<void> {
     this.flush();
-    await this.writes.catch(() => {});
+    await this.writes.catch((error: unknown) => warnOnce("runs_log drain", error));
   }
 
   /** Create a run from an existing spec dir, uploaded content, OR an advisor
@@ -333,7 +381,7 @@ export class RunManager {
         status,
         events: run.events.length,
         duration_ms: run.durationMs ?? 0,
-      }]).catch(() => {});
+      }]).catch((error: unknown) => warnOnce("run_summary insert", error));
     }
   }
 
@@ -360,10 +408,34 @@ export class RunManager {
     if (this.active || this.queue.length === 0) return;
     const run = this.queue.shift()!;
     this.active = run;
-    void this.execute(run).finally(() => {
-      this.active = null;
-      this.pump();
-    });
+    // execute() reports its own failures; this catch is the backstop that keeps
+    // an unforeseen rejection from becoming an unhandled rejection, which Node
+    // turns into process exit — taking every other queued run with it.
+    void this.execute(run)
+      .catch((error: unknown) => warnOnce("run execution", error))
+      .finally(() => {
+        this.active = null;
+        this.evictFinished();
+        this.pump();
+      });
+  }
+
+  /**
+   * Keep the in-memory run map bounded. Finished runs are only a convenience —
+   * `/api/history` replays them from runs_log, which is the durable record — so
+   * the oldest terminal ones are dropped once the map outgrows the cap. Queued,
+   * running and gated runs are never evicted.
+   */
+  private evictFinished(): void {
+    for (const run of evictableRuns(
+      [...this.runs.values()],
+      RunManager.MAX_RETAINED_RUNS,
+      Date.now(),
+      RunManager.EVICT_GRACE_MS,
+    )) {
+      run.subscribers.clear();
+      this.runs.delete(run.id);
+    }
   }
 
   /**
@@ -397,6 +469,10 @@ export class RunManager {
         },
         { kind: "optimization", runId: run.id },
       );
+      // The optimizer just ALTERed the database — column types, TTLs, new
+      // materialized views. The analytics agent memoises system.columns, so a
+      // stale schema would be handed to the SQL writer for the next 5 minutes.
+      invalidateSchemaCache();
       run.finishedAt = new Date().toISOString();
       run.durationMs = Date.now() - startedMs;
       this.status(run, "succeeded", {
@@ -417,16 +493,39 @@ export class RunManager {
   }
 
   private async execute(run: RunRecord): Promise<void> {
-    const trace = startRun(
-      `pipeline:${run.spec}`,
-      { spec: run.spec, runId: run.id },
-      { sessionId: run.spec },
-    );
-    run.traceUrl = traceUrl(trace);
-    run.startedAt = new Date().toISOString();
     const startedMs = Date.now();
-    setRunSink((e) => this.push(run, e));
-    this.status(run, "running", { traceUrl: run.traceUrl });
+
+    // Starting the trace and announcing the run used to sit OUTSIDE the
+    // try/catch: a Langfuse client that failed to construct rejected the
+    // promise `pump()` only attached a `.finally()` to, and an unhandled
+    // rejection exits the process. A run that cannot start is a failed run.
+    let trace: ReturnType<typeof startRun>;
+    try {
+      trace = startRun(
+        `pipeline:${run.spec}`,
+        { spec: run.spec, runId: run.id },
+        { sessionId: run.spec },
+      );
+      run.traceUrl = traceUrl(trace);
+      run.startedAt = new Date().toISOString();
+      setRunSink((e) => this.push(run, e));
+      this.status(run, "running", { traceUrl: run.traceUrl });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRunSink(null);
+      run.startedAt ??= new Date().toISOString();
+      run.finishedAt = new Date().toISOString();
+      run.durationMs = Date.now() - startedMs;
+      run.status = "failed";
+      warnOnce("run start", error);
+      try {
+        this.status(run, "failed", { durationMs: run.durationMs, error: message });
+      } catch {
+        /* the event bus is gone too — the status field above is the truth */
+      }
+      await this.drain();
+      return;
+    }
 
     if (run.kind === "optimization") {
       await this.executeOptimization(run, trace);
@@ -444,7 +543,12 @@ export class RunManager {
             trace,
             approve: async (proposal) => this.waitForApproval(run, "ddl", proposal),
           }),
-      );
+      ).finally(() => {
+        // In a finally, not on the success path: a run that failed midway may
+        // still have created tables before it rolled back, and the analytics
+        // agent's memoised system.columns must not keep serving the old shape.
+        invalidateSchemaCache();
+      });
 
       const specText = await readFile(path.join(run.specDir, "spec.md"), "utf-8");
       const ctx = await withQueryContext({ agent: "context", runId: run.id }, () =>

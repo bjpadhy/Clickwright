@@ -10,15 +10,19 @@
  */
 import { Router } from "express";
 import { withQueryContext } from "../core/query-context.js";
+import { withoutRunSink } from "../core/tracing.js";
 import { queryLogSource } from "./query-log.js";
 import {
   WINDOW_HOURS,
   collectLatency,
   collectPartsHealth,
+  collectQueryLogWindow,
   collectRecentQueries,
   collectSlowestQueries,
   collectStats,
   collectStorage,
+  emptyQueryLogWindow,
+  queryLogScanFailed,
   tableOrigins,
 } from "./db-health.js";
 import { changelogToMarkdown, getChangelog } from "./changelog.js";
@@ -47,28 +51,48 @@ export function observeRouter(manager: RunManager): Router {
     try {
       const payload = await withQueryContext({ agent: "observe" }, async () => {
         const source = await queryLogSource();
-        const baseTables = await tableOrigins();
         const nowMs = Date.now();
 
-        const [stats, latency, storage, partsHealth, slowest, recent] = await Promise.all([
-          safely("stats", null, () => collectStats(baseTables)),
-          safely("latency", [], () => collectLatency(nowMs)),
+        // The stat cards, the latency chart and the slow-query list all come
+        // out of ONE query_log scan now (collectQueryLogWindow); storage,
+        // parts and the recent list read different system tables, so they
+        // still run alongside it.
+        const [qlog, baseTables] = await Promise.all([
+          // The fallback carries the probe result so a failed scan stays
+          // distinguishable from a deployment with no readable query_log.
+          safely("queryLogWindow", emptyQueryLogWindow(source.available), () =>
+            collectQueryLogWindow(),
+          ),
+          tableOrigins(),
+        ]);
+
+        // The log is readable but nothing came back: the scan AND its fallback
+        // failed. Report a gap — null stats, empty series — exactly as the
+        // per-collector safely() wrappers used to. Zeros here would read as a
+        // measured idle service. A deployment with no query_log at all is NOT
+        // this case: there the query stats are honestly zero and the table
+        // counts in `stats` (read from system.tables) must still render.
+        const unmeasured = queryLogScanFailed(qlog);
+
+        const [stats, storage, partsHealth, recent] = await Promise.all([
+          unmeasured ? null : safely("stats", null, () => collectStats(baseTables, qlog)),
           safely("storage", { tables: [], totalBytes: 0 }, () => collectStorage(baseTables)),
           safely("partsHealth", null, () => collectPartsHealth()),
-          safely("slowestQueries", [], () => collectSlowestQueries()),
           safely("recentQueries", [], () => collectRecentQueries()),
         ]);
 
         return {
           windowHours: WINDOW_HOURS,
-          queryLogAvailable: source.available,
+          // The scan outcome, not just the cached probe: a probe that succeeded
+          // hours ago says nothing about whether this page load measured anything.
+          queryLogAvailable: source.available && !unmeasured,
           queryLogClustered: source.clustered,
           stats,
-          latencyP95ByHour: latency,
+          latencyP95ByHour: unmeasured ? [] : collectLatency(nowMs, qlog),
           storageByTable: storage.tables,
           storageTotalBytes: storage.totalBytes,
           partsHealth,
-          slowestQueries: slowest,
+          slowestQueries: unmeasured ? [] : collectSlowestQueries(qlog),
           recentQueries: recent,
         };
       });
@@ -81,9 +105,14 @@ export function observeRouter(manager: RunManager): Router {
   router.get("/changelog", async (req, res) => {
     try {
       const kind = req.query["kind"];
-      const entries = await withQueryContext({ agent: "observe" }, () => getChangelog());
+      const page = await withQueryContext({ agent: "observe" }, () => getChangelog());
       const filtered =
-        kind === "table" || kind === "context" ? entries.filter((e) => e.kind === kind) : entries;
+        kind === "table" || kind === "context"
+          ? page.entries.filter((e) => e.kind === kind)
+          : page.entries;
+      // The body stays a plain array (that is what the webapp parses); the
+      // "this is not the whole history" signal rides on a header.
+      if (page.truncated) res.setHeader("X-Changelog-Truncated", "true");
       res.json(filtered);
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
@@ -92,13 +121,13 @@ export function observeRouter(manager: RunManager): Router {
 
   router.get("/changelog/export", async (_req, res) => {
     try {
-      const entries = await withQueryContext({ agent: "observe" }, () => getChangelog());
+      const page = await withQueryContext({ agent: "observe" }, () => getChangelog());
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader(
         "Content-Disposition",
         'attachment; filename="clickwright-changelog.md"',
       );
-      res.send(changelogToMarkdown(entries));
+      res.send(changelogToMarkdown(page.entries, { truncated: page.truncated }));
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
     }
@@ -126,7 +155,10 @@ export function observeRouter(manager: RunManager): Router {
     if (scanning) return res.status(409).json({ error: "a scan is already running" });
     scanning = true;
     lastError = null;
-    void runScan()
+    // withoutRunSink: a scan is background work, not part of any run. Without
+    // it the scan's steps leaked into whatever instrumentation run was live —
+    // both onto its SSE stream and into runs_log under its run_id.
+    void withoutRunSink(() => runScan())
       .then((result) => {
         if (result.status === "failed") lastError = result.error ?? "scan failed";
       })

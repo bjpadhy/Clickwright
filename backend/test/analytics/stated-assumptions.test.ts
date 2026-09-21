@@ -64,3 +64,41 @@ test("it is order-preserving and pure", () => {
   assert.deepEqual(once, unstatedAssumptions("q", input));
   assert.deepEqual(once, input);
 });
+
+// ── a named metric pins its own denominator and filters ────────────
+
+const CONVERSION_DEF =
+  "**Standard checkout conversion rate** = `uniqExact(application_id)` in `purchase_completed` ÷ " +
+  "`uniqExact(application_id)` in `pay_now_clicked`, both with `convention:data_hygiene` filters " +
+  "applied (`duplicate_id IS NULL` and `is_back_filled != 1`).";
+
+test("a metric's own definition pins its denominator and filters", () => {
+  const kept = unstatedAssumptions(
+    "What is the standard checkout conversion rate?",
+    [
+      "denominator = pay_now_clicked applications",
+      "apply data hygiene filters (duplicate_id IS NULL, is_back_filled != 1)",
+      "all time",
+    ],
+    [CONVERSION_DEF],
+  );
+  // the window is genuinely open; the other two are fixed by the definition
+  assert.deepEqual(kept, ["all time"]);
+});
+
+test("without the definition the same assumptions are still charged", () => {
+  const assumptions = ["denominator = pay_now_clicked applications", "all time"];
+  assert.deepEqual(
+    unstatedAssumptions("What is the standard checkout conversion rate?", assumptions),
+    assumptions,
+  );
+});
+
+test("an unrelated definition does not excuse an assumption", () => {
+  const kept = unstatedAssumptions(
+    "What is the standard checkout conversion rate?",
+    ["segment: wallet users only"],
+    [CONVERSION_DEF],
+  );
+  assert.deepEqual(kept, ["segment: wallet users only"]);
+});

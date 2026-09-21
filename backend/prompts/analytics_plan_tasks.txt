@@ -61,6 +61,12 @@ against them.
    when the question pins these down — never pad it. No figures beyond the window
    itself: each assumption is reported to the user as a deduction from the answer's
    confidence, so it must name a choice, not a result.
+9b. A metric definition in the knowledge block fixes its own denominator and its
+   filters. If the question names that metric, those are PINNED, not assumed — do
+   not list them. "denominator = pay_now_clicked applications" beside a question
+   asking for the standard checkout conversion rate is not a choice anyone made;
+   the definition made it. List only what is still open after the definition is
+   applied, which is usually the time window and the segment.
 9a. Every assumption must be one the tasks ACTUALLY APPLY. If you assume a time
    window, the task's `question` has to state it so the SQL filters on it — an
    assumption of "last 90 days" beside a query with no date predicate tells the

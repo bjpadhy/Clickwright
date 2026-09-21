@@ -613,19 +613,58 @@ const ASSUMPTION_STOPWORDS = new Set([
  * question expressed differently ("SG" for "Singapore") — is KEPT and still
  * charged. This can under-drop; it cannot silently erase a real assumption.
  */
-export function unstatedAssumptions(question: string, assumptions: string[]): string[] {
-  const asked = ` ${question.toLowerCase().replace(/[^a-z0-9_.-]+/g, " ")} `;
+export function unstatedAssumptions(
+  question: string,
+  assumptions: string[],
+  /**
+   * Definitions the question INVOKED — the stored `metric:*` entries it names.
+   * A metric definition fixes its own denominator and filters, so a question
+   * that names the metric has pinned those too, however many words it took. The
+   * planner still lists them ("denominator = pay_now_clicked applications",
+   * "apply data hygiene filters") and the answer was charged 0.08 each for
+   * choices it was never free to make. Only the definitions of metrics the
+   * question actually named are passed, never the whole store, so this stays a
+   * narrow, relevant text rather than a sieve that drops real assumptions.
+   */
+  pinnedDefinitions: readonly string[] = [],
+): string[] {
+  const tokenize = (s: string): string[] =>
+    s.toLowerCase().replace(/[^a-z0-9_.-]+/g, " ").split(" ").filter(Boolean);
+
+  const stated = new Set(tokenize([question, ...pinnedDefinitions].join(" ")));
+  const statedList = [...stated];
+
+  /**
+   * Does the stated text contain this word?
+   *
+   * Exact token, or either half of a compound identifier: `applications`
+   * matches `application_id`, and `hygiene` matches `convention:data_hygiene`.
+   * Deliberately NOT a bare substring test — that would let `rate` match
+   * `separate` — and deliberately not a stemmer. Only the plural `s` is
+   * stripped, and only on a word long enough for it to mean anything.
+   */
+  const isStated = (word: string): boolean => {
+    const forms = word.endsWith("s") && word.length >= 5 ? [word, word.slice(0, -1)] : [word];
+    return forms.some(
+      (f) =>
+        stated.has(f) ||
+        statedList.some((token) => token.startsWith(`${f}_`) || token.endsWith(`_${f}`)),
+    );
+  };
+
   return assumptions.filter((a) => {
     // "denominator = pay_now_clicked applications" is a claim about the part
-    // AFTER the equals; the label is our vocabulary, not the asker's.
-    const claim = a.includes("=") ? a.slice(a.lastIndexOf("=") + 1) : a;
-    const words = claim
-      .toLowerCase()
-      .replace(/[^a-z0-9_.-]+/g, " ")
-      .split(" ")
-      .filter((w) => w.length >= 3 && !ASSUMPTION_STOPWORDS.has(w));
+    // AFTER the equals; the label is our vocabulary, not the asker's. Split on
+    // the FIRST spaced `=` only: `lastIndexOf("=")` turned
+    // "... is_back_filled != 1" into the claim " 1)", which has nothing
+    // checkable in it, so the assumption was charged whatever the question said.
+    const separator = / = /.exec(a);
+    const claim = separator?.index !== undefined ? a.slice(separator.index + 3) : a;
+    const words = tokenize(claim).filter(
+      (w) => w.length >= 3 && !ASSUMPTION_STOPWORDS.has(w),
+    );
     if (words.length === 0) return true; // nothing to check against — charge it
-    return !words.every((w) => asked.includes(` ${w} `) || asked.includes(`${w} `));
+    return !words.every(isStated);
   });
 }
 

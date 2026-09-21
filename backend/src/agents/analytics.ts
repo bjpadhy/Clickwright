@@ -2188,6 +2188,10 @@ export async function runAnalytics(
       "confidence",
       { headlineColumns, assumptions: plan.assumptions },
       async () => {
+        const metricsNamed = namedMetrics(
+          input.question,
+          bundle.entries.map((e) => e.entity),
+        );
         const confidenceInput: ConfidenceInput = {
           precisions: allPrecision,
           headlineColumns,
@@ -2209,8 +2213,16 @@ export async function runAnalytics(
           // Only what the question left open. An assumption the asker already
           // stated is not a gap, and charging for it made a fully-specified
           // question score lower than a vague one.
-          assumptions: unstatedAssumptions(input.question, plan.assumptions),
-          namedMetrics: namedMetrics(input.question, bundle.entries.map((e) => e.entity)),
+          assumptions: unstatedAssumptions(
+            input.question,
+            plan.assumptions,
+            // Naming a metric invokes its definition, which fixes the
+            // denominator and the filters — those are then pinned, not assumed.
+            bundle.entries
+              .filter((e) => metricsNamed.includes(e.entity))
+              .map((e) => e.definition_md),
+          ),
+          namedMetrics: metricsNamed,
         };
         return deriveConfidence(confidenceInput);
       },

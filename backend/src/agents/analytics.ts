@@ -2148,22 +2148,30 @@ export async function runAnalytics(
     // the intervals rather than nothing at all.
     if (!narration) {
       await verificationPromise;
-      const uncitedList = uncitedAtEnd.length > 0 ? uncitedAtEnd.join(", ") : "none recorded";
+      // Say which failure actually happened. Reporting a rate-limited provider
+      // as "no narration passed the citation check" is the same class of lie
+      // this whole pass exists to remove: the narration never ran at all.
+      const citationFailed = uncitedAtEnd.length > 0;
+      const why = citationFailed
+        ? `Every number in an answer has to appear in that answer's own query results. ` +
+          `Each attempt carried a figure that did not: ${uncitedAtEnd.join(", ")}. ` +
+          `The most common cause is a number quoted from an earlier turn of this conversation, which measured a different window or population.`
+        : `The model could not be reached to write it: ${feedback.slice(0, 200)}`;
       return {
         headline: "The queries ran, but the summary could not be written.",
         whatsHappening: `${kept.length} quer${kept.length === 1 ? "y" : "ies"} executed and returned rows — the evidence below is real and is what the SQL produced. Only the prose around it failed.`,
-        whyItHappens:
-          `Every number in an answer has to appear in that answer's own query results. ` +
-          `Three attempts each carried a figure that did not: ${uncitedList}. ` +
-          `The most common cause is a number quoted from an earlier turn of this conversation, which measured a different window or population.`,
+        whyItHappens: why,
         evidence: { title: "", chart: null, segmentTable: null },
         groundedInContext: "",
-        recommendedAction:
-          "Ask the question again on its own, without relying on the previous turn — or read the queries and rows below directly.",
+        recommendedAction: citationFailed
+          ? "Ask the question again on its own, without relying on the previous turn — or read the queries and rows below directly."
+          : "Ask again in a moment — the queries and rows below are already correct and will be reused.",
         confidence: {
           value: "low",
           score: 0.05,
-          note: "no narration passed the citation check",
+          note: citationFailed
+            ? "no narration passed the citation check"
+            : "the answer could not be written — see below",
           signals: [],
         },
         precision,

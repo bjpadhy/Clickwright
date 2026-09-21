@@ -102,3 +102,7 @@ docker compose up -d --build   # http://localhost:8787
 | `GEMINI_MODEL` | No | Default `gemini-3.1-flash-lite`. The newest Gemini models can have very low free-tier daily caps (20/day on `gemini-3.8-flash`, enough for one question), so this may need changing |
 | `ANTHROPIC_API_KEY` | Yes* | Anthropic API key (*one model credential is required: Gemini, this, or Claude Code OAuth) |
 | `LLM_PROVIDER` | No | Force a backend: `gemini` \| `anthropic` \| `anthropic-oauth` |
+
+## Confidence
+
+- [docs/CONFIDENCE_WALKTHROUGH.md](docs/CONFIDENCE_WALKTHROUGH.md) — what the confidence score measures, walked through four real questions whose score moves with the evidence

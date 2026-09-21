@@ -270,7 +270,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                   setMessages(history)
                   // Keyed against the agent turn it explains. A reload drops it
                   // — chat step events are not stored server-side.
-                  setStepLog((log) => ({ ...log, [`${convId}#${history.length - 1}`]: events }))
+                  // A copy: `events` keeps being appended to by this turn's
+                  // stream, and state that mutates behind React's back renders
+                  // stale — or changes with no re-render at all.
+                  setStepLog((log) => ({
+                    ...log,
+                    [`${convId}#${history.length - 1}`]: events.slice(),
+                  }))
                 })
                 .catch(() => {
                   // Re-read failed; fall back to what this turn already holds.
@@ -281,7 +287,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     { role: "user", ts: new Date().toISOString(), text },
                     { role: "agent", ts: new Date().toISOString(), insight, traceUrl },
                   ])
-                  setStepLog((log) => ({ ...log, [`${convId}#${index}`]: events }))
+                  setStepLog((log) => ({ ...log, [`${convId}#${index}`]: events.slice() }))
                 })
             },
             onFailed: (error) => {

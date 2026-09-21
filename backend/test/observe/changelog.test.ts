@@ -187,3 +187,34 @@ test("falls back to specDir for rows written before the spec column existed", ()
   const entries = buildChangelog([], legacy);
   assert.equal(entries.find((e) => e.kind === "table")?.spec, "02_group_family");
 });
+
+// ── truncated history ────────────────────────────────────────────
+
+test("version labels keep their number when older batches roll off", () => {
+  // The same two batches read with 7 earlier batches already written: the
+  // oldest retained batch must stay v1.7, not rename itself v1.0.
+  const entries = buildChangelog(contextRows, [], { versionOffset: 7 });
+  assert.deepEqual(
+    entries.map((e) => e.contextVersion),
+    ["v1.8", "v1.7"],
+  );
+});
+
+test("a zero offset numbers batches exactly as an untruncated read did", () => {
+  const entries = buildChangelog(contextRows, [], { versionOffset: 0 });
+  assert.deepEqual(
+    entries.map((e) => e.contextVersion),
+    buildChangelog(contextRows, []).map((e) => e.contextVersion),
+  );
+});
+
+test("the export header says so when history is cut, and does not otherwise", () => {
+  const entries = buildChangelog(contextRows, runRows);
+  const full = changelogToMarkdown(entries);
+  assert.match(full, /Every schema change and context update/);
+  assert.doesNotMatch(full, /NOT included/);
+
+  const cut = changelogToMarkdown(entries, { truncated: true });
+  assert.doesNotMatch(cut, /Every schema change and context update/);
+  assert.match(cut, /NOT included in this export/);
+});

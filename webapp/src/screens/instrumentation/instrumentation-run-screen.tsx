@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { MonoChip, StatusPill } from "@/components/ui-kit/chips"
 import { Icon, Spinner } from "@/components/ui-kit/icon"
-import { Panel, PanelBody, PanelHeader, Screen, ScreenHeader } from "@/components/ui-kit/panel"
+import { Panel, PanelBody, PanelHeader } from "@/components/ui-kit/panel"
 import {
   outlineButtonMd,
   outlineButtonSm,
@@ -16,7 +16,6 @@ import {
 import { useChat } from "@/state/chat"
 import { useConsole } from "@/state/console"
 import { useInstrumentation } from "@/state/instrumentation"
-import { InstrumentationTabs } from "./instrumentation-tabs"
 import {
   BackendUnreachable,
   ContextProposalBody,
@@ -85,295 +84,288 @@ export function InstrumentationRunScreen() {
   const executing = model.phases.execute === "active"
   const showExecution = model.execLog.length > 0 || executing
 
+  // `Screen`, `ScreenHeader` and the tabs live in the non-lazy wrapper
+  // (`instrumentation-run.tsx`) so they stay on screen while this chunk loads.
   return (
-    <Screen label="Instrumentation">
-      <ScreenHeader
-        title="Instrumentation"
-        subtitle="Feature spec in → human-approved schema live on ClickHouse"
-      >
-        <InstrumentationTabs />
-      </ScreenHeader>
+    <div ref={scrollRef} className="scroll-y flex-1 px-6 pt-[22px] pb-12">
+      <div className="mx-auto flex max-w-[860px] flex-col gap-[14px]">
+        {!runId ? <SpecInput /> : null}
 
-      <div ref={scrollRef} className="scroll-y flex-1 px-6 pt-[22px] pb-12">
-        <div className="mx-auto flex max-w-[860px] flex-col gap-[14px]">
-          {!runId ? <SpecInput /> : null}
+        {runId ? (
+          <>
+            {offline ? <BackendUnreachable error={offline} /> : null}
 
-          {runId ? (
-            <>
-              {offline ? <BackendUnreachable error={offline} /> : null}
+            <Panel className="px-5 pt-4 pb-3">
+              <div className="flex flex-wrap items-center gap-2 pb-3.5">
+                <MonoChip icon="ti-file-text" className="border-transparent bg-zinc-100">
+                  {run?.spec ?? runId}
+                </MonoChip>
+                {status ? <RunStatusPill status={status} /> : null}
+                <span className="font-mono text-[11px] text-zinc-400">{runId}</span>
+                <div className="flex-1" />
+                {busy && elapsed ? (
+                  <span className="inline-flex items-center gap-1.5 font-mono text-[11px] text-zinc-500">
+                    <Icon name="ti-clock" size={12} />
+                    {elapsed}
+                  </span>
+                ) : null}
+                {model.traceUrl ? <TraceLink url={model.traceUrl} /> : null}
+              </div>
+              <PipelineSteps phases={model.phases} steps={model.steps} />
+            </Panel>
 
-              <Panel className="px-5 pt-4 pb-3">
-                <div className="flex flex-wrap items-center gap-2 pb-3.5">
-                  <MonoChip icon="ti-file-text" className="border-transparent bg-zinc-100">
-                    {run?.spec ?? runId}
-                  </MonoChip>
-                  {status ? <RunStatusPill status={status} /> : null}
-                  <span className="font-mono text-[11px] text-zinc-400">{runId}</span>
-                  <div className="flex-1" />
-                  {busy && elapsed ? (
-                    <span className="inline-flex items-center gap-1.5 font-mono text-[11px] text-zinc-500">
-                      <Icon name="ti-clock" size={12} />
-                      {elapsed}
-                    </span>
-                  ) : null}
-                  {model.traceUrl ? <TraceLink url={model.traceUrl} /> : null}
+            {status === "queued" ? (
+              <Panel className="animate-fade-up flex-row items-center gap-[11px] px-4 py-3.5">
+                <Spinner size={16} className="text-zinc-500" />
+                <div className="text-[12.5px] text-zinc-700">
+                  Waiting behind{" "}
+                  <b>
+                    {queuedBehind} run{queuedBehind === 1 ? "" : "s"}
+                  </b>{" "}
+                  — runs execute one at a time so every schema change is an atomic
+                  read-modify-write.
                 </div>
-                <PipelineSteps phases={model.phases} steps={model.steps} />
               </Panel>
+            ) : null}
 
-              {status === "queued" ? (
-                <Panel className="animate-fade-up flex-row items-center gap-[11px] px-4 py-3.5">
-                  <Spinner size={16} className="text-zinc-500" />
-                  <div className="text-[12.5px] text-zinc-700">
-                    Waiting behind{" "}
-                    <b>
-                      {queuedBehind} run{queuedBehind === 1 ? "" : "s"}
-                    </b>{" "}
-                    — runs execute one at a time so every schema change is an atomic
-                    read-modify-write.
+            <Panel>
+              <PanelHeader>
+                <Icon name="ti-wand" size={15} className="text-zinc-600" />
+                <span className="text-[13px] font-semibold">Agent pipeline</span>
+                {health ? (
+                  <span className="rounded-md bg-zinc-100 px-[7px] py-0.5 font-mono text-[10.5px] text-zinc-500">
+                    {health.model}
+                  </span>
+                ) : null}
+                <div className="flex-1" />
+                {busy ? (
+                  <span className="text-[11px] text-zinc-400">
+                    {streaming ? "live" : "reconnecting…"}
+                  </span>
+                ) : null}
+              </PanelHeader>
+              <PanelBody className="flex flex-col gap-2">
+                <StepTimeline steps={model.steps} />
+                {/* A hint, not a progress indicator — the running step already
+                    spins, so this one stays still. */}
+                {busy && !model.pendingGate ? (
+                  <div className="flex items-center gap-[9px] pt-1 text-zinc-400">
+                    <Icon name="ti-clock-pause" size={14} />
+                    <span className="text-[12.5px]">
+                      generation steps take 1–3 minutes with no intermediate output
+                    </span>
                   </div>
-                </Panel>
-              ) : null}
+                ) : null}
+              </PanelBody>
+            </Panel>
 
-              <Panel>
+            {model.ddlProposal ? (
+              <DdlProposalPanel
+                proposal={model.ddlProposal}
+                revision={model.proposals.ddl}
+              >
+                {model.pendingGate === "ddl" ? (
+                  <ApprovalGate
+                    gate="ddl"
+                    title="Human approval required"
+                    detail={
+                      <>
+                        The agent will execute{" "}
+                        <b>
+                          {model.ddlProposal.tables.length} statement
+                          {model.ddlProposal.tables.length === 1 ? "" : "s"}
+                        </b>{" "}
+                        on{" "}
+                        <span className="font-mono text-[11.5px]">
+                          {health?.database ?? "ClickHouse"}
+                        </span>
+                        . Approving executes the DDL byte-for-byte; requesting changes
+                        sends your note to the agent, which regenerates.
+                      </>
+                    }
+                  />
+                ) : null}
+              </DdlProposalPanel>
+            ) : null}
+
+            {model.optimizationProposal ? (
+              <OptimizationProposalPanel
+                proposal={model.optimizationProposal}
+                revision={model.proposals.optimization}
+              >
+                {model.pendingGate === "optimization" ? (
+                  <ApprovalGate
+                    gate="optimization"
+                    title="Approve the optimisation"
+                    detail={
+                      <>
+                        The agent will run{" "}
+                        <b>
+                          {model.optimizationProposal.statements.length} statement
+                          {model.optimizationProposal.statements.length === 1 ? "" : "s"}
+                        </b>{" "}
+                        on{" "}
+                        <span className="font-mono text-[11.5px]">
+                          {health?.database ?? "ClickHouse"}
+                        </span>
+                        . Approving executes them byte-for-byte; requesting changes
+                        sends your note to the agent, which redrafts.
+                      </>
+                    }
+                  />
+                ) : null}
+              </OptimizationProposalPanel>
+            ) : null}
+
+            {anyDecided && !model.pendingGate ? <ApprovalTrail /> : null}
+
+            {showExecution ? (
+              <ExecutionLog lines={model.execLog} running={executing} />
+            ) : null}
+
+            {model.contextProposal ? (
+              <Panel className="animate-fade-up">
                 <PanelHeader>
-                  <Icon name="ti-wand" size={15} className="text-zinc-600" />
-                  <span className="text-[13px] font-semibold">Agent pipeline</span>
-                  {health ? (
-                    <span className="rounded-md bg-zinc-100 px-[7px] py-0.5 font-mono text-[10.5px] text-zinc-500">
-                      {health.model}
-                    </span>
-                  ) : null}
-                  <div className="flex-1" />
-                  {busy ? (
-                    <span className="text-[11px] text-zinc-400">
-                      {streaming ? "live" : "reconnecting…"}
-                    </span>
+                  <Icon name="ti-book-2" size={15} className="text-zinc-600" />
+                  <span className="text-[13px] font-semibold">Context update</span>
+                  <StatusPill className="border-indigo-200 bg-indigo-50 text-indigo-800">
+                    auto-triggered by schema change
+                  </StatusPill>
+                  {model.proposals.context > 1 ? (
+                    <StatusPill className="border-orange-200 bg-orange-50 text-orange-800">
+                      rev {model.proposals.context}
+                    </StatusPill>
                   ) : null}
                 </PanelHeader>
-                <PanelBody className="flex flex-col gap-2">
-                  <StepTimeline steps={model.steps} />
-                  {/* A hint, not a progress indicator — the running step already
-                      spins, so this one stays still. */}
-                  {busy && !model.pendingGate ? (
-                    <div className="flex items-center gap-[9px] pt-1 text-zinc-400">
-                      <Icon name="ti-clock-pause" size={14} />
-                      <span className="text-[12.5px]">
-                        generation steps take 1–3 minutes with no intermediate output
-                      </span>
+                <PanelBody className="px-4 py-3.5">
+                  <ContextProposalBody proposal={model.contextProposal} />
+                </PanelBody>
+                {model.pendingGate === "context" ? (
+                  <ApprovalGate
+                    gate="context"
+                    title="Approve the context update"
+                    detail={
+                      <>
+                        These entries become what every agent reads next.{" "}
+                        <b>
+                          {model.contextProposal.entries.length} entr
+                          {model.contextProposal.entries.length === 1 ? "y" : "ies"}
+                        </b>{" "}
+                        will be written as a new version — nothing is overwritten.
+                      </>
+                    }
+                  />
+                ) : null}
+              </Panel>
+            ) : null}
+
+            {model.phases.context === "active" && !model.contextProposal ? (
+              <Panel className="animate-fade-up flex-row items-center gap-[9px] px-4 py-3.5">
+                <Spinner size={14} className="text-zinc-500" />
+                <span className="text-[12.5px] text-zinc-500">
+                  Diffing the context store against the new table landscape · scanning for
+                  contradictions…
+                </span>
+              </Panel>
+            ) : null}
+
+            {model.result ? (
+              <Panel className="animate-fade-up border-green-200 bg-green-50">
+                <PanelBody className="flex flex-col gap-3 px-4 py-[13px]">
+                  <div className="flex flex-wrap items-center gap-[11px]">
+                    <Icon name="ti-circle-check" size={19} className="text-green-600" />
+                    <div className="min-w-[220px] flex-1">
+                      {/* An optimization run creates no tables and writes no
+                          context — saying "no tables reported" for a change
+                          that applied cleanly reads like a failure. */}
+                      {model.result.statements.length > 0 &&
+                      model.result.tables.length === 0 ? (
+                        <>
+                          <div className="text-[13px] font-semibold text-green-900">
+                            Applied on ClickHouse — {model.result.statements.length}{" "}
+                            statement
+                            {model.result.statements.length === 1 ? "" : "s"}
+                          </div>
+                          <div className="mt-px text-[11.5px] text-green-800">
+                            {model.result.expectedEffect ??
+                              "the advisor's suggestion has been applied"}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="text-[13px] font-semibold text-green-900">
+                            Live on ClickHouse —{" "}
+                            {model.result.tables.map((table) => table.name).join(", ") ||
+                              "no tables reported"}
+                          </div>
+                          <div className="mt-px text-[11.5px] text-green-800">
+                            {model.result.contextEntries.length} context entr
+                            {model.result.contextEntries.length === 1 ? "y" : "ies"} written ·
+                            every agent reads the new version on its next run
+                          </div>
+                        </>
+                      )}
+                    </div>
+                    <Button onClick={viewReport} className={solidButtonSm}>
+                      View detailed report
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={askAboutFeature}
+                      className={`${outlineButtonSm} border-green-200 hover:border-green-200 hover:bg-zinc-50`}
+                    >
+                      <Icon name="ti-message-circle" size={14} />
+                      Ask about it
+                    </Button>
+                  </div>
+                  {model.result.tables.length > 0 ? (
+                    <div className="rounded-[9px] bg-white">
+                      <LoadedTablesTable tables={model.result.tables} />
                     </div>
                   ) : null}
+                  {model.result.contextEntries.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {model.result.contextEntries.map((entry) => (
+                        <MonoChip key={entry.entity} className="border-green-200">
+                          {entry.entity} v{entry.version}
+                        </MonoChip>
+                      ))}
+                    </div>
+                  ) : null}
+                  {/* Normally the context panel above already shows these —
+                      only surface them here if that panel isn't rendered. */}
+                  {!model.contextProposal
+                    ? model.result.contextWarnings.map((warning) => (
+                        <ContradictionCallout key={warning} text={warning} />
+                      ))
+                    : null}
                 </PanelBody>
               </Panel>
+            ) : null}
 
-              {model.ddlProposal ? (
-                <DdlProposalPanel
-                  proposal={model.ddlProposal}
-                  revision={model.proposals.ddl}
-                >
-                  {model.pendingGate === "ddl" ? (
-                    <ApprovalGate
-                      gate="ddl"
-                      title="Human approval required"
-                      detail={
-                        <>
-                          The agent will execute{" "}
-                          <b>
-                            {model.ddlProposal.tables.length} statement
-                            {model.ddlProposal.tables.length === 1 ? "" : "s"}
-                          </b>{" "}
-                          on{" "}
-                          <span className="font-mono text-[11.5px]">
-                            {health?.database ?? "ClickHouse"}
-                          </span>
-                          . Approving executes the DDL byte-for-byte; requesting changes
-                          sends your note to the agent, which regenerates.
-                        </>
-                      }
-                    />
-                  ) : null}
-                </DdlProposalPanel>
-              ) : null}
-
-              {model.optimizationProposal ? (
-                <OptimizationProposalPanel
-                  proposal={model.optimizationProposal}
-                  revision={model.proposals.optimization}
-                >
-                  {model.pendingGate === "optimization" ? (
-                    <ApprovalGate
-                      gate="optimization"
-                      title="Approve the optimisation"
-                      detail={
-                        <>
-                          The agent will run{" "}
-                          <b>
-                            {model.optimizationProposal.statements.length} statement
-                            {model.optimizationProposal.statements.length === 1 ? "" : "s"}
-                          </b>{" "}
-                          on{" "}
-                          <span className="font-mono text-[11.5px]">
-                            {health?.database ?? "ClickHouse"}
-                          </span>
-                          . Approving executes them byte-for-byte; requesting changes
-                          sends your note to the agent, which redrafts.
-                        </>
-                      }
-                    />
-                  ) : null}
-                </OptimizationProposalPanel>
-              ) : null}
-
-              {anyDecided && !model.pendingGate ? <ApprovalTrail /> : null}
-
-              {showExecution ? (
-                <ExecutionLog lines={model.execLog} running={executing} />
-              ) : null}
-
-              {model.contextProposal ? (
-                <Panel className="animate-fade-up">
-                  <PanelHeader>
-                    <Icon name="ti-book-2" size={15} className="text-zinc-600" />
-                    <span className="text-[13px] font-semibold">Context update</span>
-                    <StatusPill className="border-indigo-200 bg-indigo-50 text-indigo-800">
-                      auto-triggered by schema change
-                    </StatusPill>
-                    {model.proposals.context > 1 ? (
-                      <StatusPill className="border-orange-200 bg-orange-50 text-orange-800">
-                        rev {model.proposals.context}
-                      </StatusPill>
-                    ) : null}
-                  </PanelHeader>
-                  <PanelBody className="px-4 py-3.5">
-                    <ContextProposalBody proposal={model.contextProposal} />
-                  </PanelBody>
-                  {model.pendingGate === "context" ? (
-                    <ApprovalGate
-                      gate="context"
-                      title="Approve the context update"
-                      detail={
-                        <>
-                          These entries become what every agent reads next.{" "}
-                          <b>
-                            {model.contextProposal.entries.length} entr
-                            {model.contextProposal.entries.length === 1 ? "y" : "ies"}
-                          </b>{" "}
-                          will be written as a new version — nothing is overwritten.
-                        </>
-                      }
-                    />
-                  ) : null}
-                </Panel>
-              ) : null}
-
-              {model.phases.context === "active" && !model.contextProposal ? (
-                <Panel className="animate-fade-up flex-row items-center gap-[9px] px-4 py-3.5">
-                  <Spinner size={14} className="text-zinc-500" />
-                  <span className="text-[12.5px] text-zinc-500">
-                    Diffing the context store against the new table landscape · scanning for
-                    contradictions…
-                  </span>
-                </Panel>
-              ) : null}
-
-              {model.result ? (
-                <Panel className="animate-fade-up border-green-200 bg-green-50">
-                  <PanelBody className="flex flex-col gap-3 px-4 py-[13px]">
-                    <div className="flex flex-wrap items-center gap-[11px]">
-                      <Icon name="ti-circle-check" size={19} className="text-green-600" />
-                      <div className="min-w-[220px] flex-1">
-                        {/* An optimization run creates no tables and writes no
-                            context — saying "no tables reported" for a change
-                            that applied cleanly reads like a failure. */}
-                        {model.result.statements.length > 0 &&
-                        model.result.tables.length === 0 ? (
-                          <>
-                            <div className="text-[13px] font-semibold text-green-900">
-                              Applied on ClickHouse — {model.result.statements.length}{" "}
-                              statement
-                              {model.result.statements.length === 1 ? "" : "s"}
-                            </div>
-                            <div className="mt-px text-[11.5px] text-green-800">
-                              {model.result.expectedEffect ??
-                                "the advisor's suggestion has been applied"}
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <div className="text-[13px] font-semibold text-green-900">
-                              Live on ClickHouse —{" "}
-                              {model.result.tables.map((table) => table.name).join(", ") ||
-                                "no tables reported"}
-                            </div>
-                            <div className="mt-px text-[11.5px] text-green-800">
-                              {model.result.contextEntries.length} context entr
-                              {model.result.contextEntries.length === 1 ? "y" : "ies"} written ·
-                              every agent reads the new version on its next run
-                            </div>
-                          </>
-                        )}
-                      </div>
-                      <Button onClick={viewReport} className={solidButtonSm}>
-                        View detailed report
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={askAboutFeature}
-                        className={`${outlineButtonSm} border-green-200 hover:border-green-200 hover:bg-zinc-50`}
-                      >
-                        <Icon name="ti-message-circle" size={14} />
-                        Ask about it
-                      </Button>
+            {model.error ? (
+              <Panel className="animate-fade-up border-red-200 bg-red-50">
+                <PanelBody className="flex gap-[11px] px-4 py-3.5">
+                  <Icon
+                    name="ti-alert-triangle"
+                    size={19}
+                    className="translate-y-px text-red-600"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-[650] text-red-900">
+                      Run failed — retries exhausted
                     </div>
-                    {model.result.tables.length > 0 ? (
-                      <div className="rounded-[9px] bg-white">
-                        <LoadedTablesTable tables={model.result.tables} />
-                      </div>
-                    ) : null}
-                    {model.result.contextEntries.length > 0 ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        {model.result.contextEntries.map((entry) => (
-                          <MonoChip key={entry.entity} className="border-green-200">
-                            {entry.entity} v{entry.version}
-                          </MonoChip>
-                        ))}
-                      </div>
-                    ) : null}
-                    {/* Normally the context panel above already shows these —
-                        only surface them here if that panel isn't rendered. */}
-                    {!model.contextProposal
-                      ? model.result.contextWarnings.map((warning) => (
-                          <ContradictionCallout key={warning} text={warning} />
-                        ))
-                      : null}
-                  </PanelBody>
-                </Panel>
-              ) : null}
-
-              {model.error ? (
-                <Panel className="animate-fade-up border-red-200 bg-red-50">
-                  <PanelBody className="flex gap-[11px] px-4 py-3.5">
-                    <Icon
-                      name="ti-alert-triangle"
-                      size={19}
-                      className="translate-y-px text-red-600"
-                    />
-                    <div className="min-w-0">
-                      <div className="text-[13px] font-[650] text-red-900">
-                        Run failed — retries exhausted
-                      </div>
-                      <div className="mt-1.5 font-mono text-[11.5px] leading-[1.6] break-words whitespace-pre-wrap text-red-800">
-                        {model.error}
-                      </div>
+                    <div className="mt-1.5 font-mono text-[11.5px] leading-[1.6] break-words whitespace-pre-wrap text-red-800">
+                      {model.error}
                     </div>
-                  </PanelBody>
-                </Panel>
-              ) : null}
-            </>
-          ) : null}
-        </div>
+                  </div>
+                </PanelBody>
+              </Panel>
+            ) : null}
+          </>
+        ) : null}
       </div>
-    </Screen>
+    </div>
   )
 }
 

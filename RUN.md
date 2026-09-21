@@ -281,7 +281,7 @@ Read by `backend/src/core/env.ts` unless noted.
 | `CLICKWRIGHT_MODEL` | No | Default: `claude-sonnet-5`. Anthropic backends only |
 | `LLM_MAX_CONCURRENCY` | No | In-flight LLM calls process-wide. Default: `3` (Gemini free tier), `8` on the Claude Code path |
 | `LLM_TIMEOUT_MS` | No | Per-attempt deadline; a call that hits it is retried. Default: `240000` |
-| `LLM_REASONING_EFFORT` | No | `reasoning_effort` on the OpenAI-compatible path; only sent when set |
+| `LLM_REASONING_EFFORT` | No | `reasoning_effort` on the OpenAI-compatible path. Defaults to `low` on Gemini, where thinking is what makes the figure reproducible; `none` turns it off. Not sent on the Anthropic paths |
 | `LLM_SEED` | No | `seed` on the OpenAI-compatible path; only sent when set (Gemini 400s on unknown fields) |
 | `ANALYTICS_QUALITY_GATE` | No | Default on. `0` skips the LLM quality gate + revision pass |
 | `ANALYTICS_LLM_LOOKUP` | No | Default on. `0` uses only the deterministic term-match knowledge lookup |

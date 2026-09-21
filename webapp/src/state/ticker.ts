@@ -23,6 +23,10 @@ let nowMs = Date.now()
 function subscribe(listener: () => void): () => void {
   listeners.add(listener)
   if (timer === null) {
+    // Nothing advanced `nowMs` while no one was watching. Start from the real
+    // clock: a run started after an idle stretch would otherwise be measured
+    // against a timestamp older than its own `startedAt` and read 0ms.
+    nowMs = Date.now()
     timer = window.setInterval(() => {
       nowMs = Date.now()
       for (const notify of listeners) notify()
@@ -39,7 +43,18 @@ function subscribe(listener: () => void): () => void {
 
 // Must return a cached value, never a fresh Date.now(): React compares
 // snapshots by identity and a new value every call would re-render forever.
-const snapshot = () => nowMs
+//
+// The one exception is the first read of an idle period — no interval is
+// running, so `nowMs` can be minutes old, which is what made a just-started
+// counter render `0ms` until the next tick. Refreshing only once the value is
+// a whole tick behind keeps the snapshot stable within a render pass.
+const snapshot = () => {
+  if (timer === null) {
+    const real = Date.now()
+    if (real - nowMs >= 1000) nowMs = real
+  }
+  return nowMs
+}
 
 const NEVER = () => () => {}
 

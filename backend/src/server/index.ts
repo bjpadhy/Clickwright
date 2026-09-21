@@ -214,11 +214,24 @@ async function specFacts(): Promise<SpecFacts[]> {
     .sort();
   // Identity of the inputs, not a clock: a spec edited in place invalidates the
   // entry, and nothing else does.
+  // "missing" means the spec genuinely has no events file and is skipped, as
+  // before. Any OTHER stat failure (EACCES, a transient EMFILE during an SSE
+  // burst) is NOT absence: dropping the spec silently would make it vanish from
+  // the picker with no error anywhere. Those are logged and fall back to the
+  // last known facts for that dir.
   const stamps = await Promise.all(
     dirs.map((dir) =>
       stat(path.join(SPECS_ROOT, dir, "events.ndjson"))
         .then((st) => `${st.size}:${st.mtimeMs}`)
-        .catch(() => "missing"),
+        .catch((error: unknown) => {
+          const code = (error as NodeJS.ErrnoException | null)?.code;
+          if (code === "ENOENT" || code === "ENOTDIR") return "missing";
+          console.warn(
+            `[specs] cannot stat ${dir}/events.ndjson (${code ?? "unknown"}):`,
+            error instanceof Error ? error.message : error,
+          );
+          return `unreadable:${code ?? "unknown"}`;
+        }),
     ),
   );
   const key = dirs.map((dir, i) => `${dir}@${stamps[i]}`).join("|");
@@ -227,12 +240,20 @@ async function specFacts(): Promise<SpecFacts[]> {
   // Concurrent first calls (two tabs, a StrictMode double mount) share one parse.
   if (specCacheInFlight?.key === key) return specCacheInFlight.facts;
 
+  const lastKnown = new Map((specCache?.facts ?? []).map((f) => [f.id, f]));
+
   const facts = (async () => {
     const out: SpecFacts[] = [];
     // Serial, not Promise.all: six parallel multi-MB parses is a CPU spike on
     // the only thread serving the SSE streams.
     for (const [i, dir] of dirs.entries()) {
-      if (stamps[i] === "missing") continue;
+      const stamp = stamps[i];
+      if (stamp === "missing") continue;
+      if (stamp?.startsWith("unreadable:")) {
+        const previous = lastKnown.get(dir);
+        if (previous) out.push(previous);
+        continue;
+      }
       out.push(await readSpecFacts(dir));
     }
     specCache = { key, facts: out };

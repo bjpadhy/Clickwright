@@ -74,6 +74,11 @@ export function runPhaseOf(stepName: string): string {
  */
 export function nextTurnSeq(count: number, maxSeq: number): number {
   if (!Number.isFinite(count) || count <= 0) return 0;
-  const max = Number.isFinite(maxSeq) && maxSeq >= 0 ? Math.floor(maxSeq) : 0;
+  // A missing or nonsensical max(seq) must not collapse to slot 2 — for a
+  // conversation that already has `count` rows, seqs 0…count-1 are taken at a
+  // minimum, so 2 would very likely overwrite an existing turn. Fall back to
+  // the row count, which cannot collide.
+  const usable = Number.isFinite(maxSeq) && maxSeq >= 0;
+  const max = usable ? Math.floor(maxSeq) : Math.max(0, Math.floor(count) - 1);
   return (Math.floor(max / 2) + 1) * 2;
 }

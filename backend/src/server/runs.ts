@@ -96,6 +96,48 @@ export interface RunRecord {
   durationMs: number | null;
 }
 
+/** The fields eviction reasons about — a seam so the policy is unit-testable
+ *  without standing up a RunManager. */
+export interface EvictableRun {
+  id: string;
+  status: RunRecord["status"];
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+/**
+ * Which finished runs may be dropped to bring the map back under `cap`.
+ *
+ * Two rules the naive "oldest created first" version got wrong: a run that
+ * finished within `graceMs` is never evicted — with 41 runs posted at once, the
+ * FIRST one to complete was also the oldest by createdAt, so completing a run
+ * deleted it and /api/runs/:id 404'd at the exact moment its client asked for
+ * the result — and ordering is by when a run FINISHED, so the runs still worth
+ * reading are the ones that survive. Staying briefly over the cap is cheaper
+ * than losing a result somebody is waiting for.
+ */
+export function evictableRuns<T extends EvictableRun>(
+  runs: readonly T[],
+  cap: number,
+  nowMs: number,
+  graceMs: number,
+): T[] {
+  const excess = runs.length - cap;
+  if (excess <= 0) return [];
+  const finishedMs = (run: T): number => {
+    const finished = run.finishedAt ? Date.parse(run.finishedAt) : Number.NaN;
+    if (Number.isFinite(finished)) return finished;
+    const created = Date.parse(run.createdAt);
+    return Number.isFinite(created) ? created : 0;
+  };
+  const cutoff = nowMs - Math.max(0, graceMs);
+  return runs
+    .filter((run) => run.status === "succeeded" || run.status === "failed")
+    .filter((run) => finishedMs(run) <= cutoff)
+    .sort((a, b) => finishedMs(a) - finishedMs(b) || a.createdAt.localeCompare(b.createdAt))
+    .slice(0, excess);
+}
+
 const UPLOADS = fileURLToPath(new URL("../../uploads", import.meta.url));
 
 export class RunManager {
@@ -116,8 +158,16 @@ export class RunManager {
 
   private static readonly FLUSH_MS = 250;
   private static readonly FLUSH_ROWS = 50;
-  /** Finished runs kept in memory; older ones are read back from runs_log. */
-  private static readonly MAX_RETAINED_RUNS = 40;
+  /**
+   * Runs kept in memory; older finished ones are read back from runs_log via
+   * /api/history. Raised from 40: a run holds its event list, so ~100 runs is a
+   * few MB, and 40 was small enough that a burst of parallel POSTs could push a
+   * run out of the map while its client was still polling /api/runs/:id.
+   */
+  private static readonly MAX_RETAINED_RUNS = 100;
+  /** A run that finished this recently is never evicted, whatever the cap says:
+   *  its client is still reading it. */
+  private static readonly EVICT_GRACE_MS = 60_000;
 
   /** Queue one insert of everything buffered so far. Never throws. */
   private flush(): void {
@@ -377,12 +427,12 @@ export class RunManager {
    * running and gated runs are never evicted.
    */
   private evictFinished(): void {
-    const excess = this.runs.size - RunManager.MAX_RETAINED_RUNS;
-    if (excess <= 0) return;
-    const finished = [...this.runs.values()]
-      .filter((r) => r.status === "succeeded" || r.status === "failed")
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    for (const run of finished.slice(0, excess)) {
+    for (const run of evictableRuns(
+      [...this.runs.values()],
+      RunManager.MAX_RETAINED_RUNS,
+      Date.now(),
+      RunManager.EVICT_GRACE_MS,
+    )) {
       run.subscribers.clear();
       this.runs.delete(run.id);
     }

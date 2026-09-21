@@ -441,8 +441,29 @@ export function pickHeadline(
   headlineColumns: string[],
   verifiedColumn: string | null,
 ): Precision | null {
-  const bounded = precisions.filter(isBounded);
-  if (bounded.length === 0) return null;
+  const all = precisions.filter(isBounded);
+  if (all.length === 0) return null;
+
+  // One entry per column FIRST, keeping the largest sample. Several tasks
+  // answering one question emit the same column name at different grains — a
+  // total, a breakdown by country, a breakdown by device, all `conversion_rate`.
+  // The headline states the total, so that is the row whose interval the score
+  // must reflect; picking the widest row of the column charged a 14,026-click
+  // figure the ±6.8pp of a 198-row country slice and called a verified,
+  // fully-powered answer "medium". Conservatism across DIFFERENT metrics is
+  // still the rule below; within one metric, the best-supported row wins, and
+  // the thin rows are charged separately by the `small_segments` signal.
+  const byName = new Map<string, Bounded>();
+  for (const p of all) {
+    const prev = byName.get(p.column);
+    const better =
+      !prev ||
+      (p.n ?? 0) > (prev.n ?? 0) ||
+      ((p.n ?? 0) === (prev.n ?? 0) && p.interval.halfWidthPp > prev.interval.halfWidthPp);
+    if (better) byName.set(p.column, p);
+  }
+  const bounded = [...byName.values()];
+
   const widestFirst = (a: Bounded, b: Bounded) =>
     b.interval.halfWidthPp - a.interval.halfWidthPp || byColumn(a, b);
 

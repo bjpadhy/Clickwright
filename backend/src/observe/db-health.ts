@@ -227,7 +227,15 @@ export async function tableOrigins(): Promise<Set<string>> {
  * empty string, so `hour_ts = 0 AND shape = ''` is the totals row.
  */
 export interface QueryLogWindow {
+  /** True only when this window holds real measurements. False means nothing
+   *  was measured — either there is no readable query_log at all, or the scan
+   *  (and its fallback) failed — and the zeros below must not be reported as
+   *  measurements. */
   available: boolean;
+  /** Whether system.query_log itself is readable. Lets a caller tell "this
+   *  deployment has no query log" (the query stats are honestly absent, the
+   *  rest of the page still renders) from "the scan failed" (unmeasured). */
+  sourceAvailable: boolean;
   /** True when the single-pass query worked; false means the per-collector
    *  fallback ran, which is correct but costs the extra scans. */
   combined: boolean;
@@ -237,15 +245,27 @@ export interface QueryLogWindow {
 }
 
 /** The "no measurements" window: zeros with `available: false`, so callers
- *  report a gap instead of rendering zeros as if they were measured. */
-export function emptyQueryLogWindow(): QueryLogWindow {
+ *  report a gap instead of rendering zeros as if they were measured.
+ *  `sourceAvailable` carries whether the query_log probe itself succeeded, so
+ *  the caller can tell an absent log from a failed scan. */
+export function emptyQueryLogWindow(sourceAvailable = false): QueryLogWindow {
   return {
     available: false,
+    sourceAvailable,
     combined: false,
     stats: { queries: 0, p95Ms: 0, rowsRead: 0 },
     hours: [],
     shapes: [],
   };
+}
+
+/**
+ * The query_log is readable but this window holds no measurements: the scan and
+ * its fallback both failed. Callers must report a gap (null stats, empty series)
+ * rather than the zeros the window carries.
+ */
+export function queryLogScanFailed(window: QueryLogWindow): boolean {
+  return window.sourceAvailable && !window.available;
 }
 
 /**
@@ -297,18 +317,31 @@ export async function collectQueryLogWindow(slowest = 5): Promise<QueryLogWindow
   const limit = Math.max(1, Math.floor(slowest));
   const byWorst = (a: SlowQuery, b: SlowQuery) => b.maxMs - a.maxMs;
 
+  // The shape grouping set has one row per distinct query shape in 24h, which
+  // is unbounded — the top-N has to be applied in SQL (as the old
+  // collectSlowestQueries did with ORDER BY … LIMIT) or the server serialises
+  // every shape. `LIMIT n BY` caps each grouping set separately: the totals row
+  // is 1 and a 24h window spans at most 25 hour buckets, so only the shapes are
+  // ever cut, and the ORDER BY means the ones cut are the fastest.
+  const perGrouping = Math.max(limit, WINDOW_HOURS + 2);
+
   try {
     const rows = await query<Record<string, unknown>>(`
-      SELECT toUnixTimestamp(toStartOfHour(event_time)) AS hour_ts,
-             ${SHAPE_EXPR}                              AS shape,
+      SELECT *, hour_ts > 0 AS is_hour, shape != '' AS is_shape FROM (
+        SELECT toUnixTimestamp(toStartOfHour(event_time)) AS hour_ts,
+               ${SHAPE_EXPR}                              AS shape,
 ${WINDOW_AGGREGATES}
-      FROM ${source.expr}
-      WHERE ${queryLogFilter(WINDOW_HOURS)}
-      GROUP BY GROUPING SETS ((), (hour_ts), (shape))
+        FROM ${source.expr}
+        WHERE ${queryLogFilter(WINDOW_HOURS)}
+        GROUP BY GROUPING SETS ((), (hour_ts), (shape))
+      )
+      ORDER BY max_ms DESC
+      LIMIT ${perGrouping} BY is_hour, is_shape
     `);
 
     const window: QueryLogWindow = {
       available: true,
+      sourceAvailable: true,
       combined: true,
       stats: { queries: 0, p95Ms: 0, rowsRead: 0 },
       hours: [],
@@ -368,6 +401,7 @@ ${WINDOW_AGGREGATES}
     const row = totals[0];
     return {
       available: true,
+      sourceAvailable: true,
       combined: false,
       stats: {
         queries: num(row?.["queries"]),

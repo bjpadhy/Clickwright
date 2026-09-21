@@ -307,7 +307,16 @@ export const PlanSchema = z.object({
    * trimmed to 120 characters, at most six kept, and a shape we cannot read at
    * all falls back to none. `depends_on` above stays the only new hard check. */
   assumptions: z
-    .array(z.string())
+    .preprocess(
+      // The single most common malformed shape is a string where an array was
+      // asked for: "last 90 days; all platforms". Falling straight to `.catch([])`
+      // there silently removed the whole vague-question lever — the −0.25 that
+      // makes "how is checkout doing?" score below a pinned-down question — and
+      // the answer looked MORE confident for being less specific. Split it
+      // instead; only a shape that is neither string nor array now falls back.
+      (v) => (typeof v === "string" ? v.split(/[;\n]/) : v),
+      z.array(z.string()),
+    )
     .default([])
     .catch([])
     .transform((xs) =>
@@ -853,10 +862,25 @@ export function sectionsAreSubstantive(narration: {
  * chain back to ClickHouse stays unbroken (PMs need deltas; inventing them is
  * still forbidden).
  */
+/** Numbers written in a piece of text — the question, or the planner's assumptions. */
+export function numbersIn(text: string): number[] {
+  const out: number[] = [];
+  for (const m of text.matchAll(/\d[\d,]*(?:\.\d+)?/g)) {
+    const n = Number(m[0].replaceAll(",", ""));
+    if (Number.isFinite(n)) out.push(n);
+  }
+  return out;
+}
+
 export function findUncitedNumbers(
   texts: string[],
   pool: number[],
   datePool: string[] = [],
+  /** Numbers the question (or an assumption restating it) already contains. The
+   * guard exists to catch figures invented about the DATA; "over the last 30
+   * days" is the asker's own window quoted back, and rejecting it killed every
+   * question that named one. Not pairable — quoting 30 does not license 30/7. */
+  askedNumbers: number[] = [],
 ): string[] {
   const near = (a: number, b: number) =>
     Math.abs(a - b) <= Math.max(0.06, Math.abs(b) * 0.015);
@@ -872,7 +896,25 @@ export function findUncitedNumbers(
       const a = pairable[i]!;
       const b = pairable[j]!;
       derived.push(a - b);
-      if (b !== 0) derived.push(a / b);
+      if (b !== 0) {
+        const ratio = a / b;
+        derived.push(ratio);
+        // `numericPool` scales a FETCHED 0.478 to 47.8, so "47.9%" cites cleanly.
+        // A rate the narrator had to DERIVE got no such scaling: 3 purchases over
+        // 13 clicks was citable as 0.2308 but not as the "23.1%" every narration
+        // prompt asks it to write, and the answer died after three retries.
+        //
+        // Restricted to two COUNTS on purpose. Scaling every ratio in [-1,1]
+        // added ~3,600 values to a pool matched with 1.5% tolerance, which made
+        // the guard permissive enough to admit figures it is here to catch — it
+        // started accepting "-30" in the date test's negative control. Two
+        // integers dividing to a rate is the shape that actually failed.
+        // A pp GAP needs nothing extra: `numericPool` already holds both
+        // fractions scaled, so 85.8 - 47.9 is an ordinary derived difference.
+        if (Number.isInteger(a) && Number.isInteger(b) && ratio >= -1 && ratio <= 1) {
+          derived.push(ratio * 100);
+        }
+      }
     }
   }
   const uncited: string[] = [];
@@ -899,6 +941,7 @@ export function findUncitedNumbers(
       if (Number.isInteger(n) && Math.abs(n) <= 12) continue; // "3 steps", ordinals
       if (Number.isInteger(n) && Math.abs(n) >= 2020 && Math.abs(n) <= 2030) continue; // years
       if (base.some((v) => near(n, v))) continue;
+      if (askedNumbers.some((v) => near(n, v))) continue;
       if (derived.some((v) => near(n, v))) continue;
       uncited.push(raw);
     }
@@ -1040,16 +1083,34 @@ function warn(ctx: Ctx, name: string, error: unknown): void {
 }
 
 /** One entry per column, keeping the WIDEST interval — that is the figure a reader
- * should be most careful with, so it is the one worth reporting. */
-function widestPerColumn(entries: Precision[]): Precision[] {
+ * should be most careful with, so it is the one worth reporting.
+ *
+ * EXCEPT for a population column, where the widest is the wrong pick. Several
+ * tasks answering one question emit the same column name at different grains:
+ * a total, a breakdown by country, a breakdown by device, all called
+ * `conversion_rate`. Keyed on the name alone, the 198-row country slice evicted
+ * the 14,026-row total — so the answer's headline said 47.9% of 14,026 while
+ * confidence was charged ±6.8pp for a figure bounded to ±0.8pp, and a verified,
+ * fully-powered answer came back "medium". For those columns the entry that
+ * matters is the one measured over the whole population: the largest n. */
+function widestPerColumn(
+  entries: Precision[],
+  populationColumns: ReadonlySet<string> = new Set(),
+): Precision[] {
   const byColumn = new Map<string, Precision>();
   for (const p of entries) {
     const prev = byColumn.get(p.column);
-    const wider =
-      !prev ||
-      (p.interval && prev.interval && p.interval.halfWidthPp > prev.interval.halfWidthPp) ||
-      (!prev.interval && !!p.interval);
-    if (wider) byColumn.set(p.column, p);
+    if (!prev) {
+      byColumn.set(p.column, p);
+      continue;
+    }
+    const better = populationColumns.has(p.column)
+      ? // bounded beats unbounded, then the larger sample
+        (!!p.interval && !prev.interval) ||
+        (!!p.interval === !!prev.interval && (p.n ?? 0) > (prev.n ?? 0))
+      : (p.interval && prev.interval && p.interval.halfWidthPp > prev.interval.halfWidthPp) ||
+        (!prev.interval && !!p.interval);
+    if (better) byColumn.set(p.column, p);
   }
   return [...byColumn.values()];
 }
@@ -1116,6 +1177,36 @@ export interface SanityGateResult {
 }
 
 /**
+ * Did the queries find anything at all to talk about?
+ *
+ * A window with no events comes back as zero rows, or as a single row of zeros
+ * and nulls from a COUNT over an empty set. Handed to the narrator that is not
+ * an answer, it is a vacuum — and the model fills it. Measured on "conversion
+ * rate over the last 30 days" against a dataset whose newest event is older
+ * than that: the narrator reached back into the conversation for the PREVIOUS
+ * turn's 6,715 and 14,026, failed the citation check three times, and the
+ * question died with a parser error where the honest answer was one sentence.
+ *
+ * Zero is only "no evidence" when EVERY value is zero or null. A real 0%
+ * against a real denominator still has a non-zero n, so it is a finding and
+ * reaches the narrator as before.
+ */
+export function hasEvidence(results: TaskResult[]): boolean {
+  for (const r of results) {
+    for (const row of r.rows) {
+      for (const v of Object.values(row)) {
+        if (v === null || v === undefined || v === "") continue;
+        const n = typeof v === "number" ? v : Number(v);
+        // a non-numeric, non-empty cell (a country, a date) is something to report
+        if (!Number.isFinite(n)) return true;
+        if (n !== 0) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Drop what cannot be reported and classify what can, so confidence can weigh a
  * definitional error differently from a thin tail.
  *
@@ -1146,14 +1237,21 @@ export function sanityGate(results: TaskResult[]): SanityGateResult {
       notes.push(`task ${r.id} (${r.title}): the query could not be written — ${reason}`);
       continue;
     }
-    for (const row of r.rows) {
-      for (const [col, v] of Object.entries(row)) {
-        const n = Number(v);
-        if (!Number.isFinite(n)) continue;
-        // suffix match, not substring: "share_clicked_applications" is a count,
-        // and matching "share" inside it flagged 1,601 as a rate above 100%
-        if (/(^|_)(rate|ratio|pct|percent)$/i.test(col) && n > 1.05) {
-          r.flags.push(`${col}=${n} looks like a rate above 100%`);
+    // Guarded like the small-sample check below, and for the same reason: with a
+    // digest the same question is answered over EVERY row rather than the fetched
+    // ones, so letting both speak worded one finding two ways. `new Set` cannot
+    // merge them — the wording differs — so a single bad value was classified
+    // twice and cost 0.20 of confidence where the table says 0.10.
+    if (!r.digest) {
+      for (const row of r.rows) {
+        for (const [col, v] of Object.entries(row)) {
+          const n = Number(v);
+          if (!Number.isFinite(n)) continue;
+          // suffix match, not substring: "share_clicked_applications" is a count,
+          // and matching "share" inside it flagged 1,601 as a rate above 100%
+          if (/(^|_)(rate|ratio|pct|percent)$/i.test(col) && n > 1.05) {
+            r.flags.push(`${col}=${n} looks like a rate above 100%`);
+          }
         }
       }
     }
@@ -1498,7 +1596,19 @@ export async function runAnalytics(
               : "",
           });
           const text = await llm(planSpan, "plan", prompt);
-          return PlanSchema.parse(JSON.parse(stripFences(text)));
+          const raw: unknown = JSON.parse(stripFences(text));
+          const parsedPlan = PlanSchema.parse(raw);
+          // `.catch([])` above cannot throw, so a shape we could not read would
+          // otherwise vanish without trace. Say so in the trace instead.
+          const rawAssumptions = (raw as { assumptions?: unknown })?.assumptions;
+          if (rawAssumptions != null && parsedPlan.assumptions.length === 0) {
+            warn(
+              planSpan,
+              "plan_assumptions_unreadable",
+              `planner sent assumptions as ${typeof rawAssumptions} — dropped, so the answer is scored as if the question pinned everything down`,
+            );
+          }
+          return parsedPlan;
         }),
       (planFeedback) => {
         // Everything downstream needs a plan — this failure is terminal.
@@ -1679,6 +1789,49 @@ export async function runAnalytics(
     const sanityNotes = [...notes, ...sqlFailed.map((r) => `task ${r.id}: ${r.dropped}`)];
     const droppedCount = counts.dropped + sqlFailed.length;
 
+    // ── nothing to narrate ──
+    // Every query ran and every one came back empty. Say that, rather than
+    // spending three narration calls discovering the model cannot cite figures
+    // that do not exist. See `hasEvidence`.
+    if (!hasEvidence(kept)) {
+      const ran = kept.length;
+      const why =
+        ran === 0
+          ? "No query survived the sanity checks, so there is nothing to measure."
+          : `${ran === 1 ? "The query" : `All ${ran} queries`} ran against ClickHouse and matched no rows — the filters in this question select an empty set.`;
+      emitRunEvent({
+        type: "log",
+        name: "empty_result",
+        payload: { tasks: ran, assumptions: plan.assumptions },
+      });
+      return {
+        headline: "No data matches this question.",
+        whatsHappening: why,
+        whyItHappens: plan.assumptions.length
+          ? `The window and filters were not fully specified, so the plan assumed: ${plan.assumptions.join("; ")}. One of those assumptions selects a range the data does not cover — the most common cause is a relative window (\u201clast N days\u201d) that ends before the newest event in the table.`
+          : "The filters in this question select no rows. Either the events have not been instrumented for this period, or the segment genuinely has no activity.",
+        evidence: { title: "", chart: null, segmentTable: null },
+        groundedInContext: "",
+        recommendedAction:
+          "Widen the window or drop a filter and ask again — or check the table's newest event before choosing a relative window.",
+        confidence: {
+          value: "low",
+          score: 0.05,
+          note: "no rows matched — nothing to be confident about",
+          signals: [],
+        },
+        precision: [],
+        verification: null,
+        contextVersion,
+        sql: kept.map((r) => ({
+          task: r.id,
+          title: r.title,
+          query: r.sql,
+          rowCount: r.rows.length,
+        })),
+      };
+    }
+
     // ── independent verification (started here, awaited after narration) ──
     // One task only: the cost is a full LLM call plus a query, and the figure a
     // reader acts on is the headline one. Skipped when nothing usable survived.
@@ -1748,7 +1901,7 @@ export async function runAnalytics(
       .join("\n")
       .slice(0, 1500);
 
-    const [lookup, { precision, headlineColumns }] = await Promise.all([
+    const [lookup, { precision, allPrecision, headlineColumns }] = await Promise.all([
       lookupContext(span, lookupTopic, opts.llm),
       step(span, "precision", {}, async () => {
         // What the answer's main claims rest on: the listed rows and, when the result
@@ -1763,7 +1916,16 @@ export async function runAnalytics(
           for (const row of r.rows.slice(0, NARRATION_ROWS)) {
             headline.push(...precisionForRow(row as Record<string, unknown>, r.semanticSql));
           }
-          if (!r.digest) continue;
+          if (!r.digest) {
+            // A task returning exactly one row has no segments to profile, so no
+            // digest ran — but that row IS the whole population, and its rates
+            // are headline figures. Without this, a question answered by a
+            // single total left `headlineColumns` empty and confidence fell back
+            // to whichever same-named segment row happened to survive the merge.
+            const only = r.totalRows === 1 ? r.rows[0] : undefined;
+            if (only) headlineColumns.push(...Object.keys(only).filter((c) => RATE_RE.test(c)));
+            continue;
+          }
           const population = populationRow(r.digest);
           headline.push(...precisionForRow(population, r.digest.sql));
           headlineColumns.push(...Object.keys(population).filter((c) => RATE_RE.test(c)));
@@ -1774,12 +1936,18 @@ export async function runAnalytics(
             tails.push(...precisionForRow(row, r.semanticSql));
           }
         }
+        const populationColumns = new Set(headlineColumns);
         return {
-          precision: widestPerColumn([...headline, ...tails]),
+          // Every measurement, for the score. `pickHeadline` needs the
+          // whole-population row of a column even when a thinner row of the same
+          // name is the one worth displaying, and `small_segments` needs to see
+          // every thin row rather than the one survivor of a per-name merge.
+          allPrecision: [...headline, ...tails],
+          precision: widestPerColumn([...headline, ...tails], populationColumns),
           // The population rates — the figures an answer's headline is actually
           // built on. Confidence picks its headline from these, so one tail row
           // with n=2 can no longer decide the level for the whole answer.
-          headlineColumns: [...new Set(headlineColumns)],
+          headlineColumns: [...populationColumns],
         };
       }),
     ]);
@@ -1870,6 +2038,13 @@ export async function runAnalytics(
         .filter((n): n is number => typeof n === "number" && Number.isFinite(n)),
     ];
     const datePool = collectDateLiterals(kept, NARRATION_ROWS);
+    // The asker's own numbers. A question that names a window ("last 30 days")
+    // or a threshold gets it echoed back in the prose, and the citation guard
+    // read that as a figure invented about the data.
+    const askedNumbers = [
+      ...numbersIn(input.question),
+      ...plan.assumptions.flatMap((a) => numbersIn(a)),
+    ];
 
     let narration: Narration | null = null;
     let citationFailures = 0;
@@ -1906,7 +2081,7 @@ export async function runAnalytics(
               ...(parsed.evidence.chart?.series.map((s) => String(s.value)) ?? []),
               ...(parsed.evidence.segmentTable?.rows.flat().map(String) ?? []),
             ];
-            const uncited = findUncitedNumbers(texts, pool, datePool);
+            const uncited = findUncitedNumbers(texts, pool, datePool, askedNumbers);
             if (uncited.length > 0) {
               citationFailures++;
               throw new Error(
@@ -1937,7 +2112,7 @@ export async function runAnalytics(
       { headlineColumns, assumptions: plan.assumptions },
       async () => {
         const confidenceInput: ConfidenceInput = {
-          precisions: precision,
+          precisions: allPrecision,
           headlineColumns,
           verifiedColumn: verification?.expectedToMatch || null,
           verification: verification
@@ -2053,7 +2228,7 @@ export async function runAnalytics(
         });
         const text = await llm(rSpan, "narrate", prompt);
         const parsed = NarrationSchema.parse(JSON.parse(stripFences(text)));
-        const uncited = findUncitedNumbers(narrativeTexts(parsed), pool, datePool);
+        const uncited = findUncitedNumbers(narrativeTexts(parsed), pool, datePool, askedNumbers);
         if (uncited.length > 0) {
           // keep the answer that already passed every check rather than failing
           // the request over a cosmetic revision

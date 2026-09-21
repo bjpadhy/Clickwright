@@ -1,6 +1,7 @@
 import * as React from "react"
 
 import type { InsightChart as InsightChartData, ValueFormat } from "@/api/chat"
+import { ErrorBoundary } from "@/components/error-boundary"
 
 /**
  * Render a number the way the backend says it should be read.
@@ -62,7 +63,10 @@ const loadCanvas = () => import("./insight-chart-canvas")
 const Canvas = React.lazy(() =>
   loadCanvas().then((module) => ({ default: module.InsightChartCanvas }))
 )
-void loadCanvas()
+// A rejection here is not fatal — `React.lazy` calls `import()` again when the
+// first chart renders, and the boundary below catches it if that fails too —
+// but an uncaught one is an `unhandledrejection` in every offline tab.
+void loadCanvas().catch(() => {})
 
 export interface InsightChartProps {
   chart: InsightChartData
@@ -84,11 +88,28 @@ export const InsightChart = React.memo(function InsightChart({
   chart,
   scale = 1,
 }: InsightChartProps) {
+  const { height } = chartLayout(chart, scale)
   return (
-    <React.Suspense
-      fallback={<div aria-hidden style={{ height: chartLayout(chart, scale).height }} />}
-    >
-      <Canvas chart={chart} scale={scale} />
-    </React.Suspense>
+    // Losing a chart must never lose the answer it illustrates: if the canvas
+    // chunk cannot be fetched or blows up, only this rectangle is replaced and
+    // the rest of the insight card stays exactly as it was.
+    <ErrorBoundary fallback={() => <ChartUnavailable height={height} />}>
+      <React.Suspense fallback={<div aria-hidden style={{ height }} />}>
+        <Canvas chart={chart} scale={scale} />
+      </React.Suspense>
+    </ErrorBoundary>
   )
 })
+
+/** Same footprint as the chart it stands in for, so nothing on the card moves. */
+function ChartUnavailable({ height }: { height: number }) {
+  return (
+    <div
+      role="status"
+      style={{ height }}
+      className="flex items-center justify-center rounded-lg border border-dashed border-zinc-200 text-[11.5px] text-zinc-400"
+    >
+      chart unavailable
+    </div>
+  )
+}

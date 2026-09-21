@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   classifyOrigin,
   describeSpike,
+  emptyQueryLogWindow,
   fillLatencyBuckets,
   markSpikes,
+  queryLogScanFailed,
   truncateQuery,
   type RawLatencyRow,
 } from "../../src/observe/db-health.js";
@@ -121,4 +123,22 @@ test("truncateQuery collapses whitespace and bounds the length", () => {
   const long = truncateQuery("x".repeat(500));
   assert.equal(long.length, 241);
   assert.ok(long.endsWith("…"));
+});
+
+// ── measured zero vs could-not-measure ───────────────────────────
+
+test("a deployment with no readable query_log is not a failed scan", () => {
+  // Zeros are the honest answer here, and the rest of the page (table counts,
+  // storage) still renders — as it did before the single-pass scan landed.
+  const window = emptyQueryLogWindow(false);
+  assert.equal(window.available, false);
+  assert.equal(queryLogScanFailed(window), false);
+});
+
+test("a readable query_log with no measurements is a failed scan", () => {
+  // The scan and its fallbacks all threw. The caller must report a gap rather
+  // than the zeros this window carries.
+  const window = emptyQueryLogWindow(true);
+  assert.equal(window.available, false);
+  assert.equal(queryLogScanFailed(window), true);
 });

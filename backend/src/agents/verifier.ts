@@ -230,7 +230,15 @@ export async function verifyTask(
       recordQuery(span, "verification_result", ran, rows);
       const first = rows[0];
       if (first) {
-        verifiedValue = numeric(first["verified_value"] ?? Object.values(first)[0]);
+        // `in`, not `??`. A SQL NULL from `avgIf(...) AS verified_value` made the
+        // `??` fall through to the FIRST column of the row — typically the count
+        // beside it — so a verification that simply found nothing compared a
+        // count against a rate, reported "these disagree", and capped confidence
+        // at 0.44. An absent column still falls back; a NULL one stays null and
+        // the verdict is inconclusive, which is the truth.
+        const raw =
+          "verified_value" in first ? first["verified_value"] : Object.values(first)[0];
+        verifiedValue = numeric(raw);
       }
     } catch (error) {
       return {

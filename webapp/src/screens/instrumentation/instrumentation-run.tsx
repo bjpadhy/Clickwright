@@ -1,6 +1,9 @@
 import * as React from "react"
 
+import { ErrorBoundary, ErrorPanel } from "@/components/error-boundary"
 import { Spinner } from "@/components/ui-kit/icon"
+import { Screen, ScreenHeader } from "@/components/ui-kit/panel"
+import { InstrumentationTabs } from "./instrumentation-tabs"
 
 /**
  * The Instrumentation screens, code-split.
@@ -12,11 +15,24 @@ import { Spinner } from "@/components/ui-kit/icon"
  *
  * The chunk is also prefetched once the browser goes idle, so switching tabs
  * is instant in practice and the fallback below is only ever seen on a cold,
- * slow connection.
+ * slow connection. Only the BODY is split: the header and the tabs are part of
+ * this module, so they stay on screen — and clickable — while it loads.
  */
 const load = () => import("./instrumentation-run-screen")
 
-const Lazy = React.lazy(() => load().then((m) => ({ default: m.InstrumentationRunScreen })))
+/**
+ * `React.lazy` remembers a rejected `import()` and re-throws it on every later
+ * render, so the retry the error boundary offers has to be handed a new one.
+ */
+const attempts = new Map<number, React.ComponentType>()
+function bodyFor(attempt: number): React.ComponentType {
+  let body = attempts.get(attempt)
+  if (!body) {
+    body = React.lazy(() => load().then((m) => ({ default: m.InstrumentationRunScreen })))
+    attempts.set(attempt, body)
+  }
+  return body
+}
 
 const idle: (run: () => void) => void =
   typeof window !== "undefined" && "requestIdleCallback" in window
@@ -24,19 +40,40 @@ const idle: (run: () => void) => void =
     : (run) => window.setTimeout(run, 1500)
 
 idle(() => {
-  void load()
+  // Prefetch only; a failure here is retried by the lazy import below, but an
+  // uncaught rejection would surface as `unhandledrejection` when offline.
+  void load().catch(() => {})
 })
 
 export function InstrumentationRun() {
+  const [attempt, setAttempt] = React.useState(0)
+  const Body = bodyFor(attempt)
+
   return (
-    <React.Suspense
-      fallback={
-        <div className="flex h-full items-center justify-center text-zinc-400">
-          <Spinner size={18} />
-        </div>
-      }
-    >
-      <Lazy />
-    </React.Suspense>
+    <Screen label="Instrumentation">
+      <ScreenHeader
+        title="Instrumentation"
+        subtitle="Feature spec in → human-approved schema live on ClickHouse"
+      >
+        <InstrumentationTabs />
+      </ScreenHeader>
+
+      <ErrorBoundary
+        resetKey={attempt}
+        fallback={(props) => (
+          <ErrorPanel {...props} reset={() => setAttempt((n) => n + 1)} />
+        )}
+      >
+        <React.Suspense
+          fallback={
+            <div className="flex flex-1 items-center justify-center text-zinc-400">
+              <Spinner size={18} />
+            </div>
+          }
+        >
+          <Body />
+        </React.Suspense>
+      </ErrorBoundary>
+    </Screen>
   )
 }

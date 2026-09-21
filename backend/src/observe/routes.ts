@@ -22,6 +22,7 @@ import {
   collectStats,
   collectStorage,
   emptyQueryLogWindow,
+  queryLogScanFailed,
   tableOrigins,
 } from "./db-health.js";
 import { changelogToMarkdown, getChangelog } from "./changelog.js";
@@ -57,14 +58,24 @@ export function observeRouter(manager: RunManager): Router {
         // parts and the recent list read different system tables, so they
         // still run alongside it.
         const [qlog, baseTables] = await Promise.all([
-          // A degraded window is zeros with available:false — the table counts
-          // in `stats` are read from system.tables and must still render.
-          safely("queryLogWindow", emptyQueryLogWindow(), () => collectQueryLogWindow()),
+          // The fallback carries the probe result so a failed scan stays
+          // distinguishable from a deployment with no readable query_log.
+          safely("queryLogWindow", emptyQueryLogWindow(source.available), () =>
+            collectQueryLogWindow(),
+          ),
           tableOrigins(),
         ]);
 
+        // The log is readable but nothing came back: the scan AND its fallback
+        // failed. Report a gap — null stats, empty series — exactly as the
+        // per-collector safely() wrappers used to. Zeros here would read as a
+        // measured idle service. A deployment with no query_log at all is NOT
+        // this case: there the query stats are honestly zero and the table
+        // counts in `stats` (read from system.tables) must still render.
+        const unmeasured = queryLogScanFailed(qlog);
+
         const [stats, storage, partsHealth, recent] = await Promise.all([
-          safely("stats", null, () => collectStats(baseTables, qlog)),
+          unmeasured ? null : safely("stats", null, () => collectStats(baseTables, qlog)),
           safely("storage", { tables: [], totalBytes: 0 }, () => collectStorage(baseTables)),
           safely("partsHealth", null, () => collectPartsHealth()),
           safely("recentQueries", [], () => collectRecentQueries()),
@@ -72,14 +83,16 @@ export function observeRouter(manager: RunManager): Router {
 
         return {
           windowHours: WINDOW_HOURS,
-          queryLogAvailable: source.available,
+          // The scan outcome, not just the cached probe: a probe that succeeded
+          // hours ago says nothing about whether this page load measured anything.
+          queryLogAvailable: source.available && !unmeasured,
           queryLogClustered: source.clustered,
           stats,
-          latencyP95ByHour: collectLatency(nowMs, qlog),
+          latencyP95ByHour: unmeasured ? [] : collectLatency(nowMs, qlog),
           storageByTable: storage.tables,
           storageTotalBytes: storage.totalBytes,
           partsHealth,
-          slowestQueries: collectSlowestQueries(qlog),
+          slowestQueries: unmeasured ? [] : collectSlowestQueries(qlog),
           recentQueries: recent,
         };
       });
@@ -92,9 +105,14 @@ export function observeRouter(manager: RunManager): Router {
   router.get("/changelog", async (req, res) => {
     try {
       const kind = req.query["kind"];
-      const entries = await withQueryContext({ agent: "observe" }, () => getChangelog());
+      const page = await withQueryContext({ agent: "observe" }, () => getChangelog());
       const filtered =
-        kind === "table" || kind === "context" ? entries.filter((e) => e.kind === kind) : entries;
+        kind === "table" || kind === "context"
+          ? page.entries.filter((e) => e.kind === kind)
+          : page.entries;
+      // The body stays a plain array (that is what the webapp parses); the
+      // "this is not the whole history" signal rides on a header.
+      if (page.truncated) res.setHeader("X-Changelog-Truncated", "true");
       res.json(filtered);
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
@@ -103,13 +121,13 @@ export function observeRouter(manager: RunManager): Router {
 
   router.get("/changelog/export", async (_req, res) => {
     try {
-      const entries = await withQueryContext({ agent: "observe" }, () => getChangelog());
+      const page = await withQueryContext({ agent: "observe" }, () => getChangelog());
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader(
         "Content-Disposition",
         'attachment; filename="clickwright-changelog.md"',
       );
-      res.send(changelogToMarkdown(entries));
+      res.send(changelogToMarkdown(page.entries, { truncated: page.truncated }));
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
     }

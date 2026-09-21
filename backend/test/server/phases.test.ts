@@ -98,8 +98,14 @@ test("a failed turn leaves a gap rather than flipping the parity", () => {
   assert.equal(nextTurnSeq(1, 0), 2);
 });
 
-test("junk counters degrade to a safe slot instead of NaN", () => {
+test("junk counters fall back to a slot derived from the row count", () => {
+  // No rows at all: slot 0 is free by definition.
   assert.equal(nextTurnSeq(Number.NaN, Number.NaN), 0);
-  assert.equal(nextTurnSeq(3, Number.NaN), 2);
-  assert.equal(nextTurnSeq(3, -5), 2);
+  // A 3-row conversation holds seqs 0,1,2 at a minimum, so an unusable
+  // max(seq) must NOT hand back 2 — that overwrites the last turn. Deriving
+  // the floor from the count reserves the next free pair instead.
+  assert.equal(nextTurnSeq(3, Number.NaN), 4);
+  assert.equal(nextTurnSeq(3, -5), 4);
+  // One row written, max(seq) unreadable: the agent slot 1 is still reserved.
+  assert.equal(nextTurnSeq(1, Number.NaN), 2);
 });

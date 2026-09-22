@@ -325,8 +325,9 @@ export function InstrumentationRunScreen() {
                   ) : null}
                   {model.result.contextEntries.length > 0 ? (
                     <div className="flex flex-wrap gap-1.5">
-                      {model.result.contextEntries.map((entry) => (
-                        <MonoChip key={entry.entity} className="border-green-200">
+                      {/* same entity can legitimately appear twice — see parts.tsx */}
+                      {model.result.contextEntries.map((entry, i) => (
+                        <MonoChip key={`${entry.entity}:${i}`} className="border-green-200">
                           {entry.entity} v{entry.version}
                         </MonoChip>
                       ))}

@@ -528,8 +528,16 @@ export function ContextProposalBody({ proposal }: { proposal: ContextProposal })
         </div>
       ) : null}
       <div className="overflow-hidden rounded-[9px] border border-zinc-100">
-        {proposal.entries.map((entry) => (
-          <details key={entry.entity} className="group border-b border-zinc-100 last:border-b-0">
+        {/* One proposal can carry the same entity twice — measured on
+            04_abandoned_checkout_recovery, which wrote 15 entries with 14
+            distinct entities. Keying on the entity alone collided, and React
+            drops or duplicates a colliding child, so one real context entry
+            silently vanished from the decision record. */}
+        {proposal.entries.map((entry, i) => (
+          <details
+            key={`${entry.entity}:${i}`}
+            className="group border-b border-zinc-100 last:border-b-0"
+          >
             <summary className="flex cursor-pointer list-none items-center gap-2 bg-green-50/40 px-3 py-2">
               <span className="font-mono text-[11.5px] font-bold text-green-700">+</span>
               <span className="font-mono text-[11.5px] text-zinc-800">{entry.entity}</span>

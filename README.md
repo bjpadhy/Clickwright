@@ -113,6 +113,7 @@ verified at 0.70, nothing bounded at 0.60) and each weakness in the evidence sub
 named amount. The deltas sum exactly to the score, so the card reads as a receipt.
 
 [docs/CONFIDENCE_WALKTHROUGH.md](docs/CONFIDENCE_WALKTHROUGH.md) walks four real
-questions asked in one conversation against the live service, with every signal as the
-run produced it. Between the third and the second, only the asker's specificity
-changes, and it is worth 0.16.
+questions against the live service, with every signal as the run produced it. The first
+three report the same verified figure — 47.9% — and score 0.67, 0.91 and 1.00; the only
+thing that changes is how much the asker pinned down. The fourth is phrased just as
+precisely, rests on 13 applications, and scores 0.14.

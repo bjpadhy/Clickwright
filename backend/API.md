@@ -207,7 +207,9 @@ seven event types (they are named events, so plain `onmessage` will NOT fire).
 | `step_error` | step name | `{ error: string, elapsedMs }` — verbatim failure, feeds the retry |
 | `status` | the new `RunStatus` | varies: `running` first time → `{ traceUrl }`; `awaiting_approval` → `{ gate }`; `succeeded` → `{ durationMs, tables: LoadedTable[], contextEntries: {entity, version}[], contextWarnings: string[], traceUrl }`; `failed` → `{ durationMs, error, resetHint }` |
 | `approval_request` | `"ddl"` \| `"context"` | `{ proposal: DdlProposal \| ContextProposal }` — ContextProposal may carry `warnings: string[]` (the "contradiction surfaced" chips) |
-| `log` | `"table_created"` \| `"rows_loaded"` \| `"execution_complete"` | `{ table?, rows?, expected?, tables?, verified?, ok, ms }` — **these three only** are execution progress; they are the whole of an "Executing on ClickHouse" panel |
+| `log` | `"table_created"` | `{ table, ok, ms }` |
+| `log` | `"rows_loaded"` | `{ table, rows, expected, ok, ms, loadAttempt }` — `loadAttempt` counts load-only retries (a type mismatch is retried twice before the schema itself is reconsidered) |
+| `log` | `"execution_complete"` | `{ tables, rows, verified }` — note this one carries **no `ok` and no `ms`**; `verified` is the every-table-loaded-in-full flag and is what to read for success. **These three only** are execution progress; they are the whole of an "Executing on ClickHouse" panel |
 | `log` | `"llm_start"` \| `"llm_progress"` \| `"llm_done"` | `{ call, elapsedMs?, promptChars?, outputChars? }` — progress ticks, one every 3s for **every** LLM call in the run. Ticks, not log lines: render as elapsed time on the running step, never as rows in a log |
 | `log` | `"schema_designed"` \| `"schema_fallback"` | `{ tables, sharedColumns, joinPath }` / `{ note, reason }` — design outcome; `schema_fallback` means every attempt was rejected and the deterministic baseline shipped, which the run continues on. Belongs against the design step, not the execution log |
 | `approval_result` | gate | `{ approved: boolean, feedback: string, identity: string }` |

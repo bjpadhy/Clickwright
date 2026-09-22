@@ -234,6 +234,66 @@ function stripQualifier(identifier: string): string {
     : identifier;
 }
 
+/**
+ * Arguments of a wrapping call that could hold the division.
+ *
+ * `divisorOf` only sees a `/` at paren depth 0, so a division wrapped in ANY
+ * function was invisible — and wrapping it is the normal way to write a safe
+ * rate: `if(pay_now_n > 0, purchase_n / pay_now_n, 0)`,
+ * `round(purchase_n / pay_now_n, 4)`, `multiIf(...)`. Measured live, three of
+ * five demo questions shipped a textbook-correct rate WITH its denominator
+ * column and were still scored "no figure carries an interval", losing 0.40 and
+ * 0.10 apiece, because the resolver could not see past the guard.
+ *
+ * For `if`/`multiIf` the conditions are skipped: they sit at the even positions
+ * and a division inside one (`if(a / b > 0.5, …)`) is a test, not the figure.
+ */
+function divisionBearingArguments(expression: string): string[] {
+  const e = expression.trim();
+  if (/^case\b/i.test(e) && /\bend$/i.test(e)) {
+    // CASE WHEN c THEN x / y ELSE z END — take what each THEN/ELSE yields.
+    const out: string[] = [];
+    const re = /\b(then|else)\b/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(e)) !== null) {
+      const rest = e.slice(m.index + m[0].length);
+      const stop = /\b(when|else|end)\b/i.exec(rest);
+      const branch = (stop ? rest.slice(0, stop.index) : rest).trim();
+      if (branch) out.push(branch);
+    }
+    return out;
+  }
+  const call = /^([a-z_][a-z0-9_]*)\s*\(/i.exec(e);
+  if (!call?.[1]) return [];
+  const open = e.indexOf("(", call[1].length);
+  if (open < 0 || !spansWholeExpression(e, open)) return [];
+  const args = topLevelArguments(e.slice(open + 1, e.length - 1));
+  const fn = call[1].toLowerCase();
+  if (fn === "if" || fn === "multiif") {
+    return args.filter((_, i) => i % 2 === 1 || i === args.length - 1);
+  }
+  return args;
+}
+
+/** The divisor of a rate, however deeply the division is wrapped. */
+function findDivisor(expression: string, depth = 0): string | null {
+  const e = expression.trim();
+  // A CASE keeps its keywords at paren depth 0, so scanning for the last `/`
+  // there returns `pay_now_n ELSE 0 END` — too much, not too little. Split the
+  // branches out before scanning.
+  const isCase = /^case\b/i.test(e) && /\bend$/i.test(e);
+  if (!isCase) {
+    const direct = divisorOf(e);
+    if (direct) return direct;
+  }
+  if (depth >= 4) return null;
+  for (const branch of divisionBearingArguments(e)) {
+    const found = findDivisor(branch, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
 export function denominatorColumnsFromSql(
   rateColumn: string,
   sql: string,
@@ -241,7 +301,7 @@ export function denominatorColumnsFromSql(
 ): string[] {
   const item = selectItemFor(rateColumn, sql);
   if (!item) return [];
-  const rawDivisor = divisorOf(item);
+  const rawDivisor = findDivisor(item);
   if (!rawDivisor) return [];
   // Peel the null guards and casts first: they change how the division behaves,
   // never which column it reads.

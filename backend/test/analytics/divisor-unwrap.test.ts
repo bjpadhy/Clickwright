@@ -82,3 +82,35 @@ test("the rate column can never be its own denominator", () => {
   const sql = "SELECT x / NULLIF(conversion_rate, 0) AS conversion_rate FROM t";
   assert.deepEqual(denominatorColumnsFromSql("conversion_rate", sql, COLS), []);
 });
+
+// ── a CAST inside another wrapper ──────────────────────────────────
+
+/**
+ * `nullIf(CAST(n AS Float64), 0)` is the most idiomatic safe division in
+ * ClickHouse. Stripping ` AS <type>` from the first argument of EVERY wrapper ate
+ * the nested call's closing paren — the pattern has to allow parens so
+ * `Decimal(10, 2)` survives — leaving the unparseable `CAST(p.pay_now_n`. No
+ * column was found, the rate went unbounded, and a verified answer was capped at
+ * 0.60 by `no_bounded_precision`.
+ */
+test("a CAST nested inside a wrapper still resolves to its column", () => {
+  // the table qualifier is stripped later, by denominatorColumnsFromSql
+  assert.equal(unwrapDivisor("nullIf(CAST(p.pay_now_n AS Float64), 0)"), "p.pay_now_n");
+  assert.equal(unwrapDivisor("coalesce(CAST(pay_now_n AS UInt64), 0)"), "pay_now_n");
+  assert.equal(unwrapDivisor("toFloat64(cast(pay_now_n as Float64))"), "pay_now_n");
+});
+
+test("a parameterised cast type does not break the unwrap", () => {
+  assert.equal(unwrapDivisor("nullIf(CAST(pay_now_n AS Decimal(10, 2)), 0)"), "pay_now_n");
+});
+
+test("the two-argument CAST form still resolves", () => {
+  assert.equal(unwrapDivisor("nullIf(CAST(pay_now_n, 'Float64'), 0)"), "pay_now_n");
+});
+
+test("a cast divisor is found in a whole SELECT", () => {
+  const sql =
+    "SELECT purchase_n / nullIf(CAST(p.pay_now_n AS Float64), 0) AS conversion_rate, " +
+    "p.pay_now_n AS pay_now_n FROM t p";
+  assert.deepEqual(denominatorColumnsFromSql("conversion_rate", sql, COLS), ["pay_now_n"]);
+});

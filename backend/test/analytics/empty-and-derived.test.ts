@@ -165,19 +165,45 @@ test("conservatism across DIFFERENT metrics is unchanged", () => {
 
 // ── one impossible value is one finding ────────────────────────────
 
+const digestOver = (columns: string[], statsRow: Record<string, unknown> = {}) =>
+  ({
+    totalRows: 1,
+    sql: "SELECT 1",
+    statsRow,
+    emissions: columns.map((c) => ({ sql: "", alias: `${c}_gt1_n`, column: c, stat: "gt1_n" })),
+    columnStats: columns.map((c) => ({ column: c, kind: "rate", stats: [] })),
+    extremes: null,
+  }) as unknown as TaskResult["digest"];
+
 test("a digest does not make an impossible rate count twice", () => {
   const withDigest = task();
   withDigest.rows = [{ applied_rate: 1.2 }];
   withDigest.totalRows = 1;
-  withDigest.digest = {
-    totalRows: 1,
-    sql: "SELECT 1",
-    statsRow: {},
-    emissions: [],
-    extremes: null,
-  } as unknown as TaskResult["digest"];
+  // the digest profiled that very column, and says so over the whole set
+  withDigest.digest = digestOver(["applied_rate"], { applied_rate_gt1_n: 1 });
   const { counts } = sanityGate([withDigest]);
-  assert.ok(counts.impossible <= 1, `counted ${counts.impossible} times, expected at most 1`);
+  assert.equal(counts.impossible, 1);
+});
+
+test("a column the digest did not profile is still checked row-side", () => {
+  // The digest profiles only the first few columns of each kind. Suppressing the
+  // row check for ALL columns once a digest existed left the rest unexamined —
+  // a rate above 100% in the fifth rate column was reported by neither side.
+  const spilled = task();
+  spilled.rows = [{ a_rate: 0.4, e_rate: 1.2 }];
+  spilled.totalRows = 1;
+  spilled.digest = digestOver(["a_rate"], { a_rate_gt1_n: 0 });
+  const { counts, kept } = sanityGate([spilled]);
+  assert.equal(counts.impossible, 1);
+  assert.ok(kept[0]?.flags.some((f) => f.includes("e_rate")), kept[0]?.flags.join("; ") ?? "no flags");
+});
+
+test("a digest that profiled nothing leaves the row check in charge", () => {
+  const empty = task();
+  empty.rows = [{ applied_rate: 1.2 }];
+  empty.totalRows = 1;
+  empty.digest = digestOver([]);
+  assert.equal(sanityGate([empty]).counts.impossible, 1);
 });
 
 test("without a digest the per-row check still fires", () => {

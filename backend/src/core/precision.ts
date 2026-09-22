@@ -30,7 +30,7 @@ export interface Precision {
  * the same conventions this module reads them by — a digest that named its
  * whole-population rate differently would compute no interval for it. */
 export const RATE_RE = /(^|_)(rate|ratio|pct|percent|share)$/i;
-export const COUNT_RE = /(^|_)(n|count|users|sessions|rows|events|applications|payers|uploads|opens|clicks)$/i;
+export const COUNT_RE = /(^|_)(n|count|denominator|users|sessions|rows|events|applications|payers|uploads|opens|clicks)$/i;
 
 /**
  * Classify from the SQL that produced the column, not the column name alone —
@@ -200,12 +200,19 @@ function unwrapOnce(expression: string): string | null {
   if (e.startsWith("(") && spansWholeExpression(e, 0)) return e.slice(1, -1);
   const call = /^([a-z_][a-z0-9_]*)\s*\(/i.exec(e);
   if (!call?.[1]) return null;
-  if (!DIVISOR_WRAPPERS.has(call[1].toLowerCase())) return null;
+  const fn = call[1].toLowerCase();
+  if (!DIVISOR_WRAPPERS.has(fn)) return null;
   const open = e.indexOf("(", call[1].length);
   if (open < 0 || !spansWholeExpression(e, open)) return null;
   const first = topLevelArguments(e.slice(open + 1, e.length - 1))[0] ?? "";
-  // CAST(d AS Float64) — the type is part of the first argument
-  const operand = first.replace(/\s+as\s+[a-z0-9_(), ]+$/i, "").trim();
+  // CAST(d AS Float64) — the target type is part of CAST's first argument, and of
+  // no other function's. Stripping ` AS <type>` from every wrapper ate the closing
+  // paren of a nested call, because the pattern has to allow parens for
+  // `Decimal(10, 2)`: `nullIf(CAST(p.pay_now_n AS Float64), 0)` reduced to the
+  // unparseable `CAST(p.pay_now_n`, no column was found, and the most idiomatic
+  // safe division in ClickHouse lost its denominator — the rate went unbounded and
+  // a correct answer was capped at 0.60.
+  const operand = (fn === "cast" ? first.replace(/\s+as\s+[a-z0-9_(), ]+$/i, "") : first).trim();
   return operand.length > 0 ? operand : null;
 }
 
@@ -580,20 +587,52 @@ export function pickHeadline(
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/**
- * The stored `metric:*` entities a question names, detected in code: the id
- * (`metric:standard_checkout_conversion_rate`) is split on `_`, and it matches
- * when every word appears as a whole word in the lowercased question, or the id
- * itself appears literally. Sorted, so the same question always yields the same
- * list. Whole words only — "conversions" does not name `conversion_rate`.
- */
 /** Words too common to prove an assumption was already stated in the question. */
 const ASSUMPTION_STOPWORDS = new Set([
   "the", "and", "for", "all", "any", "with", "from", "into", "over", "per", "are",
   "was", "were", "use", "used", "using", "only", "both", "each", "that", "this",
   "than", "then", "data", "rows", "row", "value", "values", "applied", "apply",
-  "include", "included", "including", "excluding", "assumed", "assume", "set",
+  "assumed", "assume", "set",
+  // "all platforms included" restricts nothing the question did not already say;
+  // the word is filler. Its opposite is not — see POLARITY.
+  "include", "included", "including",
 ]);
+
+/**
+ * Words that RESTRICT, folded to one form so tense cannot hide the restriction.
+ *
+ * `excluding` used to be a stopword, which let an assumption agree with a
+ * question that said the opposite: asked "should we include refunded
+ * transactions?", the plan "excluding refunded transactions" had only `refunded`
+ * and `transactions` left to check, both stated, so the answer silently took the
+ * other branch and was charged nothing for it.
+ *
+ * Only the restricting half is distinctive, and deliberately so. Leaving a
+ * question out of a restriction is a real gap worth 0.08; the matching "all
+ * platforms included" adds no restriction at all and stays filler. Folding
+ * rather than listing keeps "excluding" agreeing with a question that said
+ * "exclude", so specifying it still removes the charge.
+ */
+const POLARITY = new Map([
+  ["excludes", "exclude"], ["excluded", "exclude"], ["excluding", "exclude"],
+  ["omits", "exclude"], ["omitted", "exclude"], ["omitting", "exclude"],
+  ["ignores", "exclude"], ["ignored", "exclude"], ["ignoring", "exclude"],
+  ["without", "exclude"], ["drops", "exclude"], ["dropping", "exclude"],
+]);
+
+/**
+ * A metric definition pins its FORMULA — numerator, denominator, filters, window.
+ * It does not pin which slice was taken, even when it lists the dimensions the
+ * metric can be cut by ("Cut by `device_type`/`geoip_country_code`..."). Reading
+ * that menu as "stated" turned a real narrowing into a free one: the words of
+ * "cut by device_type" were all present, so a segment choice the asker never made
+ * cost nothing and vanished from the note telling them what to pin down.
+ */
+const stripDimensionMenu = (definition: string): string =>
+  definition
+    .split(/(?<=[.!?])\s+|\n+/)
+    .filter((sentence) => !/\b(cut|split|slice|segment|grouped?|break)\s+(it\s+)?by\b/i.test(sentence))
+    .join(" ");
 
 /**
  * Drop the "assumptions" the question already answered.
@@ -628,10 +667,21 @@ export function unstatedAssumptions(
    */
   pinnedDefinitions: readonly string[] = [],
 ): string[] {
+  // `.` and `-` stay word characters so `0.08`, `2026-01-01` and `p.pay_now_n`
+  // survive; trimming them at the edges stops a sentence-final stop from making
+  // `accounts.` a word that matches nothing.
   const tokenize = (s: string): string[] =>
-    s.toLowerCase().replace(/[^a-z0-9_.-]+/g, " ").split(" ").filter(Boolean);
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9_.-]+/g, " ")
+      .split(" ")
+      .map((w) => w.replace(/^[.-]+|[.-]+$/g, ""))
+      .map((w) => POLARITY.get(w) ?? w)
+      .filter(Boolean);
 
-  const stated = new Set(tokenize([question, ...pinnedDefinitions].join(" ")));
+  const stated = new Set(
+    tokenize([question, ...pinnedDefinitions.map(stripDimensionMenu)].join(" ")),
+  );
   const statedList = [...stated];
 
   /**
@@ -668,6 +718,13 @@ export function unstatedAssumptions(
   });
 }
 
+/**
+ * The stored `metric:*` entities a question names, detected in code: the id
+ * (`metric:standard_checkout_conversion_rate`) is split on `_`, and it matches
+ * when every word appears as a whole word in the lowercased question, or the id
+ * itself appears literally. Sorted, so the same question always yields the same
+ * list. Whole words only — "conversions" does not name `conversion_rate`.
+ */
 export function namedMetrics(question: string, entities: string[]): string[] {
   const q = question.toLowerCase();
   const matched = new Map<string, Set<string>>();

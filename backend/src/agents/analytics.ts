@@ -1253,16 +1253,20 @@ export function sanityGate(results: TaskResult[]): SanityGateResult {
     // ones, so letting both speak worded one finding two ways. `new Set` cannot
     // merge them — the wording differs — so a single bad value was classified
     // twice and cost 0.20 of confidence where the table says 0.10.
-    if (!r.digest) {
-      for (const row of r.rows) {
-        for (const [col, v] of Object.entries(row)) {
-          const n = Number(v);
-          if (!Number.isFinite(n)) continue;
-          // suffix match, not substring: "share_clicked_applications" is a count,
-          // and matching "share" inside it flagged 1,601 as a rate above 100%
-          if (/(^|_)(rate|ratio|pct|percent)$/i.test(col) && n > 1.05) {
-            r.flags.push(`${col}=${n} looks like a rate above 100%`);
-          }
+    // ...but the digest profiles only the first few columns of each kind (the
+    // MAX_*_COLS backstops), so suppressing the row check wholesale left the rest
+    // unexamined: a fifth rate column above 100% was reported by neither side.
+    // Skip exactly the columns the digest answered for, and no more.
+    const digested = new Set(r.digest?.columnStats?.map((c) => c.column) ?? []);
+    for (const row of r.rows) {
+      for (const [col, v] of Object.entries(row)) {
+        if (digested.has(col)) continue;
+        const n = Number(v);
+        if (!Number.isFinite(n)) continue;
+        // suffix match, not substring: "share_clicked_applications" is a count,
+        // and matching "share" inside it flagged 1,601 as a rate above 100%
+        if (/(^|_)(rate|ratio|pct|percent)$/i.test(col) && n > 1.05) {
+          r.flags.push(`${col}=${n} looks like a rate above 100%`);
         }
       }
     }
@@ -1275,12 +1279,17 @@ export function sanityGate(results: TaskResult[]): SanityGateResult {
     // the confidence of a correct answer.
     const sampleCols = r.rows.flatMap((row) =>
       Object.entries(row).filter(
-        ([c]) => COUNT_RE.test(c) || /(^|_)(n|denominator|base)$/i.test(c),
+        ([c]) => !digested.has(c) && (COUNT_RE.test(c) || /(^|_)(base)$/i.test(c)),
       ),
     );
     // With a digest the same question is answered over every row instead of the
-    // fetched ones, so let the stronger check speak rather than saying both.
-    if (!r.digest && sampleCols.length > 0 && sampleCols.every(([, v]) => Number(v) < 50)) {
+    // fetched ones, so let the stronger check speak rather than saying both — but
+    // only for the columns it actually profiled. `digestFlags` reads sample sizes
+    // off columns classified `count`, so a denominator has to classify as one
+    // (COUNT_RE now names it); `_base` stays a row-side check only, because
+    // `price_base` is currency and reading ₹40 as a population of 40 is the very
+    // misreading that already cost a correct answer 0.10.
+    if (sampleCols.length > 0 && sampleCols.every(([, v]) => Number(v) < 50)) {
       r.flags.push("all sample sizes below 50 — low confidence");
     }
     if (r.digest) r.flags.push(...digestFlags(r.digest));
@@ -2010,8 +2019,14 @@ export async function runAnalytics(
         const parts = [`### ${r.id} — ${r.title} (${scope}${flags})`, `SQL: ${r.semanticSql}`];
         if (r.digest) {
           parts.push(renderDigest(r.digest));
+          // Digests now run from two rows up, so "a sample, NOT the population"
+          // became a lie for small results where every row is listed — and it
+          // talked the narrator out of citing the very per-segment rows the chart
+          // and the segment table are built from.
           parts.push(
-            `sample rows (the first ${shown.length} of ${r.totalRows} in query order — illustrative only, NOT the population): ${JSON.stringify(shown)}`,
+            shown.length >= r.totalRows
+              ? `all ${r.totalRows} rows, in query order: ${JSON.stringify(shown)}`
+              : `sample rows (the first ${shown.length} of ${r.totalRows} in query order — illustrative only, NOT the population): ${JSON.stringify(shown)}`,
           );
         } else {
           parts.push(`rows: ${JSON.stringify(shown)}`);
@@ -2226,8 +2241,18 @@ export async function runAnalytics(
             plan.assumptions,
             // Naming a metric invokes its definition, which fixes the
             // denominator and the filters — those are then pinned, not assumed.
+            // `namedMetrics` returns BARE ids (`standard_checkout_conversion_rate`)
+            // while an entry's entity carries the `metric:` prefix, so comparing
+            // them directly matched nothing and this list was always empty: every
+            // question that named a metric was still charged 0.08 apiece for the
+            // denominator and the filters its own definition had already fixed.
             bundle.entries
-              .filter((e) => metricsNamed.includes(e.entity))
+              .filter((e) => {
+                const id = e.entity.toLowerCase();
+                return metricsNamed.some(
+                  (m) => id === `metric:${m.toLowerCase()}` || id === m.toLowerCase(),
+                );
+              })
               .map((e) => e.definition_md),
           ),
           namedMetrics: metricsNamed,

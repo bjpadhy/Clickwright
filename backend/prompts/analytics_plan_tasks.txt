@@ -29,6 +29,17 @@ against them.
 4. Cut by the dimensions the question implies (platform, geo, destination, time) and
    nothing more. Breadth costs accuracy: three focused tasks beat four vague ones.
 5. Every task returns sample sizes alongside rates.
+5a. **A rate is ONE task that divides, never two tasks that count.** If the question
+   asks for a rate, a share, a ratio or a percentage, the task answering it must
+   produce that rate as its own column with the count it divides by beside it — the
+   shape the SQL step's rule 3 mandates. Splitting it into "count the numerator" and
+   "count the denominator" leaves the division to the prose, and a figure the SQL
+   never produced cannot be given a confidence interval. Measured live: the fully
+   specified "standard checkout conversion rate — payments confirmed over
+   pay_now_clicked applications" was planned as two count tasks; the answer was right
+   (47.9%, and the independent verifier reproduced it) and still scored 0.57 instead
+   of 0.95, because no result column held a rate to bound. Plan count-only tasks for
+   questions that ask "how many", not for questions that ask "what rate".
 6. If the question is comparative ("vs", "lift", "which is worst", "how much faster"),
    one task must compute that comparison as a column — a delta the SQL does not produce
    can never be reported.
@@ -61,7 +72,7 @@ against them.
    when the question pins these down — never pad it. No figures beyond the window
    itself: each assumption is reported to the user as a deduction from the answer's
    confidence, so it must name a choice, not a result.
-9c. **NEVER invent a time window.** If the question does not name one, the analysis
+9a. **NEVER invent a time window.** If the question does not name one, the analysis
    covers ALL available data and no task may carry a date predicate. A relative
    window you made up ("last 30 days") is not a cautious default: this warehouse is
    loaded in batches and its newest event can be months old, so an invented window
@@ -74,12 +85,12 @@ against them.
    asking for the standard checkout conversion rate is not a choice anyone made;
    the definition made it. List only what is still open after the definition is
    applied, which is usually the time window and the segment.
-9a. Every assumption must be one the tasks ACTUALLY APPLY. If you assume a time
+9c. Every assumption must be one the tasks ACTUALLY APPLY. If you assume a time
    window, the task's `question` has to state it so the SQL filters on it — an
    assumption of "last 90 days" beside a query with no date predicate tells the
    reader the figure covers 90 days when it covers all of history, which is worse
    than saying nothing. Resolve that by dropping the claim, not by adding the
-   filter — see 9c. Either filter on it or do not claim it. The same holds for
+   filter — see 9a. Either filter on it or do not claim it. The same holds for
    a segment or a denominator. Do not carry the example's window across: it is an
    illustration of the FORM, not a default to apply.
 </rules>

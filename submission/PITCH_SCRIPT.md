@@ -105,7 +105,9 @@
 >
 > LOW means the evidence genuinely will not carry the claim: an independent query could not reproduce it, or the headline sample is too small to act on. It is a signal to collect more data, not a hedge.
 >
-> Bands are **non-overlapping**: HIGH is 0.75 and above, MEDIUM is 0.45 to 0.75, LOW is below 0.45, floored at 0.05. The label and the score can never disagree. Every signal ships to the UI as `name, delta, detail`, the deltas sum exactly to the score, and the score is recorded as a **Langfuse score** so you can sort every run by it in the dashboard."
+> Bands are **non-overlapping**: HIGH is 0.75 and above, MEDIUM is 0.45 to 0.75, LOW is below 0.45, floored at 0.05. The label and the score can never disagree. Every signal ships to the UI as `name, delta, detail`, the deltas sum exactly to the score, and the score is recorded as a **Langfuse score** so you can sort every run by it in the dashboard.
+>
+> **And it moves for the right reasons.** Four questions against the live service, in `docs/CONFIDENCE_WALKTHROUGH.md`: 'how is checkout doing' scores 0.67; 'what is the standard checkout conversion rate' scores 0.91; the same metric with its denominator, window and platform spelled out scores 1.00. All three report the same figure -- 47.9% -- and an independently written query reproduced it every time. The only thing that changed is how much the asker pinned down. Then the fourth, phrased just as precisely but sliced down to wallet users in Singapore on iOS: thirteen applications, the verifier reproduces 23.1% exactly, and it scores **0.14**. Being right is not enough when the evidence cannot carry the claim, and the score is the only part of the answer that says so."
 
 ---
 

@@ -114,3 +114,49 @@ test("a cast divisor is found in a whole SELECT", () => {
     "p.pay_now_n AS pay_now_n FROM t p";
   assert.deepEqual(denominatorColumnsFromSql("conversion_rate", sql, COLS), ["pay_now_n"]);
 });
+
+// ── the division wrapped in a guard ────────────────────────────────
+
+/**
+ * `divisorOf` only sees a `/` at paren depth 0, so wrapping the division — which
+ * is the normal way to write a safe rate — hid it completely. Measured live on
+ * 22 Sep 2026: three of five demo questions shipped a textbook-correct rate WITH
+ * its denominator as its own column, exactly as the SQL prompt's rule 3 demands,
+ * and were still scored "no figure carries an interval". That is −0.40 for
+ * `no_bounded_precision` and −0.10 for `rates_without_denominator` on answers
+ * that had done everything right; the fully specified demo question landed at
+ * 0.55 instead of 1.00.
+ */
+test("a division guarded by if() still resolves", () => {
+  // verbatim from the run that scored 0.55
+  const sql =
+    "SELECT coalesce(p.device_type, pn.device_type) AS device_type, " +
+    "coalesce(p.purchase_n, 0) AS purchase_n, coalesce(pn.pay_now_n, 0) AS pay_now_n, " +
+    "if(pay_now_n > 0, purchase_n / pay_now_n, 0) AS conversion_rate FROM a FULL OUTER JOIN b ON x";
+  assert.deepEqual(denominatorColumnsFromSql("conversion_rate", sql, COLS), ["pay_now_n"]);
+});
+
+test("round(), multiIf() and CASE WHEN resolve too", () => {
+  const forms = [
+    "round(purchase_n / pay_now_n, 4)",
+    "multiIf(pay_now_n = 0, 0, purchase_n / pay_now_n)",
+    "CASE WHEN pay_now_n > 0 THEN purchase_n / pay_now_n ELSE 0 END",
+    "if(1, purchase_n / nullIf(CAST(pay_now_n AS Float64), 0), 0)",
+  ];
+  for (const form of forms) {
+    const sql = `SELECT purchase_n, pay_now_n, ${form} AS conversion_rate FROM t`;
+    assert.deepEqual(denominatorColumnsFromSql("conversion_rate", sql, COLS), ["pay_now_n"], form);
+  }
+});
+
+test("a division inside a CONDITION is a test, not the figure", () => {
+  // `if(a / b > 0.5, …)` divides to decide, and names no denominator for the result
+  const sql =
+    "SELECT purchase_n, pay_now_n, if(purchase_n / pay_now_n > 0.5, 1, 0) AS conversion_rate FROM t";
+  assert.deepEqual(denominatorColumnsFromSql("conversion_rate", sql, COLS), []);
+});
+
+test("a guard still cannot invent a denominator that is not returned", () => {
+  const sql = "SELECT if(1, purchase_n / other_table.n, 0) AS conversion_rate FROM t";
+  assert.deepEqual(denominatorColumnsFromSql("conversion_rate", sql, COLS), []);
+});

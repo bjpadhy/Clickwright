@@ -51,8 +51,11 @@ roughly a quarter of the time the Agent SDK path takes, and the free tier (≈ 1
 requests/min, 1,500/day — one question is 5–7 calls) is enough for a demo.
 Check `GEMINI_MODEL` before a demo: the newest Gemini models can carry a very low
 free-tier **daily** cap that a single run exhausts (measured 21 Sep 2026:
-`gemini-3.8-flash` allows 20 requests/day), and the run then dies in rate-limit
-retries. Switch `GEMINI_MODEL` to a model on the normal quota if that happens. Google
+`gemini-3.8-flash` allows 20 requests/day). A daily 429 is **not** retried — it
+cannot clear before midnight Pacific, so the run stops at once with a message
+naming the model, the cap and the reset. Switch `GEMINI_MODEL` to a model on the
+normal quota, or use a key from another Google Cloud project (the cap is per
+model per project). Google
 may use free-tier prompts to improve its models; the pipeline sends schema, SQL
 and aggregates, never user PII. Upgrading the key to a paid tier removes the rate
 limit if you need two people asking at once.
@@ -298,7 +301,7 @@ clean checkout without an `.env`.
 turn on.** All four default to enabled, which is the behaviour every trace and
 screenshot was produced with; each one costs latency, so disable one only if a
 demo needs the last few seconds (`ANALYTICS_QUALITY_GATE=0` saves the most — one
-4–6k call plus a possible re-narration).
+12k-budget call plus a possible re-narration).
 
 ## Troubleshooting
 
@@ -308,7 +311,8 @@ demo needs the last few seconds (`ANALYTICS_QUALITY_GATE=0` saves the most — o
 | Webapp never starts under Docker | The backend never went healthy; `docker compose logs backend` shows the ClickHouse error |
 | `Missing env var X` on startup | `X` is absent or still a placeholder in `backend/.env` |
 | Agent calls fail although the app runs | No usable model credential — see the note in Configure; `/api/health` shows which backend resolved |
-| `rate-limited (429)` in the step log | Gemini free tier is ≈ 15 requests/min. The call backs off and retries; lower `LLM_MAX_CONCURRENCY` or upgrade the key. If it never clears, `GEMINI_MODEL` is likely on a low daily cap — the 429 body names the quota — so pick another model |
+| `rate-limited the request (429)` in the step log | A burst against the ≈ 15 requests/min free tier. The call backs off and retries; lower `LLM_MAX_CONCURRENCY` or upgrade the key |
+| `daily free-tier quota is exhausted` (429) | A per-model, per-project **daily** cap. Not retried — it resets at midnight Pacific. Set `GEMINI_MODEL` to another model, use a key from a different project, or enable billing |
 | `authentication failed (401) — check GEMINI_API_KEY` | The key is wrong, revoked, or from a different Google project |
 | `404 — unknown model` | `GEMINI_MODEL` names a model the key cannot reach; `gemini-3.1-flash-lite` is the safe default |
 | Answers truncate or JSON fails to parse | The output hit `max_tokens`; the trace shows `finish_reason: length`. Try `LLM_REASONING_EFFORT=low` — thinking tokens count against the budget |

@@ -9,8 +9,10 @@ can cap it, and every weakness in the evidence subtracts a named amount. The ded
 sum exactly to the score, so the card can be read as a receipt rather than a vibe.
 
 This document is a transcript. Every number below came from running the four questions
-against the live ClickHouse service and the live model on 21 September 2026, in one
-conversation, cold cache. Nothing here is illustrative.
+against the live ClickHouse service and the live model on 22 September 2026, each in its
+own fresh conversation so nothing was served from cache. Every signal table is the
+`confidence.signals` array as the run produced it, and every one satisfies the
+`1 + Σdelta === score` invariant. Nothing here is illustrative.
 
 ---
 
@@ -42,36 +44,45 @@ of points. The thin slices become a *note*, not a verdict.
 
 ## The walkthrough
 
-### 1. "How is checkout doing?" → **medium, 0.62**
+### 1. "How is checkout doing?" → **medium, 0.67**
 
-> Checkout conversion stands at 47.9%, with over half of users abandoning after
-> clicking Pay Now.
+> Checkout conversion is steady at 47.9% overall, while Express Checkout adoption
+> reaches 61.0% with a 50.7% conversion rate.
+
+| Signal | Δ | Why |
+|---|---|---|
+| `headline_interval` | −0.05 | ±1.7pp on the express checkout conversion rate (n=3,300) |
+| `small_segments` | −0.12 | 5 thin segments, n 65–81 — indicative only |
+| `assumptions` | −0.16 | all available data; segment by `geoip_country_code` |
+
+Verified: an independently written query reproduced 47.9% exactly. The figure is as
+solid as it gets, and the answer is still only medium, because **two of the choices
+behind it were ours, not the asker's**. The question named no metric and no window,
+so the planner chose them — and chose to segment by country, which is the right
+instinct on a vague question and still a choice the asker did not make.
+
+Note what the headline is. The answer reports several rates; the one charged is the
+express conversion rate over 3,300 applications, not the four-row device slices
+beside it.
+
+### 2. "What is the standard checkout conversion rate?" → **high, 0.91**
+
+> The standard checkout conversion rate is 47.9%.
 
 | Signal | Δ | Why |
 |---|---|---|
 | `headline_interval` | −0.02 | ±0.8pp on the population rate (n=14,026) |
-| `small_segments` | −0.12 | 16 thin segments, n 12–87 — indicative only |
-| `assumptions` | −0.24 | all available data; the denominator; the hygiene filters |
-
-Verified: an independently written query reproduced 47.9%. The figure is as solid
-as it gets, and the answer is still only medium, because **three of the choices
-behind it were ours, not the asker's**. The question named no metric, no
-denominator and no window, so the planner chose them.
-
-### 2. "What is the standard checkout conversion rate?" → **medium, 0.65**
-
-| Signal | Δ | Why |
-|---|---|---|
-| `headline_interval` | −0.02 | ±0.8pp (n=14,026) |
-| `small_segments` | −0.12 | 12 thin segments |
-| `assumptions` | **−0.08** | only the window is still open |
+| `small_segments` | −0.12 | 12 thin segments, n 12–87 |
 | `named_metric` | +0.05 | the question pins `standard_checkout_conversion_rate` |
 
-Naming the metric does two things. It earns the bonus, and it *invokes the stored
-definition*, which fixes the denominator and the hygiene filters — so those stop
-being assumptions at all. The assumption charge falls from 0.24 to 0.08.
+Naming the metric does two things, and the second is the larger. It earns the bonus,
+and it *invokes the stored definition*, which fixes the denominator
+(`pay_now_clicked` applications) and the hygiene filters (`duplicate_id IS NULL`,
+`is_back_filled != 1`). Those stop being assumptions, because nobody chose them —
+the definition did. **The assumption charge falls from 0.16 to nothing**, and one
+word of extra precision is worth 0.24 of confidence.
 
-### 3. Same metric, fully specified → **high, 0.95**
+### 3. Same metric, fully specified → **high, 1.00**
 
 > Standard checkout conversion rate — payments confirmed over pay_now_clicked
 > applications, between 2026-01-01 and 2026-07-01, all platforms
@@ -79,27 +90,36 @@ being assumptions at all. The assumption charge falls from 0.24 to 0.08.
 | Signal | Δ | Why |
 |---|---|---|
 | `headline_interval` | −0.02 | ±0.8pp (n=14,024) |
-| `definition_concern` | 0.00 | the auditor noted a join risk, surfaced but not charged |
-| `assumptions` | −0.08 | only the segmentation is still open |
+| `definition_concern` | 0.00 | the auditor noted a NULL-merging join risk — surfaced, not charged |
+| `named_metric` | +0.02 | as above, capped at the total deducted so the score cannot exceed 1.00 |
+
+Verified, bounded to under a point, nothing assumed, and the independent query
+reproduced the figure to fourteen decimal places. **This is what the top of the scale
+is for**: the question is precise, the query implements the stored definition, and a
+second, separately written query agrees.
+
+The bonus is 0.02 here rather than 0.05 because it is capped at the total deducted.
+The score is a receipt, and a receipt cannot show a credit larger than the bill.
+
+### 4. "…but only wallet users in Singapore on iOS" → **low, 0.14**
+
+> The standard checkout conversion rate for wallet users in Singapore on iOS is 23.1%.
+
+| Signal | Δ | Why |
+|---|---|---|
+| `headline_interval` | −0.65 | ±21.0pp on the rate (n=13) — too wide to act on |
+| `citation_retries` | −0.10 | narration corrected 1× for uncited numbers |
+| `assumptions` | −0.16 | all available data; `payment_method = 'wallet'` identifies wallet users |
 | `named_metric` | +0.05 | as above |
 
-Verified, bounded to under a point, nothing material assumed. **0.95, high.** On a
-repeat run of the same question with the window specified the same way, it scored
-1.00. This is what the top of the scale is for: the question is precise, the query
-implements the stored definition, and a second independently written query
-reproduces the number.
+The slice is 13 applications. The number is *correct* — the independent query
+reproduced 23.1% exactly — and it is still worthless: the true rate could be 2% or
+44%. Three of thirteen will not carry a decision, and the score says so rather than
+letting a precise-looking percentage imply otherwise.
 
-### 4. "…but only wallet users in Singapore on iOS" → **low**
-
-The slice is 13 applications and 3 purchases. Whatever else is true, 3 of 13 will
-not carry a decision, and the score says so. In earlier runs of this question the
-generated SQL also had a real defect — it filtered the denominator by payment
-method and forgot the numerator — and three independent checks caught it: the rate
-came out above 100%, the auditor named the exact cause, and a separately written
-query disagreed by 91%. The answer floored at 0.05 and said why.
-
-**This is the case the score exists for.** A confident-sounding wrong number is the
-expensive failure in AI analytics.
+**This is the case the score exists for.** A confident-sounding number resting on
+nothing is the expensive failure in AI analytics, and it is the one case where being
+right is not enough.
 
 ---
 
@@ -107,15 +127,18 @@ expensive failure in AI analytics.
 
 | # | Question | Score | What moved |
 |---|---|---|---|
-| 1 | vague | medium 0.62 | verified and tightly bounded, but three assumptions |
-| 2 | names the metric | medium 0.65 | the definition pins the denominator and filters |
-| 3 | fully specified | **high 0.95** | nothing material left to assume |
-| 4 | tiny slice | low | 3 of 13 carries no decision |
+| 1 | vague | medium 0.67 | verified and tightly bounded, but the metric and the cut were ours |
+| 2 | names the metric | **high 0.91** | the definition pins the denominator and the filters — 0.16 of assumptions disappears |
+| 3 | fully specified | **high 1.00** | nothing left to assume |
+| 4 | tiny slice | low 0.14 | 13 applications carry no decision, however well the question is phrased |
 
-Each step from 1 to 3 removes something the asker could have said and the pipeline
-had to guess. The drop at 4 is the point: the score follows the **evidence**, not
-the wording. A perfectly phrased question about data that cannot support an answer
-still scores low, and should.
+Steps 1 to 3 each remove something the asker could have said and the pipeline had to
+guess; the score rises 0.33 across them with the **same headline figure, 47.9%,
+verified identically every time**. The drop at 4 is the point: the score follows the
+**evidence**, not the wording. A perfectly phrased question about data that cannot
+support an answer still scores low, and should.
+
+All four ran in 31-68 seconds with no truncated model output.
 
 ## What is not yet solid
 
@@ -124,9 +147,14 @@ purpose.
 
 - **The provider is the main source of run-to-run variance now.** On the free tier,
   a 503 or a 429 on the verification call means the answer is genuinely unverified
-  and takes the 0.30 deduction, so the same question can land at 0.95 on one run and
-  0.65 on the next with identical SQL and an identical figure. A paid key removes
+  and takes the 0.30 deduction, so the same question can land at 1.00 on one run and
+  0.70 on the next with identical SQL and an identical figure. A paid key removes
   most of this.
+- **How the planner shapes a question still moves the score.** Question 2 above
+  scored 0.91 because the plan happened to include twelve thin per-country segments;
+  a plan without them scores higher on the same figure. The headline is stable —
+  47.9%, verified, in every run — but the segments around it are not, and they are
+  worth up to 0.12.
 - **A relative window can silently select nothing.** This dataset ends 2026-07-01,
   so "last 30 days" matches no rows. The planner is now forbidden from inventing a
   window, and a genuinely empty result answers honestly ("No data matches this
@@ -140,7 +168,7 @@ Not a trick; this is what the signals actually measure.
 
 1. **Name the metric.** It earns 0.05 and, more importantly, invokes the stored
    definition, so the denominator and the hygiene filters stop counting as
-   assumptions.
+   assumptions. Measured above: worth 0.24 on its own.
 2. **Give the window explicitly, as dates.** A window the data covers, since a
    relative one may not.
 3. **Say the population.** "All platforms" or the exact segment; either is fine,
@@ -154,7 +182,8 @@ Not a trick; this is what the signals actually measure.
 cd backend && npm run serve
 ```
 
-Then POST each question in turn to `/api/conversations/:id/messages` in one conversation
-and read the `insight` event from the SSE stream; `confidence.signals` is the table
-above, verbatim. The scoring itself is pure and unit-tested in
+Then POST each question to `/api/conversations/:id/messages` — each in its own fresh
+conversation, since the conversation id is part of the cache key — and read the
+`insight` event from the SSE stream. Its `confidence.signals` array is the table above,
+verbatim. The scoring itself is pure and unit-tested in
 `backend/test/analytics/confidence.test.ts`.

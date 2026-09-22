@@ -72,15 +72,20 @@ interface ChatValue {
 const ChatContext = React.createContext<ChatValue | null>(null)
 
 /**
- * How long the client waits for an answer before it stops listening.
+ * How long the client waits for the NEXT event before it stops listening.
  *
- * Generously above the worst measured question so a slow-but-working answer is
- * never cut off. The point is that a stream killed by a proxy, a sleeping
- * laptop or a backend restart cannot leave the composer disabled forever with
- * a spinner that will never resolve — the turn is persisted server-side, so
- * reopening the conversation picks up whatever landed.
+ * Silence, not total duration. A working answer emits `llm_progress` every 3 s,
+ * so a live turn refreshes this on every tick and is never cut off however long
+ * it runs — which matters because one LLM call alone may take `LLM_TIMEOUT_MS`
+ * (240 s) and be retried. Measured as a total budget instead, this killed
+ * answers that were still streaming at five minutes.
+ *
+ * What it does catch is the case it exists for: a stream killed by a proxy, a
+ * sleeping laptop or a backend restart leaving the composer disabled forever
+ * behind a spinner that will never resolve. The turn is persisted server-side,
+ * so reopening the conversation picks up whatever landed.
  */
-const TURN_TIMEOUT_MS = 5 * 60_000
+const TURN_SILENCE_MS = 2 * 60_000
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
@@ -106,6 +111,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   messagesRef.current = messages
   /** Set while a turn is in flight, so `cancel()` can reach into it. */
   const abortTurnRef = React.useRef<((reason: "user" | "timeout") => void) | null>(null)
+  /** Held from the moment a question is accepted until its turn is set up, so a
+   * second click during the create-conversation round trip cannot start a
+   * second conversation and a second answer. */
+  const startingRef = React.useRef(false)
 
   const active = React.useMemo(
     () => conversations.find((c) => c.id === activeId) ?? null,
@@ -196,6 +205,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       const text = question.trim()
       if (!text) return
 
+      // `streaming` only becomes true once `pending` is set, which is after the
+      // round trip that creates a draft conversation — so two quick clicks on a
+      // suggestion chip started two conversations and two answers. Claim the
+      // slot before awaiting anything.
+      if (startingRef.current) return
+      startingRef.current = true
+
       void (async () => {
         let convId = target
         try {
@@ -206,6 +222,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             await refreshConversations().catch(() => {})
           }
         } catch (error) {
+          startingRef.current = false
           toast.error(message(error))
           return
         }
@@ -214,6 +231,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // log synchronously, and state updates are not readable in-flight.
         const events: ChatEvent[] = []
         const outcome: { error: string | null } = { error: null }
+        // Every answer ends in `insight` or `failed`. A stream that ends with
+        // neither is a lost turn, and silence is the worst way to report it:
+        // `pending` was cleared, no toast fired, and the question vanished from
+        // the thread with nothing said. Watch for the terminal event so the
+        // absence of one can be surfaced.
+        let sawTerminal = false
 
         // An answer emits step events in bursts — several within a frame while
         // three SQL tasks run. Appending to the array above is free; publishing
@@ -236,7 +259,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           controller.abort()
         }
         abortTurnRef.current = abort
-        const timeout = window.setTimeout(() => abort("timeout"), TURN_TIMEOUT_MS)
+        // Re-armed by every event below, so the deadline measures silence.
+        let timeout = window.setTimeout(() => abort("timeout"), TURN_SILENCE_MS)
+        const heardFromServer = () => {
+          window.clearTimeout(timeout)
+          timeout = window.setTimeout(() => abort("timeout"), TURN_SILENCE_MS)
+        }
 
         setPending({
           convId,
@@ -246,16 +274,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           traceUrl: null,
           error: null,
         })
+        // `streaming` is true from here, so it takes over the guard
+        startingRef.current = false
 
         try {
           await askQuestion(convId, text, {
-            onStart: ({ traceUrl }) =>
-              setPending((p) => (p?.convId === convId ? { ...p, traceUrl } : p)),
+            onStart: ({ traceUrl }) => {
+              heardFromServer()
+              setPending((p) => (p?.convId === convId ? { ...p, traceUrl } : p))
+            },
             onEvent: (event) => {
+              heardFromServer()
               events.push(event)
               if (flushHandle === null) flushHandle = window.requestAnimationFrame(publishEvents)
             },
             onInsight: (insight, traceUrl) => {
+              sawTerminal = true
               // The answer is persisted either way; only merge it into the view
               // if that conversation is still the one on screen.
               if (activeIdRef.current !== convId) return
@@ -291,6 +325,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 })
             },
             onFailed: (error) => {
+              sawTerminal = true
               outcome.error = error
               setPending((p) => (p?.convId === convId ? { ...p, error } : p))
             },
@@ -298,7 +333,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         } catch (error) {
           outcome.error =
             stopped === "timeout"
-              ? "No answer after 5 minutes. The agent may still be working — reopen this conversation to pick it up."
+              ? "Nothing from the server for two minutes. The agent may still be working — reopen this conversation to pick it up."
               : stopped === "user"
                 ? "Stopped listening. The answer may still land — reopen this conversation to check."
                 : message(error)
@@ -307,6 +342,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           window.clearTimeout(timeout)
           if (flushHandle !== null) window.cancelAnimationFrame(flushHandle)
           if (abortTurnRef.current === abort) abortTurnRef.current = null
+        }
+
+        if (!sawTerminal && !outcome.error && !stopped) {
+          outcome.error =
+            "The connection to the server ended before the answer did. It may still have finished — reopen this conversation to check."
         }
 
         // `done` has fired — the backend always sends it, success or failure.

@@ -329,7 +329,15 @@ export async function verifyTask(
           `it returned ${rows.length} rows. A verification returns exactly ONE row holding ONE number: aggregate over the whole population with no GROUP BY.`,
         );
         if (retry && retry.value !== null && !retry.inconclusive) {
-          plan = retry.plan;
+        // A retry is asked to fix its own SQL, not to re-judge the analysis. Take
+        // the query and the column it names; keep the auditor's first verdict, or
+        // a `definition_ok: false` with a real concern is erased — and the 0.10 it
+        // should cost with it — by a retry that happened to come back clean.
+        plan = {
+          ...plan,
+          verification_sql: retry.plan.verification_sql,
+          expected_to_match: retry.plan.expected_to_match,
+        };
           ran = retry.sql;
           verifiedValue = retry.value;
           inconclusive = "";
@@ -361,10 +369,24 @@ export async function verifyTask(
           note: `verification query failed: ${message.slice(0, 140)}`,
         } satisfies VerificationResult;
       }
-      plan = retry.plan;
+      // A retry is asked to fix its own SQL, not to re-judge the analysis. Take
+      // the query and the column it names; keep the auditor's first verdict, or
+      // a `definition_ok: false` with a real concern is erased — and the 0.10 it
+      // should cost with it — by a retry that happened to come back clean.
+      plan = {
+        ...plan,
+        verification_sql: retry.plan.verification_sql,
+        expected_to_match: retry.plan.expected_to_match,
+      };
       ran = retry.sql;
       verifiedValue = retry.value;
-      inconclusive = retry.inconclusive;
+      // A retry that RAN but produced nothing usable is still the original
+      // failure. Overwriting the reason here reported "the verification query
+      // returned no numeric verified_value" for a query the database had
+      // rejected outright — a softer, wrong account of what went wrong.
+      inconclusive =
+        retry.inconclusive ||
+        (retry.value === null ? `verification query failed: ${message.slice(0, 140)}` : "");
     }
 
     // the figure it claims to reproduce, from the original result

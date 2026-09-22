@@ -11,6 +11,28 @@
 
 // ── error classes ────────────────────────────────────────────────
 
+/**
+ * Is this 429 a DAILY cap rather than a burst?
+ *
+ * The two are the same status code and mean opposite things. A per-minute 429
+ * clears in seconds and the backoff is exactly right for it. A per-day 429
+ * clears tomorrow, and retrying it three times with backoff spends ~35 s per
+ * call to arrive at the same answer, on every remaining call of the question —
+ * turning "you are out of quota" into several minutes of apparent hanging
+ * before a failure that was knowable at the first response.
+ *
+ * Gemini names the quota in the body: `PerDay` in the quotaId, or a
+ * `generate_content_free_tier_requests` metric with a day dimension. The
+ * `retryDelay` it returns alongside is a per-minute hint and is NOT the time
+ * until the daily window resets, so it must not be trusted here.
+ */
+export function isDailyQuotaBody(body: string): boolean {
+  if (!body) return false;
+  return /perday|per day|requests per day|_requests_per_day|limit:\s*\d+,\s*model|free_tier_requests/i.test(
+    body,
+  );
+}
+
 /** A non-2xx response. `retryAfterMs` is the provider's own hint when it gave one. */
 export class LlmHttpError extends Error {
   readonly status: number;
@@ -111,6 +133,10 @@ export function isRetryableLlmError(err: unknown): boolean {
   if (err instanceof LlmTimeoutError) return true;
   if (isAbortError(err)) return false;
   const status = statusOf(err);
+  if (status === 429 && err instanceof LlmHttpError && isDailyQuotaBody(err.body)) {
+    // a daily cap does not clear before tomorrow; three backoffs only delay the news
+    return false;
+  }
   if (status !== null) return status === 408 || status === 409 || status === 429 || status >= 500;
   if (err instanceof TypeError) return true;
   if (err instanceof Error && err.name.startsWith("APIConnection")) return true;
@@ -449,6 +475,9 @@ export function describeHttpError(
   if (status === 401 || status === 403) return `${ctx.provider} authentication failed (${status}) — check ${ctx.keyVar}`;
   if (status === 404) return `${ctx.provider} returned 404 — unknown model "${ctx.model}" or wrong LLM_BASE_URL: ${detail}`;
   if (status === 429) {
+    if (isDailyQuotaBody(body)) {
+      return `${ctx.provider} daily free-tier quota is exhausted for "${ctx.model}" (429). It resets at midnight Pacific. Use a key from a different Google Cloud project, set GEMINI_MODEL to another model (the cap is per model), or enable billing: ${detail}`;
+    }
     const wait = ctx.retryAfterMs != null ? `, retry after ${Math.ceil(ctx.retryAfterMs / 1000)} s` : "";
     return `${ctx.provider} rate-limited the request (429${wait}): ${detail}`;
   }

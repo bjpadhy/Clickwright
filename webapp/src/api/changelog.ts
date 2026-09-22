@@ -5,6 +5,8 @@
  * the formatters at the bottom of this file are that decision, in one place.
  */
 
+import { parseJson } from "./http"
+
 export interface ChangelogEntryDto {
   id: string
   /** "YYYY-MM-DD HH:MM:SS.mmm" */
@@ -26,7 +28,17 @@ export interface ChangelogEntryDto {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, init)
   const text = await response.text()
-  const body = text ? (JSON.parse(text) as unknown) : null
+  // An HTML 502 from a proxy, or a truncated body, is not JSON. Parsing it
+  // unguarded threw "Unexpected token '<'" into the Changelog error panel,
+  // which told the reader nothing about the backend being down.
+  const body = parseJson(text)
+  if (body === undefined) {
+    throw new Error(
+      response.ok
+        ? `${path}: the backend returned a response that is not JSON`
+        : `${response.status} ${response.statusText}`,
+    )
+  }
 
   if (!response.ok) {
     const error =

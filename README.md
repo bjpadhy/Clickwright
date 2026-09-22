@@ -63,7 +63,7 @@ Three agents, one shared brain — the `context_store` in ClickHouse:
 ### Key implementation details
 - **ClickHouse best-practice DDL generation** — schemas are not guessed. Code profiles every field (types, null rates, cardinality, numeric ranges) and synthesizes a deterministic baseline DDL with correct `LowCardinality`, `Decimal64` for money, and sensible ordering keys. The LLM then optimizes codecs, partitioning, cross-table type coherence, and TTL in a single call — guided by the ClickHouse architecture review skill. If the LLM fails, the measured baseline ships unchanged. Every DDL is dry-run through `EXPLAIN AST` before execution.
 - **Cross-conversation context** — follow-up answers carry prior SQL, established figures (with their denominators and source tables), and dropped-task reasons from earlier turns. This prevents silent denominator drift: if one answer reports UAE conversion as 56.6%, the next turn knows both the number and the `n` it rests on, so a changed denominator is explained rather than silently contradicting what the PM was already told. History window is 12 turns with smart compression.
-- **Wilson score validation** — every rate the Analytics Agent reports is classified (proportion, mean, quantile, ratio) and only proportions get a 95% Wilson confidence interval computed from the actual denominator. The interval is reported inline with the figure, not separately. Confidence (high/medium/low) is *computed* from the widest interval, sanity flags, citation retries, and whether an independent verification query reproduced the headline — never asked of the model. A ±10pp+ interval drops confidence to low; a verification disagreement does the same.
+- **Wilson score validation** — every rate the Analytics Agent reports is classified (proportion, mean, quantile, ratio) and only proportions get a 95% Wilson confidence interval computed from the actual denominator. The interval is reported inline with the figure, not separately. Confidence (high/medium/low) is *computed* from the **headline** figure's interval, sanity flags, citation retries, and whether an independent verification query reproduced the headline — never asked of the model. The headline is the verified column if there was one, else the whole-population rate, else the best-supported bounded figure; a thin tail segment cannot set it, which is what stopped one n=2 row from calling a reproduced n=14,026 answer "low". Other thin segments still cost the answer, just by a bounded amount. A ±10pp+ headline interval drops confidence to low; a verification disagreement does the same.
 - **Concurrent SQL execution** — ≤4 tasks run in parallel; dependent tasks (funnels) run sequentially with result forwarding.
 - **Full-set profiling** — large results are wrapped as subqueries and profiled entirely in ClickHouse. The narrator sees exact population stats, not sample extrapolations.
 - **DML vs schema retry** — transient INSERT failures retry the load only; type-mismatch errors trigger schema redesign.
@@ -72,15 +72,16 @@ Three agents, one shared brain — the `context_store` in ClickHouse:
 ```
 backend/        Typescript pipeline + HTTP/SSE server
 webapp/         React + Vite frontend
-specs/          10 sample feature specs (spec.md + events.ndjson)
-docs/           SVG architecture diagrams
-submission/     ARCHITECTURE.md, RUN.md, pitch deck
+specs/          6 sample feature specs (spec.md + events.ndjson)
+docs/           SVG architecture diagrams + the confidence walkthrough
+submission/     pitch script and demo fixtures
+ARCHITECTURE.md, RUN.md   at the repo root
 base_context.md Human-authored seed for the knowledge store
 ```
 
 ## How to run it
 
-See **[submission/RUN.md](RUN.md)** for full setup instructions.
+See **[RUN.md](RUN.md)** for full setup instructions.
 
 **Quick start:**
 ```bash
@@ -112,6 +113,7 @@ verified at 0.70, nothing bounded at 0.60) and each weakness in the evidence sub
 named amount. The deltas sum exactly to the score, so the card reads as a receipt.
 
 [docs/CONFIDENCE_WALKTHROUGH.md](docs/CONFIDENCE_WALKTHROUGH.md) walks four real
-questions asked in one conversation against the live service, with every signal as the
-run produced it. Between the third and the second, only the asker's specificity
-changes, and it is worth 0.16.
+questions against the live service, with every signal as the run produced it. The first
+three report the same verified figure — 47.9% — and score 0.67, 0.91 and 1.00; the only
+thing that changes is how much the asker pinned down. The fourth is phrased just as
+precisely, rests on 13 applications, and scores 0.14.

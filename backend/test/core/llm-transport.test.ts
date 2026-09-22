@@ -10,6 +10,7 @@ import {
   createSemaphore,
   describeHttpError,
   estimateUsage,
+  isDailyQuotaBody,
   isRetryableLlmError,
   parseOpenAiChatResponse,
   parseRetryAfterMs,
@@ -334,4 +335,53 @@ test("describeHttpError names the failure class and the env var to check", () =>
 
   const longBody = "x".repeat(1000);
   assert.ok(describeHttpError(400, longBody, ctx).length < 400, "body is clipped to ~300 chars");
+});
+
+// ── a daily cap is not a burst ───────────────────────────────────
+
+test("a per-day 429 is not retried, and says what to do about it", () => {
+  // Both kinds of exhaustion are status 429 and mean opposite things. A
+  // per-minute 429 clears in seconds; a per-day one clears tomorrow, and
+  // retrying it three times with backoff spends ~35 s per call to reach the
+  // same answer — on every remaining call of the question.
+  const daily = JSON.stringify([
+    {
+      error: {
+        code: 429,
+        message:
+          "You exceeded your current quota.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 500, model: gemini-3.1-flash-lite",
+        details: [{ violations: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier" }] }],
+      },
+    },
+  ]);
+  assert.equal(isDailyQuotaBody(daily), true);
+  assert.equal(isRetryableLlmError(new LlmHttpError(429, daily, 38_000)), false);
+
+  const message = describeHttpError(429, daily, {
+    provider: "gemini",
+    model: "gemini-3.1-flash-lite",
+    keyVar: "GEMINI_API_KEY",
+    retryAfterMs: 38_000,
+  });
+  assert.match(message, /daily free-tier quota is exhausted/);
+  assert.match(message, /per model/);
+  // the per-minute retryDelay must NOT be presented as the time until reset
+  assert.doesNotMatch(message, /retry after 38 s/);
+});
+
+test("an ordinary burst 429 is still retried with its hint", () => {
+  const burst = JSON.stringify({
+    error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", details: [{ retryDelay: "12s" }] },
+  });
+  assert.equal(isDailyQuotaBody(burst), false);
+  assert.equal(isRetryableLlmError(new LlmHttpError(429, burst, 12_000)), true);
+  assert.match(
+    describeHttpError(429, burst, { provider: "gemini", model: "m", keyVar: "K", retryAfterMs: 12_000 }),
+    /retry after 12 s/,
+  );
+});
+
+test("an empty body cannot be mistaken for a daily cap", () => {
+  assert.equal(isDailyQuotaBody(""), false);
+  assert.equal(isRetryableLlmError(new LlmHttpError(429, "")), true);
 });

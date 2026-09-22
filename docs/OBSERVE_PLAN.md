@@ -1,7 +1,7 @@
 # Observe → Database health + Changelog — backend plan
 
 > **Status: implemented (2026-08-01).** All three phases are built, typechecked, and verified
-> against the live ClickHouse service; 52 unit tests pass. The shipped contract is documented in
+> against the live ClickHouse service; 52 unit tests passed at that date (the suite has grown a long way since). The shipped contract is documented in
 > `backend/API.md`. This document is kept as the design rationale — where it and API.md disagree,
 > API.md is authoritative. Deviations found during the build are recorded in §9.
 

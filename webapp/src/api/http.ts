@@ -6,7 +6,10 @@
  */
 
 /** JSON if it is JSON, `undefined` if it is not. Never throws. */
-function parseJson(text: string): unknown {
+/** JSON or `undefined` — never a thrown SyntaxError. Shared so every caller
+ * reports "the backend returned something that is not JSON" rather than
+ * "Unexpected token '<'". */
+export function parseJson(text: string): unknown {
   if (!text) return null
   try {
     return JSON.parse(text) as unknown

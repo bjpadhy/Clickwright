@@ -368,7 +368,23 @@ export async function streamAnswer(
   }, 15000);
   // Registered so a shutdown closes this stream instead of leaving the client
   // on a dead socket — the same treatment run streams already had.
-  const unregister = registerStream({ end: () => res.end() });
+  //
+  // A shutdown must still send a TERMINAL event. `tsx watch` sends SIGTERM on
+  // every save under backend/, and ending the response silently left the reader
+  // with a stream that carried `start` and some `log` events and then simply
+  // stopped: the client resolves normally, sees no error, drops the pending
+  // turn, and the question disappears from the thread with nothing said. Say
+  // what happened instead, then close.
+  const unregister = registerStream({
+    end: () => {
+      send("failed", {
+        error: "the server restarted while this answer was running — ask again",
+        traceUrl: url,
+      });
+      send("done", {});
+      res.end();
+    },
+  });
   // `res`, NOT `req`. For a POST, the REQUEST stream emits "close" as soon as its
   // body has been read — which for every question is immediately after
   // express.json() consumes it. Listening there marked the client gone before the

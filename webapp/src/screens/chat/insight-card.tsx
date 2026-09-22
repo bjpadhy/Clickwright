@@ -384,7 +384,12 @@ function ConfidenceMeter({
   score: number
   signals: ConfidenceSignal[]
 }) {
-  const pct = Math.round(Math.min(1, Math.max(0, score)) * 100)
+  // Cards are stored as JSON and replayed forever; one written before `score`
+  // existed has `undefined` here, and `undefined.toFixed(2)` threw during
+  // render — which, before the per-screen boundaries, took the whole app down
+  // to a fallback that had no way back to a different conversation.
+  const safeScore = Number.isFinite(score) ? score : 0
+  const pct = Math.round(Math.min(1, Math.max(0, safeScore)) * 100)
   const meter = (
     <span className="flex items-center gap-2" title={signals.length ? undefined : `${value} confidence`}>
       <span className="h-[6px] w-[92px] overflow-hidden rounded-full bg-zinc-200">
@@ -394,7 +399,7 @@ function ConfidenceMeter({
         />
       </span>
       <span className="font-mono text-[11.5px] font-[650] text-zinc-900">
-        {score.toFixed(2)}
+        {safeScore.toFixed(2)}
       </span>
     </span>
   )
@@ -410,7 +415,7 @@ function ConfidenceMeter({
         className="flex max-w-sm flex-col items-start gap-1 px-3 py-2 text-[11px] leading-[1.5]"
       >
         <span className="text-[9.5px] font-bold tracking-[.06em] opacity-60">
-          HOW THE SCORE WAS BUILT · 1 + Σ = {score.toFixed(2)}
+          HOW THE SCORE WAS BUILT · 1 + Σ = {safeScore.toFixed(2)}
         </span>
         {signals.map((signal) => (
           <span key={signal.name} className="block">

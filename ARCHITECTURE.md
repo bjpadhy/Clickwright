@@ -6,7 +6,7 @@ Clickwright is an agentic analytics pipeline for Atlys. A PM uploads a feature s
 
 ## System Architecture
 
-![System Architecture](../docs/architecture-overview.svg)
+![System Architecture](docs/architecture-overview.svg)
 
 The three agents never call each other directly. All shared state flows through `context_store` in ClickHouse — this makes each agent independently testable and the pipeline recoverable after any failure.
 
@@ -14,7 +14,7 @@ The three agents never call each other directly. All shared state flows through 
 
 ## Pipeline Detail
 
-![Pipeline Detail](../docs/pipeline-detail.svg)
+![Pipeline Detail](docs/pipeline-detail.svg)
 
 ### ① Instrumentation Agent
 
@@ -91,7 +91,7 @@ Follow-up answers carry prior SQL, established figures (with their denominators 
 
 ### Wilson Score Validation
 
-Every rate the Analytics Agent reports is classified (proportion, mean, quantile, ratio) — only proportions get a 95% Wilson confidence interval computed from the actual denominator. The interval is reported inline with the figure, not separately. Confidence (high/medium/low) is *computed* from the widest interval, sanity flags, citation retries, and whether an independent verification query reproduced the headline — never asked of the model. A ±10pp+ interval drops confidence to low; a verification disagreement does the same.
+Every rate the Analytics Agent reports is classified (proportion, mean, quantile, ratio) — only proportions get a 95% Wilson confidence interval computed from the actual denominator. The interval is reported inline with the figure, not separately. Confidence (high/medium/low) is *computed* from the **headline** figure's interval, sanity flags, citation retries, and whether an independent verification query reproduced the headline — never asked of the model. The headline is the verified column if there was one, else the whole-population rate, else the best-supported bounded figure, each column first reduced to its largest-n row; thin segments still deduct, but bounded and separately. A ±10pp+ headline interval drops confidence to low; a verification disagreement does the same.
 
 ## Quality & Correctness Stack
 
@@ -109,7 +109,7 @@ Every insight passes through multiple deterministic checks before reaching the P
 
 Langfuse is not a bolt-on — it is wired into the core execution primitive that every agent operation passes through. The `step()` function in `core/tracing.ts` wraps every unit of work: it creates a Langfuse span on entry, records output (or error) on exit, and emits SSE events for the live UI. No agent code touches Langfuse directly — all tracing flows through this single function.
 
-![Langfuse Integration](../docs/langfuse-integration.svg)
+![Langfuse Integration](docs/langfuse-integration.svg)
 
 ### How it's wired
 

@@ -44,7 +44,7 @@
 >
 > The **Analytics Agent** executes all queries with `readonly=1` -- it literally cannot mutate data.
 >
-> And wrapping everything: **Langfuse**. Every step, every LLM generation, every SQL query and its result rows, every retry, every approval decision -- captured as nested spans. We score every run with 13 numeric metrics that are sortable across all runs in the Langfuse dashboard. A wrong number is findable in 30 seconds."
+> And wrapping everything: **Langfuse**. Every step, every LLM generation, every SQL query and its result rows, every retry, every approval decision -- captured as nested spans. We score every run with 14 numeric metrics that are sortable across all runs in the Langfuse dashboard. A wrong number is findable in 30 seconds."
 
 ---
 
@@ -115,7 +115,7 @@
 >
 > **First**, the Analytics Agent generates SQL dynamically -- table aliases, column order, LIMIT values can change between runs even for the same question. ClickHouse's cache would miss on all of those.
 >
-> **Second**, we need **context-aware invalidation**. Our cache key is a SHA-256 of the normalized question, the context version digest (a SHA-1 of every entity and its version in the knowledge store), and the conversation history digest. Any write to `context_store` changes the version digest, which automatically invalidates every cache key. ClickHouse's cache has no awareness of our application-level knowledge store.
+> **Second**, we need **context-aware invalidation**. Our cache key is a SHA-256 -- truncated to 32 hex chars -- of a format version (`v4`), the conversation id, the normalized question, the context version digest (a SHA-1 of every entity and its version in the knowledge store), a data-version stamp, and the conversation history digest. The format version is the deploy-time escape hatch: bumping it retires every stored answer at once when the insight shape changes. The conversation id is why one conversation can never be served another's answer. Any write to `context_store` changes the version digest, which automatically invalidates every cache key. ClickHouse's cache has no awareness of our application-level knowledge store.
 >
 > **Third**, we're caching the **complete insight** -- headline, chart, confidence, precision intervals, verification result -- not individual query results. A cache hit skips the entire agent pipeline (planning, SQL generation, narration, citation checking, verification) and returns in milliseconds. ClickHouse's cache would only speed up individual queries -- we'd still pay for all the LLM calls.
 >
@@ -153,7 +153,7 @@
 >
 > Then a **quality gate** and the final insight is written to the **ClickHouse `insight_cache`** for future cache hits. *(Langfuse score: quality_gate_passed, confidence_computed, rows_analyzed_total)*
 >
-> Every single step is a Langfuse span. 13 numeric scores are recorded per run."
+> Every single step is a Langfuse span. 14 numeric scores are recorded per run."
 
 ---
 
@@ -161,7 +161,7 @@
 
 > "Let me walk you through what you see when you open a trace.
 >
-> **Trace list view**: Every run appears as a row. The 13 scores we record -- `verification_agreed`, `citation_failures`, `confidence_computed`, `rows_analyzed_total`, `cache_hit`, `self_heal_attempts`, `sanity_flags` -- all show up as **sortable columns**. So you can instantly find: 'show me all runs where verification disagreed', or 'sort by citation failures to find unreliable runs'.
+> **Trace list view**: Every run appears as a row. The 14 scores we record -- `verification_agreed`, `citation_failures`, `confidence_score`, `confidence_computed`, `rows_analyzed_total`, `cache_hit`, `sanity_flags`, `dropped_tasks` -- all show up as **sortable columns**. So you can instantly find: 'show me all runs where verification disagreed', or 'sort by citation failures to find unreliable runs'.
 >
 > **Inside a single trace**: You see a tree of nested spans that mirrors exactly how the code executed:
 >
@@ -187,7 +187,7 @@
 >
 > **For every SQL execution**: you see the exact query text and the result rows. This is the audit trail -- every number in an insight traces back to one of these `recordQuery` spans.
 >
-> **Failed attempts are kept.** If SQL generation took 2 retries, you see `sql_attempt_1` (error), `sql_attempt_2` (success). The `self_heal_attempts` score tells you how many tries it took. This is evidence the self-healing loop works.
+> **Failed attempts are kept.** If SQL generation took 2 retries, you see `sql_attempt_1` (error), `sql_attempt_2` (success). The `sql_attempts_total` score tells you how many tries it took across the run -- `self_heal_attempts` is the Instrumentation Agent's equivalent for a DDL that had to be redesigned. This is evidence the self-healing loop works.
 >
 > The key value of Langfuse here: **if a PM says 'this number looks wrong', you open the trace, find the narration span, trace back to the SQL span, see the exact query, see the exact rows, and know in 30 seconds whether the number came from the data or was hallucinated.** That's the whole point."
 
@@ -203,7 +203,7 @@
 >
 > For **JSON output**: everything is parsed through Zod schemas. Malformed output triggers a retry with the verbatim parse error.
 >
-> All of this is visible in Langfuse. Failed attempts are **kept as spans**, not deleted. The `self_heal_attempts` score counts how many tries it took. You can sort by this score in the dashboard to find runs where healing was needed and audit what went wrong."
+> All of this is visible in Langfuse. Failed attempts are **kept as spans**, not deleted. `sql_attempts_total` counts the tries on the analytics side, `self_heal_attempts` the ones on the instrumentation side. You can sort by either score in the dashboard to find runs where healing was needed and audit what went wrong."
 
 ---
 
@@ -262,7 +262,7 @@
 >
 > One caveat we document: rows are events, and multiple events can come from one user, so trials aren't fully independent. The real uncertainty is a little wider than Wilson suggests. We note this as a lower bound.
 >
-> The half-width of the widest interval is recorded as the Langfuse score `precision_half_width_pp` -- so you can sort all runs by interval width."
+> The half-width of the **tightest** interval is recorded as the Langfuse score `precision_half_width_pp` -- that is the precision of the figure the answer actually leads with, so sorting runs by it sorts them by how firm their headline was. The wider tails still cost the answer confidence; they are just not what this score reports."
 
 ---
 
@@ -294,13 +294,15 @@
 
 ### Q11: "What model are you using and why?"
 
-> "Claude Sonnet 5 via the Anthropic API. We chose Claude for three reasons:
+> "The provider is a configuration choice, not an assumption baked into the code. `/api/health` reports which one resolved. Three backends are supported behind one interface: **Gemini over the OpenAI-compatible endpoint** (the default here, `gemini-3.1-flash-lite`), the **Anthropic API** (`claude-sonnet-5`), and the **Claude Code OAuth** path. Whichever key is present wins, in that order; `LLM_PROVIDER` overrides it.
 >
-> 1. **Structured output reliability** -- every LLM call returns JSON parsed through a Zod schema. Claude has the best adherence to strict output formats in our testing.
+> We run Gemini for this demo for one honest reason: it is fast and free, and the pipeline makes 5-7 calls per question. Nothing in the design depends on it --
+>
+> 1. **Structured output reliability** -- every LLM call returns JSON parsed through a Zod schema, so a model that drifts is caught rather than trusted.
 > 2. **Strong SQL generation** -- particularly for ClickHouse-specific syntax (codecs, ordering keys, LowCardinality, ReplacingMergeTree).
-> 3. **Multi-section prompt following** -- the Analytics Agent's narration prompt has six distinct sections. Claude reliably fills all of them without merging or skipping.
+> 3. **Multi-section prompt following** -- the Analytics Agent's narration prompt has six distinct sections, and each is schema-checked.
 >
-> We pin effort to `medium` -- our prompts are tightly specified and schema-validated, so extended thinking isn't needed and would just add latency.
+> Reasoning effort defaults to `low` on Gemini and is unset elsewhere. That is measured, not guessed: at `none` the coupon question answered 30.3% and the independent verification query disagreed; at `low` it answered 27.6% and the verifier reproduced it to the digit. Thinking is worth about ten seconds a question here.
 >
 > Every LLM call is recorded as a **Langfuse generation** -- full prompt, completion, token count, cost. So we can audit any model decision and track token costs across all runs."
 
@@ -311,7 +313,7 @@
 > "Three scenarios:
 >
 > - **Spec to live tables**: ~30 seconds (profiling, DDL design with ClickHouse best practices, EXPLAIN AST dry-run, execution, data load, row count verification)
-> - **Question to cited insight**: ~15 seconds (planning, SQL execution against ClickHouse, verification, narration, citation check)
+> - **Question to cited insight**: typically **45-90 seconds**, and variable -- we have measured 22 s to 5 min on the same question (planning, SQL execution against ClickHouse, verification, narration, citation check). The spread is the free-tier provider, not the pipeline: 503 "high demand" responses and rate-limit backoff dominate it, and the Langfuse trace shows exactly which call waited
 > - **Cached repeat question**: ~0.6 seconds (single ClickHouse SELECT from `insight_cache` + JSON parse)
 >
 > The bottleneck is LLM calls -- we run them concurrently wherever possible (independent SQL tasks, verification parallel with narration, knowledge lookup parallel with precision). The ClickHouse queries themselves are fast -- typically under 200ms.
@@ -343,7 +345,7 @@
 > 4. **`scoreRun(ctx, name, value, comment)`** -- attaches numeric scores to the trace
 > 5. **`startRun(name, input, opts)`** -- creates the root trace with session grouping
 >
-> We record **13 numeric scores** per analytics run: `cache_hit`, `analytics_tasks`, `sql_attempts_total`, `digests_computed`, `digest_failures`, `rows_analyzed_total`, `sanity_flags`, `citation_failures`, `quality_gate_passed`, `verification_agreed`, `precision_half_width_pp`, `confidence_computed`, and `rows_listed`. These show up as sortable columns in the Langfuse dashboard.
+> We record **14 numeric scores** per analytics run: `cache_hit`, `analytics_tasks`, `sql_attempts_total`, `digests_computed`, `digest_failures`, `rows_analyzed_total`, `sanity_flags`, `dropped_tasks`, `citation_failures`, `quality_gate_passed`, `verification_agreed`, `precision_half_width_pp`, `confidence_computed`, and `confidence_score`. These show up as sortable columns in the Langfuse dashboard.
 >
 > The result: every number in an insight traces backward through the Langfuse tree -- narration span to SQL span to query text to ClickHouse result to verified by an independent query. A wrong number is findable in 30 seconds. Failed attempts are kept as evidence, not deleted. This is what makes the system auditable."
 

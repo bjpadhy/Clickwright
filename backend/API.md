@@ -399,9 +399,12 @@ analytics                  (wrapper)
   plan                     → ≤4 tasks
   task_<id>                ONE PER TASK, RUN CONCURRENTLY — events interleave, so
     sql_attempt_N          group children by their task_<id> parent
-    digest_<id>            only when the result exceeds the 24 rows the narrator
-                           reads: profiles EVERY row of it in ClickHouse. Its
-                           absence means the narrator saw the result in full.
+    digest_<id>            on ANY result with more than one row: profiles EVERY
+                           row of it in ClickHouse, which is where the
+                           whole-population figure comes from. Its absence means
+                           a single-row result, not that the rows were few. At 24
+                           rows or fewer the extremes queries are skipped (the
+                           rows are all shown anyway), but the profile still runs.
   sanity_gate              what was dropped/flagged and why
   context_lookup           known issues that might explain an anomaly
   narrate_attempt_N        N>1 means the citation check rejected a number
@@ -484,6 +487,15 @@ export interface ChatMessage {
   traceUrl?: string;             // role=agent
 }
 ```
+
+**Two degraded `Insight` shapes.** Both are well-formed `Insight` objects, not
+errors — the SSE stream still ends in `insight` then `done`, and neither is
+written to `insight_cache`.
+
+| headline | when | what it carries |
+|---|---|---|
+| `"No data matches this question."` | every task ran and every one returned no usable cell | `sql[]` with the queries and `rowCount: 0`, `confidence.score` at the 0.05 floor, `verification: null`. `whyItHappens` says whether nothing survived the sanity gate or the filters selected an empty set. Returned before narration is attempted, so no LLM call is spent discovering there is nothing to cite. |
+| `"The queries ran, but the summary could not be written."` | the queries succeeded but no narration passed | `sql[]`, the rows and `precision[]` are all real and present; only the prose is missing. `whyItHappens` names the ACTUAL failure — uncited figures (with the offending numbers listed) or the provider being unreachable — because reporting a rate-limited model as a failed citation check is the same class of lie this pass exists to remove. |
 
 **Confidence is computed, not claimed.** The model no longer rates its own answer.
 The score is a **sum of named signals**: it starts at 1, every measurement that
@@ -681,6 +693,11 @@ The global `contextVersion` is **derived**, not stored: one run writes one batch
 of `context_store` rows sharing a `run_id`, batches are ordered by time, and
 batch 0 (the `base_context.md` seed) is `v1.0`. `reset-spec.ts` deletes a run's
 context rows, which renumbers later versions — don't cache these across a reset.
+
+The response is capped at the 300 most recent context batches and the 500 most
+recent runs. When either cap bites, the response carries
+`X-Changelog-Truncated: true` — the list is still newest-first and correct, just not
+the whole history.
 
 ## [LIVE] GET /api/observe/changelog/export
 
